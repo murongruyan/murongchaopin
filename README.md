@@ -38,7 +38,7 @@
 请查看 [update.json](https://raw.githubusercontent.com/murongruyan/murongchaopin/main/update.json) 获取最新版本信息。
 
 ## 开源协议
-本项目采用 [MIT License](LICENSE) 开源。
+本项目采用 [GPL 3.0 License](LICENSE) 开源。
 
 ## 作者
 - **慕容茹艳**（酷安 @慕容雪绒）
