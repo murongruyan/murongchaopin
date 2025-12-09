@@ -36,12 +36,12 @@ if exist bin\unpack_dtbo (
 )
 
 echo.
-echo Building refresh_monitor.c...
-%CLANG% %FLAGS% -o refresh_monitor refresh_monitor.c
-if exist bin\refresh_monitor (
-    echo refresh_monitor Built Successfully!
+echo Building rate_daemon...
+%CLANG% %FLAGS% -o rate_daemon src\rate_daemon.c
+if exist bin\rate_daemon (
+    echo rate_daemon Built Successfully!
 ) else (
-    echo refresh_monitor Build FAILED!
+    echo rate_daemon Build FAILED!
 )
 
 echo.
