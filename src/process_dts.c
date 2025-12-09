@@ -56,13 +56,6 @@ void process_file(const char *filename) {
     char line[MAX_LINE];
     int in_panel = 0;
     int panel_depth = 0;
-    
-    // 用于保存60Hz的cell-index
-    char cell_index_60[64] = "";
-    // 用于保存144Hz的内容 (以防60Hz在144Hz之后出现)
-    char content_144[MAX_BLOCK] = "";
-    // 标记是否已经生成过60Hz节点，防止重复生成
-    int generated_60hz = 0;
 
     while (fgets(line, sizeof(line), in)) {
         // 检查是否进入指定的panel块
@@ -89,66 +82,6 @@ void process_file(const char *filename) {
             in_panel = 0;
             fputs(line, out);
             continue;
-        }
-
-        // 检查 timing@wqhd_sdc_60 (删除并记录index)
-        if (strstr(line, "timing@wqhd_sdc_60 {")) {
-            printf("Found 60Hz node, removing and saving index...\n");
-            
-            char timing_line[MAX_LINE];
-            int timing_depth = 1;
-
-            while (fgets(timing_line, sizeof(timing_line), in)) {
-                // Extract cell-index
-                char *idx_ptr = strstr(timing_line, "cell-index = <");
-                if (idx_ptr) {
-                    char *end_ptr = strstr(idx_ptr, ">;");
-                    if (end_ptr) {
-                        size_t len = end_ptr - idx_ptr + 2;
-                        if (len < sizeof(cell_index_60)) {
-                            strncpy(cell_index_60, idx_ptr, len);
-                            cell_index_60[len] = '\0';
-                        }
-                    }
-                }
-
-                if (strstr(timing_line, "{")) {
-                    timing_depth++;
-                } else if (strstr(timing_line, "}")) {
-                    timing_depth--;
-                }
-
-                if (timing_depth == 0 && strstr(timing_line, "};")) {
-                    break;
-                }
-            }
-
-            // 如果已经读取过144Hz的内容，则在这里生成新的60Hz节点
-            if (strlen(content_144) > 0 && !generated_60hz) {
-                char new_60[MAX_BLOCK];
-                strcpy(new_60, content_144);
-                
-                replace_str(new_60, "timing@wqhd_sdc_144 {", "timing@wqhd_sdc_60 {");
-                
-                // 查找144Hz中的cell-index并替换为60Hz的
-                char *idx_144_start = strstr(content_144, "cell-index = <");
-                if (idx_144_start) {
-                    char *idx_144_end = strstr(idx_144_start, ">;");
-                    if (idx_144_end) {
-                         char orig_index_str[64];
-                         size_t len = idx_144_end - idx_144_start + 2;
-                         strncpy(orig_index_str, idx_144_start, len);
-                         orig_index_str[len] = '\0';
-                         replace_str(new_60, orig_index_str, cell_index_60);
-                    }
-                }
-                
-                replace_str(new_60, "qcom,mdss-dsi-panel-framerate = <0x90>;", "qcom,mdss-dsi-panel-framerate = <0x3c>;");
-                fputs(new_60, out);
-                fputs("\n", out);
-                generated_60hz = 1;
-            }
-            continue; // Skip writing original 60Hz to output
         }
 
         // 检查 timing@wqhd_sdc_120
@@ -215,34 +148,6 @@ void process_file(const char *filename) {
                 if (timing_depth == 0 && strstr(timing_line, "};")) {
                     break;
                 }
-            }
-            
-            // 保存144Hz的内容，供60Hz逻辑使用
-            strcpy(content_144, timing_content);
-
-            // 如果之前已经遇到了60Hz节点（记录了index），则现在生成新的60Hz节点
-            if (strlen(cell_index_60) > 0 && !generated_60hz) {
-                 char new_60[MAX_BLOCK];
-                strcpy(new_60, timing_content);
-                
-                replace_str(new_60, "timing@wqhd_sdc_144 {", "timing@wqhd_sdc_60 {");
-                
-                char *idx_144_start = strstr(timing_content, "cell-index = <");
-                if (idx_144_start) {
-                    char *idx_144_end = strstr(idx_144_start, ">;");
-                    if (idx_144_end) {
-                         char orig_index_str[64];
-                         size_t len = idx_144_end - idx_144_start + 2;
-                         strncpy(orig_index_str, idx_144_start, len);
-                         orig_index_str[len] = '\0';
-                         replace_str(new_60, orig_index_str, cell_index_60);
-                    }
-                }
-                
-                replace_str(new_60, "qcom,mdss-dsi-panel-framerate = <0x90>;", "qcom,mdss-dsi-panel-framerate = <0x3c>;");
-                fputs(new_60, out);
-                fputs("\n", out);
-                generated_60hz = 1;
             }
 
             fputs("\n", out);
