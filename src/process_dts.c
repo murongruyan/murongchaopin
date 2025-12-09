@@ -61,17 +61,14 @@ void process_file(const char *filename) {
     char cell_index_60[64] = "";
     // 用于保存144Hz的内容 (以防60Hz在144Hz之后出现)
     char content_144[MAX_BLOCK] = "";
+    // 标记是否已经生成过60Hz节点，防止重复生成
+    int generated_60hz = 0;
 
     while (fgets(line, sizeof(line), in)) {
-        // 检查是否进入指定的panel块 (支持 dvt02 和 dvt03)
-        if (strstr(line, "qcom,mdss_dsi_panel_AE084_P_3_A0033_dsc_cmd_dvt0") && strstr(line, " {")) {
+        // 检查是否进入指定的panel块
+        if (strstr(line, "qcom,mdss_dsi_panel_AE084_P_3_A0033_dsc_cmd_dvt02 {")) {
             in_panel = 1;
             panel_depth = 1;
-            
-            // 重置状态变量，防止跨Panel污染
-            strcpy(cell_index_60, "");
-            strcpy(content_144, "");
-            
             fputs(line, out);
             continue;
         }
@@ -127,7 +124,7 @@ void process_file(const char *filename) {
             }
 
             // 如果已经读取过144Hz的内容，则在这里生成新的60Hz节点
-            if (strlen(content_144) > 0) {
+            if (strlen(content_144) > 0 && !generated_60hz) {
                 char new_60[MAX_BLOCK];
                 strcpy(new_60, content_144);
                 
@@ -149,6 +146,7 @@ void process_file(const char *filename) {
                 replace_str(new_60, "qcom,mdss-dsi-panel-framerate = <0x90>;", "qcom,mdss-dsi-panel-framerate = <0x3c>;");
                 fputs(new_60, out);
                 fputs("\n", out);
+                generated_60hz = 1;
             }
             continue; // Skip writing original 60Hz to output
         }
@@ -223,7 +221,7 @@ void process_file(const char *filename) {
             strcpy(content_144, timing_content);
 
             // 如果之前已经遇到了60Hz节点（记录了index），则现在生成新的60Hz节点
-            if (strlen(cell_index_60) > 0) {
+            if (strlen(cell_index_60) > 0 && !generated_60hz) {
                  char new_60[MAX_BLOCK];
                 strcpy(new_60, timing_content);
                 
@@ -244,6 +242,7 @@ void process_file(const char *filename) {
                 replace_str(new_60, "qcom,mdss-dsi-panel-framerate = <0x90>;", "qcom,mdss-dsi-panel-framerate = <0x3c>;");
                 fputs(new_60, out);
                 fputs("\n", out);
+                generated_60hz = 1;
             }
 
             fputs("\n", out);
