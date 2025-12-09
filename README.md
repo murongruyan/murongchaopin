@@ -45,6 +45,8 @@
 
 ## 致谢
 感谢所有为本项目提供测试和建议的朋友。
+- **酷安穆远星**（http://www.coolapk.com/u/28719807）
+- **GitHub开源项目**（https://github.com/KOWX712/Tricky-Addon-Update-Target-List）
 - **酷安大肥鱼** (http://www.coolapk.com/u/951790)
 - **酷安望月古川** (http://www.coolapk.com/u/843974)
 - **qq傻瓜我爱你呀** (QQ: 3844041986)
