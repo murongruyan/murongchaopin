@@ -1,22 +1,57 @@
+/*
+ * Process DTS Tool
+ * 
+ * Modifications for 1080p DPI Flickering Fix & LTPO Stability:
+ * 1. Automatic Clock Calculation:
+ *    - Formula: New_Clock = Base_Clock * (Target_FPS / Base_FPS)
+ *    - Applied to 123Hz and 150-180Hz modes.
+ * 
+ * 2. LTPO Fix for 60Hz (FHD/WQHD):
+ *    - Issue: DPI flickering at 1080p 60Hz.
+ *    - Fix: Use high-refresh rate (144Hz) config as a template.
+ *    - Process:
+ *      a) Find 144Hz template.
+ *      b) Copy template to replace 60Hz node.
+ *      c) Apply original 60Hz cell-index.
+ *      d) Auto-calculate clock and transfer time for 60Hz based on template.
+ *      e) Force framerate to 60.
+ * 
+ * 3. Dynamic Node Generation:
+ *    - Generates 123Hz from 120Hz.
+ *    - Generates 150Hz-180Hz from 144Hz.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <ctype.h>
 
 #define MAX_LINE 4096
-#define MAX_BLOCK 65536
+#define MAX_BLOCK 131072 // 128KB buffer for blocks
 #define DIR_NAME "dtbo_dts"
 
-// 检查是否是普通文件
+// Structure to hold timing node info
+typedef struct {
+    char name[128];
+    char content[MAX_BLOCK];
+    unsigned long long clock;
+    unsigned int fps;
+    unsigned int transfer_time;
+    unsigned int cell_index;
+    int valid;
+} TimingNode;
+
+// Check if regular file
 int is_regular_file(const char *path) {
     struct stat path_stat;
     stat(path, &path_stat);
     return S_ISREG(path_stat.st_mode);
 }
 
-// 简单的字符串替换函数 (只替换第一次出现)
+// Simple string replacement (first occurrence)
 void replace_str(char *str, const char *orig, const char *rep) {
     char buffer[MAX_BLOCK];
     char *p;
@@ -31,212 +66,353 @@ void replace_str(char *str, const char *orig, const char *rep) {
     strcpy(str, buffer);
 }
 
-// 处理单个文件
+// Extract hex/int property value (e.g., <0x123> or <123>)
+unsigned long long get_prop_u64(const char *content, const char *prop_name) {
+    char search_str[256];
+    sprintf(search_str, "%s =", prop_name);
+    char *p = strstr(content, search_str);
+    if (!p) return 0;
+    
+    p = strchr(p, '<');
+    if (!p) return 0;
+    p++; // skip <
+    
+    unsigned long long val = 0;
+    // Handle hex and decimal
+    while(isspace(*p)) p++;
+    
+    if (strstr(p, "0x") == p || strstr(p, "0X") == p) {
+        sscanf(p, "%llx", &val);
+    } else {
+        sscanf(p, "%lld", &val);
+    }
+    return val;
+}
+
+// Helper to update a property in the content string
+void update_prop_u64(char *content, const char *prop_name, unsigned long long new_val) {
+    unsigned long long old_val = get_prop_u64(content, prop_name);
+    if (old_val == 0 && new_val != 0) {
+        // Property might not exist or be 0, hard to replace without regex logic to find the line.
+        // For simplicity, we assume the property exists if we are updating it.
+        // If it returns 0, maybe it really is 0 or parse failed.
+        // Try to find the line anyway.
+    }
+    
+    char search_str[256];
+    sprintf(search_str, "%s =", prop_name);
+    char *p = strstr(content, search_str);
+    if (!p) return;
+    
+    char *start = strchr(p, '<');
+    char *end = strchr(p, '>');
+    if (!start || !end) return;
+    
+    char old_str[64];
+    int len = end - start + 1;
+    if (len > 63) len = 63;
+    strncpy(old_str, start, len);
+    old_str[len] = '\0';
+    
+    char new_str[64];
+    sprintf(new_str, "<0x%llx>", new_val);
+    
+    replace_str(content, old_str, new_str);
+}
+
+// Process single file
 void process_file(const char *filename) {
     char input_path[512];
     snprintf(input_path, sizeof(input_path), "%s/%s", DIR_NAME, filename);
 
-    printf("正在处理文件: %s\n", input_path);
+    printf("Processing file: %s\n", input_path);
 
     FILE *in = fopen(input_path, "r");
     if (!in) {
-        perror("无法打开文件");
+        perror("Cannot open file");
         return;
     }
+
+    // Read entire file into memory (assuming it fits, DTS are usually small < 1MB)
+    fseek(in, 0, SEEK_END);
+    long fsize = ftell(in);
+    fseek(in, 0, SEEK_SET);
+
+    char *buffer = malloc(fsize + 1);
+    if (!buffer) {
+        perror("Memory allocation failed");
+        fclose(in);
+        return;
+    }
+    fread(buffer, 1, fsize, in);
+    buffer[fsize] = 0;
+    fclose(in);
 
     char temp_path[512];
     snprintf(temp_path, sizeof(temp_path), "%s/%s.tmp", DIR_NAME, filename);
     FILE *out = fopen(temp_path, "w");
     if (!out) {
-        perror("无法创建临时文件");
-        fclose(in);
+        perror("Cannot create temp file");
+        free(buffer);
         return;
     }
 
-    char line[MAX_LINE];
-    int in_panel = 0;
-    int panel_depth = 0;
-
-    while (fgets(line, sizeof(line), in)) {
-        // 检查是否进入指定的panel块
-        if (strstr(line, "qcom,mdss_dsi_panel_AE084_P_3_A0033_dsc_cmd_dvt02 {")) {
-            in_panel = 1;
-            panel_depth = 1;
-            fputs(line, out);
-            continue;
+    // Pass 1: Find Templates (WQHD 144Hz, FHD 120/144Hz)
+    TimingNode template_wqhd = {0};
+    TimingNode template_fhd = {0};
+    
+    // Simple parsing to find templates
+    // We assume standard indentation: "timing@... {"
+    
+    char *p = buffer;
+    while ((p = strstr(p, "timing@"))) {
+        char *block_start = p;
+        char *block_end = strchr(block_start, '}');
+        if (!block_end) break;
+        block_end = strchr(block_end, ';'); // };
+        if (!block_end) break;
+        block_end++; // Include ;
+        
+        int len = block_end - block_start;
+        if (len >= MAX_BLOCK) { p++; continue; }
+        
+        char node_name[128];
+        sscanf(block_start, "%127s", node_name);
+        // Clean name (remove {)
+        char *brace = strchr(node_name, '{');
+        if (brace) *brace = 0;
+        
+        // Check for WQHD 144
+        if (strstr(node_name, "wqhd_sdc_144")) {
+            strncpy(template_wqhd.content, block_start, len);
+            template_wqhd.content[len] = 0;
+            template_wqhd.clock = get_prop_u64(template_wqhd.content, "qcom,mdss-dsi-panel-clockrate");
+            template_wqhd.fps = get_prop_u64(template_wqhd.content, "qcom,mdss-dsi-panel-framerate");
+            template_wqhd.transfer_time = get_prop_u64(template_wqhd.content, "qcom,mdss-mdp-transfer-time-us");
+            template_wqhd.valid = 1;
+            printf("Found WQHD Template: %s (Clock: 0x%llx)\n", node_name, template_wqhd.clock);
         }
-
-        if (in_panel == 0) {
-            fputs(line, out);
-            continue;
+        
+        // Check for FHD (Prioritize 144, then 120)
+        if (strstr(node_name, "fhd_sdc_144") || strstr(node_name, "fhd_sdc_120")) {
+             // If we already have a FHD template, only overwrite if this one is higher refresh rate
+             // Actually, usually 144 > 120.
+             int current_fps = get_prop_u64(block_start, "qcom,mdss-dsi-panel-framerate");
+             if (current_fps > template_fhd.fps) {
+                 strncpy(template_fhd.content, block_start, len);
+                 template_fhd.content[len] = 0;
+                 template_fhd.clock = get_prop_u64(template_fhd.content, "qcom,mdss-dsi-panel-clockrate");
+                 template_fhd.fps = current_fps;
+                 template_fhd.transfer_time = get_prop_u64(template_fhd.content, "qcom,mdss-mdp-transfer-time-us");
+                 template_fhd.valid = 1;
+                 printf("Found FHD Template: %s (FPS: %d)\n", node_name, template_fhd.fps);
+             }
         }
-
-        // 在panel块中，精确跟踪深度
-        if (strstr(line, "{")) {
-            panel_depth++;
-        } else if (strstr(line, "}")) {
-            panel_depth--;
-        }
-
-        if (panel_depth == 0 && strstr(line, "}")) {
-            in_panel = 0;
-            fputs(line, out);
-            continue;
-        }
-
-        // 检查 timing@wqhd_sdc_120
-        if (strstr(line, "timing@wqhd_sdc_120 {")) {
-            fputs(line, out); // 输出原始行
-
-            // 读取整个timing块
-            char timing_content[MAX_BLOCK];
-            strcpy(timing_content, line);
-            
-            char timing_line[MAX_LINE];
-            int timing_depth = 1;
-
-            while (fgets(timing_line, sizeof(timing_line), in)) {
-                strcat(timing_content, timing_line);
-                fputs(timing_line, out); // 输出原始内容
-
-                if (strstr(timing_line, "{")) {
-                    timing_depth++;
-                } else if (strstr(timing_line, "}")) {
-                    timing_depth--;
-                }
-
-                if (timing_depth == 0 && strstr(timing_line, "};")) {
-                    break;
-                }
-            }
-            
-            fputs("\n", out); // 空行
-
-            // 创建123版本
-            char new_123[MAX_BLOCK];
-            strcpy(new_123, timing_content);
-            replace_str(new_123, "timing@wqhd_sdc_120 {", "timing@wqhd_sdc_123 {");
-            replace_str(new_123, "cell-index = <0x0>;", "cell-index = <0x8>;");
-            replace_str(new_123, "qcom,mdss-dsi-panel-clockrate = <0x568bc300>;", "qcom,mdss-dsi-panel-clockrate = <0x5a68d300>;");
-            replace_str(new_123, "qcom,mdss-dsi-panel-framerate = <0x78>;", "qcom,mdss-dsi-panel-framerate = <0x7b>;");
-            
-            fputs(new_123, out);
-            fputs("\n", out);
-            continue;
-        }
-
-        // 检查 timing@wqhd_sdc_144
-        if (strstr(line, "timing@wqhd_sdc_144 {")) {
-            fputs(line, out);
-
-            char timing_content[MAX_BLOCK];
-            strcpy(timing_content, line);
-            
-            char timing_line[MAX_LINE];
-            int timing_depth = 1;
-
-            while (fgets(timing_line, sizeof(timing_line), in)) {
-                strcat(timing_content, timing_line);
-                fputs(timing_line, out);
-
-                if (strstr(timing_line, "{")) {
-                    timing_depth++;
-                } else if (strstr(timing_line, "}")) {
-                    timing_depth--;
-                }
-
-                if (timing_depth == 0 && strstr(timing_line, "};")) {
-                    break;
-                }
-            }
-
-            fputs("\n", out);
-
-            // 定义频率和对应的cell-index
-            int freqs[] = {150, 155, 160, 165, 170, 175, 180};
-            const char *indexes[] = {"0x9", "0x10", "0x11", "0x12", "0x13", "0x14", "0x15"};
-            
-            // 基础参数 (144Hz)
-            unsigned long long base_clock = 0x568bc300;
-            unsigned int base_transfer_time = 0x1a90; // 6800 us
-
-            for (int i = 0; i < 7; i++) {
-                int freq = freqs[i];
-                
-                // 计算新的时钟频率
-                unsigned long long new_clock = base_clock * freq / 144;
-                char clock_hex[32];
-                sprintf(clock_hex, "0x%llx", new_clock);
-                
-                // 计算新的 Framerate (hex)
-                char freq_hex[32];
-                sprintf(freq_hex, "0x%x", freq);
-
-                // 计算新的 Transfer Time
-                // 公式: time = base_time * base_freq / new_freq
-                unsigned int new_transfer_time = base_transfer_time * 144 / freq;
-                char transfer_time_hex[32];
-                sprintf(transfer_time_hex, "0x%x", new_transfer_time);
-
-                char new_content[MAX_BLOCK];
-                strcpy(new_content, timing_content);
-                
-                char replace_str_buf[64];
-                
-                // Replace name
-                sprintf(replace_str_buf, "timing@wqhd_sdc_%d {", freq);
-                replace_str(new_content, "timing@wqhd_sdc_144 {", replace_str_buf);
-                
-                // Replace cell-index
-                sprintf(replace_str_buf, "cell-index = <%s>;", indexes[i]);
-                replace_str(new_content, "cell-index = <0x3>;", replace_str_buf);
-                
-                // Replace clockrate
-                sprintf(replace_str_buf, "qcom,mdss-dsi-panel-clockrate = <%s>;", clock_hex);
-                replace_str(new_content, "qcom,mdss-dsi-panel-clockrate = <0x568bc300>;", replace_str_buf);
-                
-                // Replace framerate
-                sprintf(replace_str_buf, "qcom,mdss-dsi-panel-framerate = <%s>;", freq_hex);
-                replace_str(new_content, "qcom,mdss-dsi-panel-framerate = <0x90>;", replace_str_buf);
-
-                // Replace transfer-time (Added as per request)
-                // 只有当原文包含该行时才会替换
-                sprintf(replace_str_buf, "qcom,mdss-mdp-transfer-time-us = <%s>;", transfer_time_hex);
-                replace_str(new_content, "qcom,mdss-mdp-transfer-time-us = <0x1a90>;", replace_str_buf);
-                
-                fputs(new_content, out);
-                fputs("\n", out);
-            }
-            continue;
-        }
-
-        fputs(line, out);
+        
+        p = block_end;
     }
 
-    fclose(in);
+    // Pass 2: Process and Write
+    p = buffer;
+    char *cursor = buffer;
+    
+    while ((p = strstr(cursor, "timing@"))) {
+        // Write everything before this block
+        fwrite(cursor, 1, p - cursor, out);
+        
+        char *block_start = p;
+        char *block_end = strchr(block_start, '}');
+        if (!block_end) { cursor = p + 1; continue; } // Should not happen
+        block_end = strchr(block_end, ';');
+        if (!block_end) { cursor = p + 1; continue; }
+        block_end++;
+        
+        int block_len = block_end - block_start;
+        char current_block[MAX_BLOCK];
+        if (block_len >= MAX_BLOCK) {
+            // Too large, just write it
+            fwrite(block_start, 1, block_len, out);
+            cursor = block_end;
+            continue;
+        }
+        
+        strncpy(current_block, block_start, block_len);
+        current_block[block_len] = 0;
+        
+        char node_name[128];
+        sscanf(current_block, "%127s", node_name);
+        char *brace = strchr(node_name, '{');
+        if (brace) *brace = 0;
+        
+        // Logic Dispatch
+        
+        // 1. LTPO Fix for 60Hz (WQHD)
+        if (strstr(node_name, "wqhd_sdc_60") && template_wqhd.valid) {
+            printf("Applying LTPO Fix to %s\n", node_name);
+            unsigned int orig_idx = get_prop_u64(current_block, "cell-index");
+            
+            // Start with template
+            char new_block[MAX_BLOCK];
+            strcpy(new_block, template_wqhd.content);
+            
+            // Replace name
+            char template_name[128];
+            sscanf(template_wqhd.content, "%127s", template_name); // Get template name e.g. timing@wqhd_sdc_144
+            replace_str(new_block, template_name, "timing@wqhd_sdc_60 {"); // Be careful with braces
+            // Or better: regex-like replacement for "timing@... {"
+            // replace_str handles first occurrence
+            
+            // Calculate new params
+            unsigned long long new_clock = template_wqhd.clock * 60 / template_wqhd.fps;
+            unsigned int new_transfer = template_wqhd.transfer_time * template_wqhd.fps / 60;
+            
+            update_prop_u64(new_block, "qcom,mdss-dsi-panel-clockrate", new_clock);
+            update_prop_u64(new_block, "qcom,mdss-dsi-panel-framerate", 60); // Force 60 (0x3C)
+            update_prop_u64(new_block, "qcom,mdss-mdp-transfer-time-us", new_transfer);
+            update_prop_u64(new_block, "cell-index", orig_idx); // Restore original index
+            
+            fputs(new_block, out);
+            fputs("\n", out);
+        }
+        // 2. LTPO Fix for 60Hz (FHD) - "1080p DPI Fix"
+        else if (strstr(node_name, "fhd_sdc_60") && template_fhd.valid) {
+            printf("Applying LTPO Fix to %s\n", node_name);
+            unsigned int orig_idx = get_prop_u64(current_block, "cell-index");
+            
+            char new_block[MAX_BLOCK];
+            strcpy(new_block, template_fhd.content);
+            
+            char template_name[128];
+            sscanf(template_fhd.content, "%127s", template_name);
+            replace_str(new_block, template_name, "timing@fhd_sdc_60 {");
+            
+            unsigned long long new_clock = template_fhd.clock * 60 / template_fhd.fps;
+            unsigned int new_transfer = template_fhd.transfer_time * template_fhd.fps / 60;
+            
+            update_prop_u64(new_block, "qcom,mdss-dsi-panel-clockrate", new_clock);
+            update_prop_u64(new_block, "qcom,mdss-dsi-panel-framerate", 60);
+            update_prop_u64(new_block, "qcom,mdss-mdp-transfer-time-us", new_transfer);
+            update_prop_u64(new_block, "cell-index", orig_idx);
+            
+            fputs(new_block, out);
+            fputs("\n", out);
+        }
+        // 3. WQHD 120Hz -> Add 123Hz (Auto Calc)
+        else if (strstr(node_name, "wqhd_sdc_120")) {
+            // Write original
+            fputs(current_block, out);
+            fputs("\n", out);
+            
+            // Generate 123Hz
+            printf("Generating 123Hz node...\n");
+            char new_block[MAX_BLOCK];
+            strcpy(new_block, current_block);
+            
+            replace_str(new_block, "timing@wqhd_sdc_120 {", "timing@wqhd_sdc_123 {");
+            
+            unsigned long long base_clock = get_prop_u64(current_block, "qcom,mdss-dsi-panel-clockrate");
+            unsigned int base_fps = get_prop_u64(current_block, "qcom,mdss-dsi-panel-framerate");
+            // If base_fps is 0 or crazy, assume 120
+            if (base_fps < 110 || base_fps > 130) base_fps = 120;
+            
+            // Target 123Hz
+            int target_fps = 123;
+            unsigned long long new_clock = base_clock * target_fps / base_fps;
+            // Also scale transfer time if present
+            unsigned int base_transfer = get_prop_u64(current_block, "qcom,mdss-mdp-transfer-time-us");
+            unsigned int new_transfer = 0;
+            if (base_transfer > 0) new_transfer = base_transfer * base_fps / target_fps;
+            
+            update_prop_u64(new_block, "qcom,mdss-dsi-panel-clockrate", new_clock);
+            update_prop_u64(new_block, "qcom,mdss-dsi-panel-framerate", target_fps); // 0x7B
+            if (new_transfer > 0) update_prop_u64(new_block, "qcom,mdss-mdp-transfer-time-us", new_transfer);
+            
+            // Force cell-index 0x8 for 123Hz as per previous logic (or maybe keep original 120 index?)
+            // Previous code hardcoded 0x8. Let's keep it 0x8 to be safe or use original?
+            // User says "Automatic calculation", doesn't explicitly mention cell-index for 123.
+            // But previous code did `replace_str(..., "cell-index = <0x0>;", "cell-index = <0x8>;");`
+            // If original 120Hz has 0x0, we change to 0x8.
+            // Let's preserve this logic.
+            update_prop_u64(new_block, "cell-index", 0x8);
+            
+            fputs(new_block, out);
+            fputs("\n", out);
+        }
+        // 4. WQHD 144Hz -> Add 150-180Hz (Auto Calc)
+        else if (strstr(node_name, "wqhd_sdc_144")) {
+            // Write original
+            fputs(current_block, out);
+            fputs("\n", out);
+            
+            if (template_wqhd.valid) { // Should be valid if we are here
+                int freqs[] = {150, 155, 160, 165, 170, 175, 180};
+                int indexes[] = {0x9, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15};
+                
+                for (int i=0; i<7; i++) {
+                    int target_fps = freqs[i];
+                    printf("Generating %dHz node...\n", target_fps);
+                    
+                    char new_block[MAX_BLOCK];
+                    strcpy(new_block, template_wqhd.content);
+                    
+                    char header_old[128], header_new[128];
+                    sscanf(template_wqhd.content, "%127s", header_old); // timing@wqhd_sdc_144
+                    char *b = strchr(header_old, '{'); if(b) *b=0;
+                    sprintf(header_new, "timing@wqhd_sdc_%d {", target_fps);
+                    
+                    // Replace name
+                    // We need to be careful to replace only the header
+                    // But replace_str replaces first occurrence, which is the header.
+                    // The template content starts with "timing@wqhd_sdc_144 {"
+                    char header_old_full[128];
+                    sprintf(header_old_full, "%s {", header_old);
+                    replace_str(new_block, header_old_full, header_new);
+                    
+                    // Calculate
+                    unsigned long long new_clock = template_wqhd.clock * target_fps / template_wqhd.fps;
+                    unsigned int new_transfer = template_wqhd.transfer_time * template_wqhd.fps / target_fps;
+                    
+                    update_prop_u64(new_block, "qcom,mdss-dsi-panel-clockrate", new_clock);
+                    update_prop_u64(new_block, "qcom,mdss-dsi-panel-framerate", target_fps);
+                    update_prop_u64(new_block, "qcom,mdss-mdp-transfer-time-us", new_transfer);
+                    update_prop_u64(new_block, "cell-index", indexes[i]);
+                    
+                    fputs(new_block, out);
+                    fputs("\n", out);
+                }
+            }
+        }
+        else {
+            // Just write original
+            fputs(current_block, out);
+        }
+        
+        cursor = block_end;
+    }
+    
+    // Write remaining
+    fprintf(out, "%s", cursor);
+
+    free(buffer);
     fclose(out);
 
     if (rename(temp_path, input_path) != 0) {
-        perror("无法替换原文件");
-        // 如果rename失败（例如跨文件系统），尝试复制后删除
-        // 这里简化处理，直接报错
-    } else {
-        printf("文件 %s 处理完成\n", filename);
+        // Fallback for cross-device rename
+        char cmd[1024];
+        sprintf(cmd, "mv -f \"%s\" \"%s\"", temp_path, input_path);
+        system(cmd);
     }
 }
 
 int main() {
     DIR *d;
     struct dirent *dir;
-    
-    // 打开 dtbo_dts 目录
+
     d = opendir(DIR_NAME);
     if (d) {
         while ((dir = readdir(d)) != NULL) {
-            // 简单的后缀检查
             char *dot = strrchr(dir->d_name, '.');
             if (dot && strcmp(dot, ".dts") == 0) {
-                // 确保是普通文件（在某些系统上 d_type 可能不可用，最好用 stat）
                 char full_path[512];
                 snprintf(full_path, sizeof(full_path), "%s/%s", DIR_NAME, dir->d_name);
                 if (is_regular_file(full_path)) {
@@ -246,9 +422,9 @@ int main() {
         }
         closedir(d);
     } else {
-        printf("无法打开目录 %s (请确保先运行解包脚本)\n", DIR_NAME);
+        printf("Cannot open directory %s\n", DIR_NAME);
         return 1;
     }
-    printf("所有文件处理完成！\n");
+    printf("All files processed.\n");
     return 0;
 }
