@@ -15,10 +15,6 @@ DAEMON_BIN="$BIN_DIR/rate_daemon"
 mkdir -p "$(dirname "$CONFIG_FILE")"
 [ ! -f "$CONFIG_FILE" ] && echo "1" > "$CONFIG_FILE"
 
-restart_daemon() {
-    pkill -f "rate_daemon"
-    nohup "$DAEMON_BIN" "$MOD_PATH" > /dev/null 2>&1 &
-}
 
 case "$1" in
     "init_workspace")
@@ -237,7 +233,6 @@ case "$1" in
         chmod 666 "$CONFIG_FILE"
         
         echo "Success: Global mode set to $NEW_MODE"
-        restart_daemon
         ;;
 
     "set_app_config")
@@ -268,7 +263,6 @@ case "$1" in
         chmod 666 "$CONFIG_FILE"
         
         echo "Success: App config saved"
-        restart_daemon
         ;;
 
     "get_app_info")
