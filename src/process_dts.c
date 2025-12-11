@@ -73,32 +73,43 @@ unsigned long long get_prop_u64(const char *content, const char *prop_name) {
     char *p = strstr(content, search_str);
     if (!p) return 0;
     
-    p = strchr(p, '<');
-    if (!p) return 0;
-    p++; // skip <
+    // Safety: Ensure we find < before ; or }
+    char *end_stmt = strpbrk(p, ";}");
+    char *start = strchr(p, '<');
+    
+    if (!start) return 0;
+    if (end_stmt && start > end_stmt) return 0; // Found < but it's in next property
+    
+    start++; // skip <
     
     unsigned long long val = 0;
     // Handle hex and decimal
-    while(isspace(*p)) p++;
+    while(isspace(*start)) start++;
     
-    if (strstr(p, "0x") == p || strstr(p, "0X") == p) {
-        sscanf(p, "%llx", &val);
+    if (strstr(start, "0x") == start || strstr(start, "0X") == start) {
+        sscanf(start, "%llx", &val);
     } else {
-        sscanf(p, "%lld", &val);
+        sscanf(start, "%lld", &val);
     }
     return val;
 }
 
-// Helper to update a property in the content string (Safe In-Place Update)
 void update_prop_u64(char *content, const char *prop_name, unsigned long long new_val) {
     char search_str[256];
     sprintf(search_str, "%s =", prop_name);
     char *p = strstr(content, search_str);
     if (!p) return;
     
+    // Safety: Find ;
+    char *end_stmt = strchr(p, ';');
+    if (!end_stmt) return;
+    
     char *start = strchr(p, '<');
     char *end = strchr(p, '>');
+    
+    // Bounds check
     if (!start || !end) return;
+    if (start > end_stmt || end > end_stmt) return;
     
     // Construct new value string
     char new_str[64];
@@ -109,13 +120,193 @@ void update_prop_u64(char *content, const char *prop_name, unsigned long long ne
     // Shift memory if lengths differ
     int shift = new_len - old_len;
     if (shift != 0) {
-        // Check buffer bounds? We assume MAX_BLOCK is enough.
-        // memmove handles overlapping regions safely
         memmove(end + 1 + shift, end + 1, strlen(end + 1) + 1);
     }
     
     // Copy new value
     memcpy(start, new_str, new_len);
+}
+
+void update_prop_hex_or_str(char *content, const char *prop_name, unsigned long long new_val) {
+    char search_str[256];
+    sprintf(search_str, "%s =", prop_name);
+    char *p = strstr(content, search_str);
+    if (!p) return;
+
+    // Safety: Find ;
+    char *end_stmt = strchr(p, ';');
+    if (!end_stmt) return;
+
+    char *angle = strchr(p, '<');
+    char *quote = strchr(p, '"');
+    
+    // Must be before ;
+    if (angle && angle > end_stmt) angle = NULL;
+    if (quote && quote > end_stmt) quote = NULL;
+    
+    if (angle) {
+        update_prop_u64(content, prop_name, new_val);
+        return;
+    }
+    if (!quote) return;
+
+    char *endq = strchr(quote + 1, '"');
+    if (!endq || endq > end_stmt) return;
+
+    char new_str[64];
+    sprintf(new_str, "0x%llx", new_val);
+    int new_len = (int)strlen(new_str);
+    int old_len = endq - (quote + 1);
+    int shift = new_len - old_len;
+    if (shift != 0) {
+        memmove(endq + shift, endq, strlen(endq) + 1);
+    }
+    memcpy(quote + 1, new_str, new_len);
+}
+
+// Replaces the entire line containing prop_name with "prop_name = <0xHEX>;"
+void replace_prop_line_u64(char *content, const char *prop_name, unsigned long long new_val) {
+    char search_str[256];
+    sprintf(search_str, "%s =", prop_name);
+    char *p = strstr(content, search_str);
+    if (!p) return;
+    
+    // Find line start (previous \n or start of string)
+    char *line_start = p;
+    while (line_start > content && *(line_start - 1) != '\n') {
+        line_start--;
+    }
+    
+    // Find line end (after ;)
+    char *line_end = strchr(p, ';');
+    if (!line_end) return;
+    line_end++; // Include ;
+    
+    // Capture indentation
+    char indent[64] = {0};
+    int i = 0;
+    char *k = line_start;
+    while (k < p && isspace(*k) && i < 63) {
+        indent[i++] = *k;
+        k++;
+    }
+    indent[i] = 0;
+    
+    // Construct new line
+    char new_line[256];
+    sprintf(new_line, "%s%s = <0x%llx>;", indent, prop_name, new_val);
+    
+    int old_len = line_end - line_start;
+    int new_len = strlen(new_line);
+    
+    int shift = new_len - old_len;
+    if (shift != 0) {
+        memmove(line_end + shift, line_end, strlen(line_end) + 1);
+    }
+    
+    memcpy(line_start, new_line, new_len);
+}
+
+// Get raw property string value (e.g. "<0x123>" or "\"B`0\"")
+// Returns 1 if found, 0 otherwise
+int get_prop_val_str(const char *content, const char *prop_name, char *out_val) {
+    char search_str[256];
+    sprintf(search_str, "%s =", prop_name);
+    char *p = strstr(content, search_str);
+    if (!p) return 0;
+    
+    char *end_stmt = strchr(p, ';');
+    if (!end_stmt) return 0;
+    
+    char *val_start = strchr(p, '=');
+    if (!val_start) return 0;
+    val_start++; // skip =
+    
+    // Trim leading whitespace
+    while (val_start < end_stmt && isspace(*val_start)) val_start++;
+    if (val_start >= end_stmt) return 0;
+    
+    int len = end_stmt - val_start;
+    if (len >= 63) len = 63;
+    
+    strncpy(out_val, val_start, len);
+    out_val[len] = 0;
+    return 1;
+}
+
+// Update property with raw string
+void update_prop_val_str(char *content, const char *prop_name, const char *new_val) {
+    char search_str[256];
+    sprintf(search_str, "%s =", prop_name);
+    char *p = strstr(content, search_str);
+    if (!p) return;
+    
+    char *end_stmt = strchr(p, ';');
+    if (!end_stmt) return;
+    
+    char *val_start = strchr(p, '=');
+    if (!val_start) return;
+    val_start++; // skip =
+    
+    while (val_start < end_stmt && isspace(*val_start)) val_start++;
+    
+    int old_len = end_stmt - val_start;
+    int new_len = strlen(new_val);
+    
+    int shift = new_len - old_len;
+    if (shift != 0) {
+        memmove(end_stmt + shift, end_stmt, strlen(end_stmt) + 1);
+    }
+    memcpy(val_start, new_val, new_len);
+}
+
+#define TARGET_PANEL "qcom,mdss_dsi_panel_AE084_P_3_A0033_dsc_cmd_dvt02"
+
+// Check if current position is inside the target panel node
+int is_inside_target_panel(const char *file_start, const char *current_pos) {
+    // Search backwards for the last opened brace that hasn't been closed
+    // This is a simple heuristic: find the nearest "qcom,..." node definition above
+    
+    const char *p = current_pos;
+    while (p > file_start) {
+        if (*p == '{') {
+            // Check the name preceding this brace
+            const char *name_end = p;
+            while (name_end > file_start && isspace(*(name_end - 1))) name_end--;
+            
+            const char *name_start = name_end;
+            while (name_start > file_start && !isspace(*(name_start - 1)) && *(name_start - 1) != ';' && *(name_start - 1) != '}') {
+                name_start--;
+            }
+            
+            if (name_end > name_start) {
+                char node_name[256];
+                int len = name_end - name_start;
+                if (len > 255) len = 255;
+                strncpy(node_name, name_start, len);
+                node_name[len] = 0;
+                
+                if (strstr(node_name, TARGET_PANEL)) {
+                    return 1; // Found it!
+                }
+                
+                // If we hit another timing node or unrelated node, keep searching up?
+                // Actually, the panel node is usually the direct parent or grandparent.
+                // Let's assume structure: panel_node { ... timing_node { ... } ... }
+                // If we found a node that is NOT the target, but has { ... }, 
+                // we might be inside a sibling of timing node, or the timing node itself.
+                // But this function is called at the start of a timing node.
+                // So the nearest '{' above 'timing@...' should be the panel node opening.
+                
+                // Heuristic: If it starts with "qcom,mdss_dsi_panel_", it's a panel node.
+                if (strstr(node_name, "qcom,mdss_dsi_panel_")) {
+                    return 0; // It's a different panel
+                }
+            }
+        }
+        p--;
+    }
+    return 0;
 }
 
 // Process single file
@@ -167,6 +358,12 @@ void process_file(const char *filename) {
         block_end = strchr(block_end, ';'); // };
         if (!block_end) break;
         block_end++; // Include ;
+        
+        // Check if inside target panel
+        if (!is_inside_target_panel(buffer, block_start)) {
+            p = block_end;
+            continue;
+        }
         
         int len = block_end - block_start;
         if (len >= MAX_BLOCK) { p++; continue; }
@@ -235,13 +432,45 @@ void process_file(const char *filename) {
         sscanf(current_block, "%127s", node_name);
         char *brace = strchr(node_name, '{');
         if (brace) *brace = 0;
+
+        // FILTER: Only process if inside TARGET_PANEL
+        // We look for templates everywhere (to get the right 144Hz config), 
+        // but we only APPLY changes to the target panel.
+        // Wait, templates might come from other panels too? 
+        // Assuming templates are universal or we use the ones found in file.
+        // The previous template search (Pass 1) scans the whole file.
+        
+        // For Pass 2 (Modification), check context:
+        if (!is_inside_target_panel(buffer, block_start)) {
+            // Just write original
+            fputs(current_block, out);
+            cursor = block_end;
+            continue;
+        }
+
+        char indent[64];
+        int indent_len = 0;
+        char *ls = block_start;
+        while (ls > buffer && *(ls - 1) != '\n') ls--;
+        char *q = ls;
+        while (*q == ' ' || *q == '\t') {
+            if (indent_len < (int)sizeof(indent) - 1) {
+                indent[indent_len++] = *q;
+            }
+            q++;
+        }
+        indent[indent_len] = 0;
         
         // Logic Dispatch
         
         // 1. LTPO Fix for 60Hz (WQHD)
         if (strstr(node_name, "wqhd_sdc_60") && template_wqhd.valid) {
             printf("Applying LTPO Fix to %s\n", node_name);
-            unsigned int orig_idx = get_prop_u64(current_block, "cell-index");
+            
+            // Extract raw values from original 60Hz node to preserve them
+            char orig_index_str[64] = {0};
+            
+            get_prop_val_str(current_block, "cell-index", orig_index_str);
             
             // Start with template
             char new_block[MAX_BLOCK];
@@ -254,46 +483,62 @@ void process_file(const char *filename) {
             sprintf(search_str, "%s {", template_name);
             replace_str(new_block, search_str, "timing@wqhd_sdc_60 {");
             
-            // Calculate new params
-            unsigned long long new_clock = template_wqhd.clock * 60 / template_wqhd.fps;
-            unsigned int new_transfer = template_wqhd.transfer_time * template_wqhd.fps / 60;
+            // Restore original 60Hz cell-index ONLY. Use Template's Clock/Transfer!
+            if (strlen(orig_index_str) > 0) update_prop_val_str(new_block, "cell-index", orig_index_str);
             
-            update_prop_u64(new_block, "qcom,mdss-dsi-panel-clockrate", new_clock);
+            // Force framerate to 60
             update_prop_u64(new_block, "qcom,mdss-dsi-panel-framerate", 60); 
-            update_prop_u64(new_block, "qcom,mdss-mdp-transfer-time-us", new_transfer);
-            update_prop_u64(new_block, "cell-index", orig_idx); 
             
             fputs(new_block, out);
             fputs("\n", out);
         }
         // 2. LTPO Fix for 60Hz (FHD) - "1080p DPI Fix"
-        else if (strstr(node_name, "fhd_sdc_60") && template_fhd.valid) {
-            printf("Applying LTPO Fix to %s\n", node_name);
-            unsigned int orig_idx = get_prop_u64(current_block, "cell-index");
+        /*
+        else if (strstr(node_name, "fhd_sdc_60")) {
+            printf("Applying LTPO Fix to %s (Using WQHD Template + FHD Resolution)\n", node_name);
             
-            char new_block[MAX_BLOCK];
-            strcpy(new_block, template_fhd.content);
+            // Extract raw values
+            char orig_index_str[64] = {0};
+            char orig_width_str[64] = {0};
+            char orig_height_str[64] = {0};
             
-            char template_name[128];
-            sscanf(template_fhd.content, "%127s", template_name);
-            char search_str[128];
-            sprintf(search_str, "%s {", template_name);
-            replace_str(new_block, search_str, "timing@fhd_sdc_60 {");
+            get_prop_val_str(current_block, "cell-index", orig_index_str);
+            get_prop_val_str(current_block, "qcom,mdss-dsi-panel-width", orig_width_str);
+            get_prop_val_str(current_block, "qcom,mdss-dsi-panel-height", orig_height_str);
             
-            unsigned long long new_clock = template_fhd.clock * 60 / template_fhd.fps;
-            unsigned int new_transfer = template_fhd.transfer_time * template_fhd.fps / 60;
-            
-            update_prop_u64(new_block, "qcom,mdss-dsi-panel-clockrate", new_clock);
-            update_prop_u64(new_block, "qcom,mdss-dsi-panel-framerate", 60);
-            update_prop_u64(new_block, "qcom,mdss-mdp-transfer-time-us", new_transfer);
-            update_prop_u64(new_block, "cell-index", orig_idx);
-            
-            fputs(new_block, out);
-            fputs("\n", out);
+            // MUST use WQHD Template as base (to get 2K clock/transfer)
+            if (template_wqhd.valid) {
+                char new_block[MAX_BLOCK];
+                strcpy(new_block, template_wqhd.content);
+                
+                // Replace name safely
+                char template_name[128];
+                sscanf(template_wqhd.content, "%127s", template_name);
+                char search_str[128];
+                sprintf(search_str, "%s {", template_name);
+                replace_str(new_block, search_str, "timing@fhd_sdc_60 {");
+                
+                // 1. Restore FHD Resolution
+                if (strlen(orig_width_str) > 0) update_prop_val_str(new_block, "qcom,mdss-dsi-panel-width", orig_width_str);
+                if (strlen(orig_height_str) > 0) update_prop_val_str(new_block, "qcom,mdss-dsi-panel-height", orig_height_str);
+                
+                // 2. Restore cell-index
+                if (strlen(orig_index_str) > 0) update_prop_val_str(new_block, "cell-index", orig_index_str);
+                
+                // 3. Force Framerate 60
+                replace_prop_line_u64(new_block, "qcom,mdss-dsi-panel-framerate", 60);
+                
+                fputs(new_block, out);
+                fputs("\n", out);
+            } else {
+                // Fallback if no WQHD template (shouldn't happen based on reqs)
+                printf("Warning: No WQHD template found for FHD fix!\n");
+                fputs(current_block, out);
+            }
         }
+        */
         // 3. WQHD 120Hz -> Add 123Hz (Auto Calc)
         else if (strstr(node_name, "wqhd_sdc_120")) {
-            // Write original
             fputs(current_block, out);
             fputs("\n", out);
             
@@ -319,12 +564,13 @@ void process_file(const char *filename) {
             if (new_transfer > 0) update_prop_u64(new_block, "qcom,mdss-mdp-transfer-time-us", new_transfer);
             update_prop_u64(new_block, "cell-index", 0x8);
             
+            fputs("\n", out);
+            fputs(indent, out);
             fputs(new_block, out);
             fputs("\n", out);
         }
         // 4. WQHD 144Hz -> Add 150-180Hz (Auto Calc)
         else if (strstr(node_name, "wqhd_sdc_144")) {
-            // Write original
             fputs(current_block, out);
             fputs("\n", out);
             
@@ -356,10 +602,21 @@ void process_file(const char *filename) {
                     update_prop_u64(new_block, "qcom,mdss-mdp-transfer-time-us", new_transfer);
                     update_prop_u64(new_block, "cell-index", indexes[i]);
                     
+                    fputs("\n", out);
+                    fputs(indent, out);
                     fputs(new_block, out);
                     fputs("\n", out);
                 }
             }
+        }
+        // 5. Force WQHD 90 clockrate to 2K template clock (Disabled FHD)
+        else if (strstr(node_name, "wqhd_sdc_90")) {
+            char mod_block[MAX_BLOCK];
+            strcpy(mod_block, current_block);
+            if (template_wqhd.valid) {
+                replace_prop_line_u64(mod_block, "qcom,mdss-dsi-panel-clockrate", template_wqhd.clock);
+            }
+            fputs(mod_block, out);
         }
         else {
             // Just write original
