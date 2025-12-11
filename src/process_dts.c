@@ -89,16 +89,8 @@ unsigned long long get_prop_u64(const char *content, const char *prop_name) {
     return val;
 }
 
-// Helper to update a property in the content string
+// Helper to update a property in the content string (Safe In-Place Update)
 void update_prop_u64(char *content, const char *prop_name, unsigned long long new_val) {
-    unsigned long long old_val = get_prop_u64(content, prop_name);
-    if (old_val == 0 && new_val != 0) {
-        // Property might not exist or be 0, hard to replace without regex logic to find the line.
-        // For simplicity, we assume the property exists if we are updating it.
-        // If it returns 0, maybe it really is 0 or parse failed.
-        // Try to find the line anyway.
-    }
-    
     char search_str[256];
     sprintf(search_str, "%s =", prop_name);
     char *p = strstr(content, search_str);
@@ -108,16 +100,22 @@ void update_prop_u64(char *content, const char *prop_name, unsigned long long ne
     char *end = strchr(p, '>');
     if (!start || !end) return;
     
-    char old_str[64];
-    int len = end - start + 1;
-    if (len > 63) len = 63;
-    strncpy(old_str, start, len);
-    old_str[len] = '\0';
-    
+    // Construct new value string
     char new_str[64];
     sprintf(new_str, "<0x%llx>", new_val);
+    int new_len = strlen(new_str);
+    int old_len = end - start + 1;
     
-    replace_str(content, old_str, new_str);
+    // Shift memory if lengths differ
+    int shift = new_len - old_len;
+    if (shift != 0) {
+        // Check buffer bounds? We assume MAX_BLOCK is enough.
+        // memmove handles overlapping regions safely
+        memmove(end + 1 + shift, end + 1, strlen(end + 1) + 1);
+    }
+    
+    // Copy new value
+    memcpy(start, new_str, new_len);
 }
 
 // Process single file
@@ -133,7 +131,7 @@ void process_file(const char *filename) {
         return;
     }
 
-    // Read entire file into memory (assuming it fits, DTS are usually small < 1MB)
+    // Read entire file into memory
     fseek(in, 0, SEEK_END);
     long fsize = ftell(in);
     fseek(in, 0, SEEK_SET);
@@ -160,9 +158,6 @@ void process_file(const char *filename) {
     // Pass 1: Find Templates (WQHD 144Hz, FHD 120/144Hz)
     TimingNode template_wqhd = {0};
     TimingNode template_fhd = {0};
-    
-    // Simple parsing to find templates
-    // We assume standard indentation: "timing@... {"
     
     char *p = buffer;
     while ((p = strstr(p, "timing@"))) {
@@ -195,8 +190,6 @@ void process_file(const char *filename) {
         
         // Check for FHD (Prioritize 144, then 120)
         if (strstr(node_name, "fhd_sdc_144") || strstr(node_name, "fhd_sdc_120")) {
-             // If we already have a FHD template, only overwrite if this one is higher refresh rate
-             // Actually, usually 144 > 120.
              int current_fps = get_prop_u64(block_start, "qcom,mdss-dsi-panel-framerate");
              if (current_fps > template_fhd.fps) {
                  strncpy(template_fhd.content, block_start, len);
@@ -222,7 +215,7 @@ void process_file(const char *filename) {
         
         char *block_start = p;
         char *block_end = strchr(block_start, '}');
-        if (!block_end) { cursor = p + 1; continue; } // Should not happen
+        if (!block_end) { cursor = p + 1; continue; } 
         block_end = strchr(block_end, ';');
         if (!block_end) { cursor = p + 1; continue; }
         block_end++;
@@ -230,7 +223,6 @@ void process_file(const char *filename) {
         int block_len = block_end - block_start;
         char current_block[MAX_BLOCK];
         if (block_len >= MAX_BLOCK) {
-            // Too large, just write it
             fwrite(block_start, 1, block_len, out);
             cursor = block_end;
             continue;
@@ -255,21 +247,21 @@ void process_file(const char *filename) {
             char new_block[MAX_BLOCK];
             strcpy(new_block, template_wqhd.content);
             
-            // Replace name
+            // Replace name safely
             char template_name[128];
-            sscanf(template_wqhd.content, "%127s", template_name); // Get template name e.g. timing@wqhd_sdc_144
-            replace_str(new_block, template_name, "timing@wqhd_sdc_60 {"); // Be careful with braces
-            // Or better: regex-like replacement for "timing@... {"
-            // replace_str handles first occurrence
+            sscanf(template_wqhd.content, "%127s", template_name); 
+            char search_str[128];
+            sprintf(search_str, "%s {", template_name);
+            replace_str(new_block, search_str, "timing@wqhd_sdc_60 {");
             
             // Calculate new params
             unsigned long long new_clock = template_wqhd.clock * 60 / template_wqhd.fps;
             unsigned int new_transfer = template_wqhd.transfer_time * template_wqhd.fps / 60;
             
             update_prop_u64(new_block, "qcom,mdss-dsi-panel-clockrate", new_clock);
-            update_prop_u64(new_block, "qcom,mdss-dsi-panel-framerate", 60); // Force 60 (0x3C)
+            update_prop_u64(new_block, "qcom,mdss-dsi-panel-framerate", 60); 
             update_prop_u64(new_block, "qcom,mdss-mdp-transfer-time-us", new_transfer);
-            update_prop_u64(new_block, "cell-index", orig_idx); // Restore original index
+            update_prop_u64(new_block, "cell-index", orig_idx); 
             
             fputs(new_block, out);
             fputs("\n", out);
@@ -284,7 +276,9 @@ void process_file(const char *filename) {
             
             char template_name[128];
             sscanf(template_fhd.content, "%127s", template_name);
-            replace_str(new_block, template_name, "timing@fhd_sdc_60 {");
+            char search_str[128];
+            sprintf(search_str, "%s {", template_name);
+            replace_str(new_block, search_str, "timing@fhd_sdc_60 {");
             
             unsigned long long new_clock = template_fhd.clock * 60 / template_fhd.fps;
             unsigned int new_transfer = template_fhd.transfer_time * template_fhd.fps / 60;
@@ -312,27 +306,17 @@ void process_file(const char *filename) {
             
             unsigned long long base_clock = get_prop_u64(current_block, "qcom,mdss-dsi-panel-clockrate");
             unsigned int base_fps = get_prop_u64(current_block, "qcom,mdss-dsi-panel-framerate");
-            // If base_fps is 0 or crazy, assume 120
             if (base_fps < 110 || base_fps > 130) base_fps = 120;
             
-            // Target 123Hz
             int target_fps = 123;
             unsigned long long new_clock = base_clock * target_fps / base_fps;
-            // Also scale transfer time if present
             unsigned int base_transfer = get_prop_u64(current_block, "qcom,mdss-mdp-transfer-time-us");
             unsigned int new_transfer = 0;
             if (base_transfer > 0) new_transfer = base_transfer * base_fps / target_fps;
             
             update_prop_u64(new_block, "qcom,mdss-dsi-panel-clockrate", new_clock);
-            update_prop_u64(new_block, "qcom,mdss-dsi-panel-framerate", target_fps); // 0x7B
+            update_prop_u64(new_block, "qcom,mdss-dsi-panel-framerate", target_fps);
             if (new_transfer > 0) update_prop_u64(new_block, "qcom,mdss-mdp-transfer-time-us", new_transfer);
-            
-            // Force cell-index 0x8 for 123Hz as per previous logic (or maybe keep original 120 index?)
-            // Previous code hardcoded 0x8. Let's keep it 0x8 to be safe or use original?
-            // User says "Automatic calculation", doesn't explicitly mention cell-index for 123.
-            // But previous code did `replace_str(..., "cell-index = <0x0>;", "cell-index = <0x8>;");`
-            // If original 120Hz has 0x0, we change to 0x8.
-            // Let's preserve this logic.
             update_prop_u64(new_block, "cell-index", 0x8);
             
             fputs(new_block, out);
@@ -344,7 +328,7 @@ void process_file(const char *filename) {
             fputs(current_block, out);
             fputs("\n", out);
             
-            if (template_wqhd.valid) { // Should be valid if we are here
+            if (template_wqhd.valid) {
                 int freqs[] = {150, 155, 160, 165, 170, 175, 180};
                 int indexes[] = {0x9, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15};
                 
@@ -356,19 +340,14 @@ void process_file(const char *filename) {
                     strcpy(new_block, template_wqhd.content);
                     
                     char header_old[128], header_new[128];
-                    sscanf(template_wqhd.content, "%127s", header_old); // timing@wqhd_sdc_144
+                    sscanf(template_wqhd.content, "%127s", header_old);
                     char *b = strchr(header_old, '{'); if(b) *b=0;
                     sprintf(header_new, "timing@wqhd_sdc_%d {", target_fps);
                     
-                    // Replace name
-                    // We need to be careful to replace only the header
-                    // But replace_str replaces first occurrence, which is the header.
-                    // The template content starts with "timing@wqhd_sdc_144 {"
                     char header_old_full[128];
                     sprintf(header_old_full, "%s {", header_old);
                     replace_str(new_block, header_old_full, header_new);
                     
-                    // Calculate
                     unsigned long long new_clock = template_wqhd.clock * target_fps / template_wqhd.fps;
                     unsigned int new_transfer = template_wqhd.transfer_time * template_wqhd.fps / target_fps;
                     
@@ -397,7 +376,6 @@ void process_file(const char *filename) {
     fclose(out);
 
     if (rename(temp_path, input_path) != 0) {
-        // Fallback for cross-device rename
         char cmd[1024];
         sprintf(cmd, "mv -f \"%s\" \"%s\"", temp_path, input_path);
         system(cmd);
