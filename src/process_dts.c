@@ -423,7 +423,7 @@ int get_panel_id(const char *file_start, const char *current_pos, const char **o
                 }
 
                 // GT8 Pro Detection
-                if (strstr(node_name, PANEL_GT8_PRO)) {
+                if (strcmp(node_name, PANEL_GT8_PRO) == 0) {
                     if (g_current_model == MODEL_RMX5200) {
                         return 1;
                     }
@@ -431,7 +431,7 @@ int get_panel_id(const char *file_start, const char *current_pos, const char **o
                 }
                 
                 // OnePlus 15 Detection
-                if (strstr(node_name, PANEL_ONEPLUS_15)) {
+                if (strcmp(node_name, PANEL_ONEPLUS_15) == 0) {
                      if (g_current_model == MODEL_PLK110) {
                          return 2;
                      }
@@ -439,15 +439,8 @@ int get_panel_id(const char *file_start, const char *current_pos, const char **o
                 }
 
                 // OnePlus 12 Detection
-                if (strstr(node_name, PANEL_ONEPLUS_12)) {
+                if (strcmp(node_name, PANEL_ONEPLUS_12) == 0) {
                      if (g_current_model == MODEL_PJD110) {
-                         // STRICT MATCH REQUIRED: User requested to ONLY modify the primary panel
-                         // Reject suffixes like "_2nd"
-                         if (strcmp(node_name, PANEL_ONEPLUS_12) != 0) {
-                             // printf("Skipping Secondary/Other Panel: %s\n", node_name);
-                             return 0;
-                         }
-                         
                          printf("Match Found: OnePlus 12 Panel (%s)\n", node_name);
                          return 3;
                      }
