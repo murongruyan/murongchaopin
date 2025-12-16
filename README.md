@@ -1,12 +1,9 @@
 # OnePlus & Realme 修改 dtbo 模块
 
 ## 简介
-这是一个专为 **Realme GT8 Pro** 和 **OnePlus 12 (PJD110)** 设计的 KernelSU/Magisk 模块，旨在解锁屏幕刷新率限制，支持更多高刷档位。通过修改 DTBO (Device Tree Blob Overlay)，本模块可以让您的设备支持自定义的高刷新率，带来更流畅的视觉体验。
+这是一个专为 OnePlus 和 Realme 设备（如真我 GT8 Pro）设计的 KernelSU/Magisk 模块，旨在解锁屏幕刷新率限制，支持更多高刷档位。通过修改 DTBO (Device Tree Blob Overlay)，本模块可以让您的设备支持自定义的高刷新率，带来更流畅的视觉体验。
 
 ## 功能特性
-- **多机型支持**：
-  - **Realme GT8 Pro**：支持解锁 123Hz - 180Hz 等多个高刷档位。
-  - **OnePlus 12 (PJD110)**：智能修复 `cell-index` 排序，移除无用的 60Hz/90Hz 节点，精准匹配并修改 `qcom,mdss_dsi_panel_AA545_P_3_A0005_dsc_cmd` 面板，支持自定义高刷。
 - **多档位刷新率支持**：支持 123Hz, 150Hz, 155Hz, 160Hz, 165Hz, 170Hz, 175Hz, 180Hz 等多个档位（具体取决于屏幕体质和驱动支持）。
 - **WebUI 管理界面**：内置功能强大的 Web 管理界面，无需复杂的命令行操作。
 - **自定义配置**：
