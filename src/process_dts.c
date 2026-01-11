@@ -524,6 +524,41 @@ void process_file(const char *filename) {
         printf("Applied global battery config changes for PJD110\n");
     }
 
+    // GT8 Pro HMBIRD Patch
+    if (g_current_model == MODEL_RMX5200 && strstr(buffer, "oplus_sim_detect") && !strstr(buffer, "oplus,hmbird")) {
+        char *ins_point = strstr(buffer, "oplus_sim_detect");
+        // Try to keep indentation
+        char *line_start = ins_point;
+        while (line_start > buffer && *(line_start - 1) != '\n') line_start--;
+        
+        char indent[64] = {0};
+        int i = 0;
+        char *k = line_start;
+        while (k < ins_point && isspace(*k) && i < 63) {
+            indent[i++] = *k;
+            k++;
+        }
+        indent[i] = 0;
+
+        char new_node[512];
+        sprintf(new_node, "oplus,hmbird {\n%s\tconfig_type {\n%s\t\ttype = \"HMBIRD_EXT\";\n%s\t};\n%s};\n\n%s", 
+                indent, indent, indent, indent, indent);
+
+        long prefix_len = line_start - buffer;
+        long new_len = strlen(buffer) + strlen(new_node) + 1;
+        char *new_buffer = malloc(new_len);
+        if (new_buffer) {
+            strncpy(new_buffer, buffer, prefix_len);
+            new_buffer[prefix_len] = 0;
+            strcat(new_buffer, new_node);
+            strcat(new_buffer, line_start); // Append the rest starting from oplus_sim_detect line
+            
+            free(buffer);
+            buffer = new_buffer;
+            printf("Applied HMBIRD Patch for GT8 Pro\n");
+        }
+    }
+
     char temp_path[512];
     snprintf(temp_path, sizeof(temp_path), "%s/%s.tmp", DIR_NAME, filename);
     FILE *out = fopen(temp_path, "w");

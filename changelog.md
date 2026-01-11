@@ -1,4 +1,21 @@
 # 更新日志
+## v2.2
+1.为真我GT8Pro添加风驰调速器
+  - 在 process_dts.c 中添加了针对 RMX5200 (真我 GT8 Pro) 的补丁逻辑。
+  - 自动在 oplus_sim_detect 节点前插入 oplus,hmbird 节点（如果不存在）。
+  - 配置内容为： config_type { type = "HMBIRD_EXT"; }; 。
+2.修改- 初始化改用 HWC : init_display_modes 现在使用 dumpsys SurfaceFlinger 解析 resolution 和 vsyncRate ，不再依赖不准确的 dumpsys display 。
+  - 当前模式检测 : get_current_system_mode 现通过 dumpsys SurfaceFlinger | grep "activeConfig=" 直接获取当前生效的 HWC Config ID。
+  - 切换指令修正 : set_surface_flinger 移除了之前的 id - 1 逻辑，现在直接使用 HWC Config ID 调用 service call SurfaceFlinger 1035 。
+切换 HWC 刷新率检测 ( webroot/js/main.js )
+  - 修改了 WebUI 的 loadDisplayModes 函数。
+  - 现在使用 dumpsys SurfaceFlinger 替代旧的 dumpsys display ，直接从 HWC 获取 ID、分辨率和刷新率，无需 ID-1 修正。
+3.移植 COPG 高效应用名显示 ( webroot/js/main.js )
+  - 引入了 COPG 项目的 getPackageInfoNewKernelSU 核心逻辑。
+  - 极速模式 ：优先调用 KernelSU 的 ksu.getPackagesInfo (批量 API) 或 ksu.getPackageInfo (单体 API) 获取应用名，大幅减少 Shell 调用耗时。
+  - 兼容模式 ：如果 API 不可用，自动回退到原来的 pm list + Shell 脚本方式。
+  - loadAppList 已重构为支持批量获取，加载速度将显著提升。
+
 ## v2.1
 - 修复自定义超频检测面板显示其他刷新率的问题。
 - 修复自动超频处理逻辑，解决部分情况下DTS文件生成重复节点（如两个123Hz节点）的Bug。

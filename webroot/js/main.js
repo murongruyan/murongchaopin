@@ -299,8 +299,9 @@ async function loadDisplayModes() {
     
     listEl.innerHTML = '<div class="loading">加载显示模式中...</div>';
 
-    // 使用 dumpsys 解析模式
-    const cmd = `dumpsys display | grep -oE "\\{id=[0-9]+, width=[0-9]+, height=[0-9]+, fps=[0-9.]+" | sort -u`;
+    // 使用 dumpsys SurfaceFlinger 解析模式 (HWC)
+    // 匹配格式: id=0, ... resolution=1264x2780 ... vsyncRate=120.000000
+    const cmd = "dumpsys SurfaceFlinger";
     const raw = await ksuExec(cmd);
     
     if (!raw) {
@@ -308,20 +309,48 @@ async function loadDisplayModes() {
         return;
     }
 
-    const lines = raw.split('\n').filter(l => l.trim());
-    displayModes = lines.map(line => {
-        const id = line.match(/id=(\d+)/)?.[1];
-        const width = line.match(/width=(\d+)/)?.[1];
-        const height = line.match(/height=(\d+)/)?.[1];
-        const fps = line.match(/fps=([0-9.]+)/)?.[1];
-        return {
-            id: parseInt(id),
-            width: parseInt(width),
-            height: parseInt(height),
-            fps: Math.round(parseFloat(fps)),
-            rawFps: parseFloat(fps)
-        };
-    }).filter(m => m.id !== undefined && m.fps !== undefined);
+    const lines = raw.split('\n');
+    const modeMap = new Map();
+
+    lines.forEach(line => {
+        // 筛选包含关键信息的行
+        if (line.includes('id=') && line.includes('resolution=') && line.includes('vsyncRate=')) {
+            try {
+                // 提取 id
+                const idMatch = line.match(/id=(\d+)/);
+                if (!idMatch) return;
+                const id = parseInt(idMatch[1]);
+
+                // 提取分辨率 resolution=WxH
+                const resMatch = line.match(/resolution=(\d+)x(\d+)/);
+                if (!resMatch) return;
+                const width = parseInt(resMatch[1]);
+                const height = parseInt(resMatch[2]);
+
+                // 提取刷新率 vsyncRate=120.000000
+                const fpsMatch = line.match(/vsyncRate=([0-9.]+)/);
+                if (!fpsMatch) return;
+                const rawFps = parseFloat(fpsMatch[1]);
+                const fps = Math.round(rawFps);
+
+                // 存入 Map 去重 (Key: id)
+                // 某些系统可能有重复行，或不同 group，这里以 ID 为准
+                if (!modeMap.has(id)) {
+                    modeMap.set(id, {
+                        id: id,
+                        width: width,
+                        height: height,
+                        fps: fps,
+                        rawFps: rawFps
+                    });
+                }
+            } catch (e) {
+                console.warn("Parse error line:", line, e);
+            }
+        }
+    });
+
+    displayModes = Array.from(modeMap.values());
 
     // 排序
     displayModes.sort((a, b) => a.fps - b.fps || a.width - b.width);
@@ -488,6 +517,54 @@ async function restoreDtbo() {
     await loadSystemStatus();
 }
 
+// COPG 风格的应用信息获取 (KernelSU API)
+async function getPackageInfoNewKernelSU(packageName) {
+    try {
+        // Method 1: ksu.getPackageInfo (Single)
+        if (typeof ksu !== 'undefined' && typeof ksu.getPackageInfo !== 'undefined') {
+            const info = ksu.getPackageInfo(packageName);
+            if (info && typeof info === 'object') {
+                return {
+                    appLabel: info.appLabel || info.label || packageName,
+                    packageName: packageName
+                };
+            }
+        }
+        
+        // Method 2: ksu.getPackagesInfo (Array)
+        if (typeof ksu !== 'undefined' && typeof ksu.getPackagesInfo !== 'undefined') {
+            try {
+                const infoJson = ksu.getPackagesInfo(JSON.stringify([packageName]));
+                const infoArray = JSON.parse(infoJson);
+                if (infoArray && infoArray[0]) {
+                    return {
+                        appLabel: infoArray[0].appLabel || infoArray[0].label || packageName,
+                        packageName: packageName
+                    };
+                }
+            } catch (parseError) {
+                console.error('Failed to parse getPackagesInfo JSON:', parseError);
+            }
+        }
+        
+        // Method 3: $packageManager (WebView Object)
+        if (typeof $packageManager !== 'undefined') {
+            const info = $packageManager.getApplicationInfo(packageName, 0, 0);
+            if (info) {
+                return {
+                    appLabel: info.getLabel() || packageName,
+                    packageName: packageName
+                };
+            }
+        }
+        
+        return null; // Fallback to shell
+    } catch (error) {
+        console.error(`Error getting package info for ${packageName}:`, error);
+        return null;
+    }
+}
+
 // 加载应用列表
 async function loadAppList() {
     const listEl = document.getElementById('app-list');
@@ -508,13 +585,38 @@ async function loadAppList() {
     // 存储所有包名，用于搜索
     allPackages = packages;
     
-    // 后台预加载所有应用名，方便搜索
-    setTimeout(() => {
-        allPackages.forEach(pkg => queueAppLabelFetch(pkg));
-    }, 1000);
-    
-    // 渲染完整列表
+    // 1. 尝试使用 KSU 批量 API 获取标签 (COPG 方式)
+    if (typeof ksu !== 'undefined' && typeof ksu.getPackagesInfo !== 'undefined') {
+        try {
+            debugLog("Using KSU Bulk API for labels...");
+            const batchSize = 50;
+            for (let i = 0; i < packages.length; i += batchSize) {
+                const batch = packages.slice(i, i + batchSize);
+                const infoJson = ksu.getPackagesInfo(JSON.stringify(batch));
+                const infoArray = JSON.parse(infoJson);
+                if (Array.isArray(infoArray)) {
+                    infoArray.forEach(info => {
+                        const pkg = info.packageName;
+                        const label = info.appLabel || info.label || pkg;
+                        if (pkg) appLabels[pkg] = label;
+                    });
+                }
+            }
+        } catch (e) {
+            console.error("Bulk fetch failed", e);
+            debugLog(`Bulk fetch error: ${e.message}`);
+        }
+    }
+
+    // 2. 渲染完整列表 (此时如果有 API，appLabels 应该已经填充了大半)
     renderAppList(allPackages);
+
+    // 3. 后台补充加载 (针对 API 失败或未覆盖的)
+    setTimeout(() => {
+        allPackages.forEach(pkg => {
+            if (!appLabels[pkg]) queueAppLabelFetch(pkg);
+        });
+    }, 1000);
 }
 
 // 筛选应用列表
@@ -553,23 +655,31 @@ function filterAppList() {
 async function fetchAppLabel(pkg) {
     if (appLabels[pkg]) return appLabels[pkg];
 
-    // 尝试使用 KSU API (如果有)
-    // 这里暂时只用 shell fallback，因为 API 签名不确定
+    // 1. 尝试使用 KSU API (COPG 方式)
+    const ksuInfo = await getPackageInfoNewKernelSU(pkg);
+    if (ksuInfo && ksuInfo.appLabel) {
+        appLabels[pkg] = ksuInfo.appLabel;
+        updateLabelUI(pkg, ksuInfo.appLabel);
+        return ksuInfo.appLabel;
+    }
 
+    // 2. Fallback: Shell script
     const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
     const label = await ksuExec(`sh "${scriptPath}" get_app_info "${pkg}"`);
     
     if (label && label.trim()) {
         const cleanLabel = label.trim();
         appLabels[pkg] = cleanLabel;
-        
-        // Update UI
-        const labelEl = document.getElementById(`label-${pkg}`);
-        if (labelEl) {
-             labelEl.innerText = cleanLabel;
-        }
+        updateLabelUI(pkg, cleanLabel);
     } else {
         appLabels[pkg] = pkg; // 标记已获取
+    }
+}
+
+function updateLabelUI(pkg, label) {
+    const labelEl = document.getElementById(`label-${pkg}`);
+    if (labelEl) {
+         labelEl.innerText = label;
     }
 }
 

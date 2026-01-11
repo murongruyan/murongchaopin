@@ -1,8 +1,8 @@
 id=murongchaopin
 name=OnePlus & Realme修改dtbo模块
-version=2.1
-versionCode=21
+version=2.2
+versionCode=22
 author=慕容茹艳（酷安慕容雪绒）
-description=修改dtbo，目前仅支持GT8Pro，1+15修改刷新率，1+12为删除60和90并解容至6000mah，内置web，可控制刷新率，可自定义修改刷新率。
+description=修改dtbo，目前支持GT8Pro（60,90,120,123,144,150-180+风驰），1+15（60，123，144，165-199），1+12删除60和90并解容至6000mah，内置web，可控制刷新率，可自定义修改刷新率。
 minMagisk=17000
 updateJson=https://raw.githubusercontent.com/murongruyan/murongchaopin/main/update.json

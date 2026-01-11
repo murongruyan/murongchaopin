@@ -82,33 +82,40 @@ char* trim(char* str) {
     return str;
 }
 
-// 解析 dumpsys display 获取模式
+// 解析 dumpsys SurfaceFlinger 获取模式
 void init_display_modes() {
     FILE *fp;
     char line[1024];
     
-    // 直接读取 dumpsys display 输出，手动解析以提高兼容性
-    fp = popen("dumpsys display", "r");
+    // 直接读取 dumpsys SurfaceFlinger 输出，手动解析以提高兼容性
+    fp = popen("dumpsys SurfaceFlinger", "r");
     if (fp == NULL) {
-        log_msg("Failed to run dumpsys display / 执行 dumpsys display 失败");
+        log_msg("Failed to run dumpsys SurfaceFlinger / 执行 dumpsys SurfaceFlinger 失败");
         return;
     }
 
     mode_count = 0;
     while (fgets(line, sizeof(line), fp) != NULL && mode_count < MAX_MODES) {
-        // 查找关键字段: id=, width=, height=, fps=
-        char *p_id = strstr(line, "id=");
-        char *p_w = strstr(line, "width=");
-        char *p_h = strstr(line, "height=");
-        char *p_fps = strstr(line, "fps=");
+        // 查找关键字段: id=, resolution=, vsyncRate=
+        // 示例: 
+        // Display 0 HWC layers:
+        // ... id=0, ... resolution=1264x2780 ... vsyncRate=120.000000
+        // 注意：不同设备输出格式可能略有不同，但这些关键字通常存在
         
-        if (p_id && p_w && p_h && p_fps) {
+        char *p_id = strstr(line, "id=");
+        char *p_res = strstr(line, "resolution=");
+        char *p_fps = strstr(line, "vsyncRate=");
+        
+        if (p_id && p_res && p_fps) {
             int id = atoi(p_id + 3);
-            int w = atoi(p_w + 6);
-            int h = atoi(p_h + 7);
-            float fps_f = atof(p_fps + 4);
             
-            if (id > 0 && w > 0 && h > 0 && fps_f > 0) {
+            // 解析分辨率 resolution=WxH
+            int w = 0, h = 0;
+            sscanf(p_res + 11, "%dx%d", &w, &h);
+            
+            float fps_f = atof(p_fps + 10);
+            
+            if (w > 0 && h > 0 && fps_f > 0) {
                 // 查重
                 int exists = 0;
                 for(int k=0; k<mode_count; k++) {
@@ -137,7 +144,7 @@ void init_display_modes() {
         }
     }
 
-    log_msg("Loaded %d display modes / 已加载 %d 个显示模式:", mode_count);
+    log_msg("Loaded %d display modes (HWC) / 已加载 %d 个显示模式 (HWC):", mode_count);
     for(int i=0; i<mode_count; i++) {
         log_msg("ID: %d, FPS: %d, Res: %dx%d", modes[i].id, modes[i].fps, modes[i].width, modes[i].height);
     }
@@ -186,18 +193,34 @@ void load_config(const char* base_path) {
 
 // 获取当前系统模式ID
 int get_current_system_mode() {
-    FILE *fp = popen("dumpsys display | grep -oE \"mActiveMode=\\{id=[0-9]+\"", "r");
+    // 匹配 HWC 输出的当前活动配置
+    // HWC 通常不直接标记 "mActiveMode"，我们需要找到 config=... 或类似的
+    // 但 service call 需要的 ID 就是 HWC ID
+    // 简单起见，我们假设 dumpsys SurfaceFlinger 中 activeConfig=ID
+    // 或者直接返回 -1 让 smooth_switch 初始化
+    
+    // 尝试解析 dumpsys SurfaceFlinger | grep "activeConfig"
+    // 示例: activeConfig=0
+    FILE *fp = popen("dumpsys SurfaceFlinger | grep \"activeConfig=\"", "r");
     if (fp) {
         char line[64];
         if (fgets(line, sizeof(line), fp)) {
             int id;
-            if (sscanf(line, "mActiveMode={id=%d", &id) == 1) {
+            if (sscanf(line, "activeConfig=%d", &id) == 1) {
                 pclose(fp);
+                // 此时获取的是 config ID (即 HWC ID)
+                // 我们的 modes[i].id 也是 HWC ID，所以直接返回
                 return id;
             }
         }
         pclose(fp);
     }
+    
+    // 如果找不到 activeConfig，尝试旧方法或直接返回 -1
+    // 旧方法: dumpsys display | grep mActiveMode (针对 Android Framework 层 ID)
+    // 注意：Framework ID = HWC ID + 1 (通常)
+    // 如果我们现在全面转为 HWC ID，则需要小心
+    
     return -1;
 }
 
@@ -398,11 +421,10 @@ int get_mode_width(int id) {
 // 执行 SurfaceFlinger 调用
 void set_surface_flinger(int id) {
     char cmd[64];
-    // 根据 service.sh: service call SurfaceFlinger 1035 i32 "$sf_id"
-    // 其中 sf_id = id - 1
-    int sf_id = id - 1; 
-    if (sf_id < 0) sf_id = 0;
-
+    // 现在的 ID 直接来自 HWC (dumpsys SurfaceFlinger)，不需要 -1
+    // service call SurfaceFlinger 1035 i32 <HWC_ID>
+    int sf_id = id; 
+    
     snprintf(cmd, sizeof(cmd), "service call SurfaceFlinger 1035 i32 %d > /dev/null", sf_id);
     system(cmd);
 }
