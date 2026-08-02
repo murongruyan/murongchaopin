@@ -151,9 +151,11 @@ case "$1" in
         chmod +x *
         
         echo "正在打包..."
-        ./pack_dtbo >/dev/null 2>&1
+        PACK_LOG="$BIN_DIR/pack.log"
+        ./pack_dtbo >"$PACK_LOG" 2>&1
         if [ $? -ne 0 ]; then
             echo "错误：打包失败"
+            cat "$PACK_LOG"
             exit 1
         fi
         
@@ -179,14 +181,14 @@ case "$1" in
             exit 1
         fi
         if ! dtbo_apply_stock_avb "$STOCK_DTBO" "$NEW_DTBO" "$FINAL_DTBO" "$PARTITION_SIZE"; then
-            echo "错误：官方 AVB 信息复用失败，未执行刷入"
+            echo "错误：官方 AVB 信息复用失败，未执行刷入（请勿重启，DTBO 分区未被修改）"
             exit 1
         fi
 
         if dtbo_write_partition "$FINAL_DTBO" "$DTBO_PARTITION"; then
             echo "Success: 刷入成功！请重启生效。"
         else
-            echo "错误：刷入失败"
+            echo "错误：刷入失败（分区未被修改）"
             exit 1
         fi
         ;;
@@ -264,9 +266,11 @@ case "$1" in
         fi
         
         echo "4. 打包..."
-        ./pack_dtbo >/dev/null 2>&1
+        PACK_LOG="$BIN_DIR/pack.log"
+        ./pack_dtbo >"$PACK_LOG" 2>&1
         if [ $? -ne 0 ]; then
             echo "错误：打包失败"
+            cat "$PACK_LOG"
             exit 1
         fi
         
@@ -280,13 +284,13 @@ case "$1" in
             exit 1
         fi
         if ! dtbo_apply_stock_avb "$STOCK_DTBO" "$NEW_DTBO" "$FINAL_DTBO" "$PARTITION_SIZE"; then
-            echo "错误：官方 AVB 信息复用失败，未执行刷入"
+            echo "错误：官方 AVB 信息复用失败，未执行刷入（请勿重启，DTBO 分区未被修改）"
             exit 1
         fi
         if dtbo_write_partition "$FINAL_DTBO" "$DTBO_PARTITION"; then
-            echo "刷入成功"
+            echo "Success: 刷入成功！请重启生效。"
         else
-            echo "错误：刷入失败"
+            echo "错误：刷入失败（分区未被修改）"
             exit 1
         fi
         

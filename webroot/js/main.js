@@ -471,10 +471,12 @@ async function flashDtbo() {
     // Pass custom rate as 2nd argument (empty string if not set)
     try {
         const result = await ksuExec(`sh "${scriptPath}" flash_dtbo "${customRate}"`);
-        if (result.includes("Success") || result.includes("操作完成")) {
+        if (isFlashSuccess(result)) {
              await showModal("成功", "刷写成功！\n" + result);
+        } else if (/AVB|签名/.test(result)) {
+             await showModal("失败", "AVB 处理失败，DTBO 分区未被修改，请勿重启设备。\n\n" + extractFlashError(result));
         } else {
-             await showModal("失败", "刷写失败:\n" + result);
+             await showModal("失败", "刷写失败，DTBO 分区未被修改:\n" + extractFlashError(result));
         }
     } catch (e) {
         await showModal("错误", "执行出错: " + e.message);
@@ -1121,6 +1123,21 @@ async function removeRate(nodeName) {
 }
 
 // 5. Apply Changes
+// 判断刷入类命令是否成功：明确的失败标记优先，
+// 兼容旧版模块输出的 "警告:AVB签名添加失败" / "刷入成功!" 等日志。
+function isFlashSuccess(result) {
+    if (!result) return false;
+    if (/错误|失败|警告|签名失败|AVB信息复用失败|打包失败|刷入失败/.test(result)) return false;
+    return result.includes("Success") || result.includes("刷入成功") || result.includes("操作完成");
+}
+
+// 提取明确的错误信息用于提示
+function extractFlashError(result) {
+    if (!result) return "无输出";
+    const m = result.match(/错误：[^\n]*|警告:[^\n]*|失败[：:][^\n]*/);
+    return m ? m[0] : result;
+}
+
 async function applyChanges() {
     // if (!confirm("确定要应用更改并刷入设备吗？\n\n这将会重新打包 DTBO 并刷入分区。\n请确保所有修改都已确认无误。")) return;
     const confirmed = await showModal("应用确认", "确定要应用更改并刷入设备吗？\n\n这将会重新打包 DTBO 并刷入分区。\n请确保所有修改都已确认无误。");
@@ -1138,10 +1155,12 @@ async function applyChanges() {
     
     const result = await ksuExec(`sh "${scriptPath}" apply_changes`);
     
-    if (result.includes("Success")) {
+    if (isFlashSuccess(result)) {
         await showModal("成功", "成功！DTBO 已刷入。\n请重启设备以生效。");
+    } else if (/AVB|签名/.test(result)) {
+        await showModal("失败", "AVB 处理失败，DTBO 分区未被修改，请勿重启设备。\n\n" + extractFlashError(result));
     } else {
-        await showModal("失败", "操作失败:\n" + result);
+        await showModal("失败", "操作失败，DTBO 分区未被修改：\n" + extractFlashError(result));
     }
 }
 
