@@ -1,5 +1,5 @@
 # 更新日志
-## v2.6 (未发布)
+## v2.6
 1.修复超频刷新率息屏后亮屏回到 120Hz 的 Bug：rate_daemon 新增屏幕状态监测，检测到息屏（OFF/DOZE）后再次亮屏时，强制重新下发目标模式并同步系统刷新率设置，不再依赖内存缓存的短路判断。可观察 daemon.log 中的 "Screen ON after OFF/DOZE" 与 "Forced reapply after screen-on" 日志确认触发。
 2.修复 WebUI "禁用 ADFR" 无效的问题：原脚本操作的属性（persist.oplus.display.vrr.adfr 等）在 GT8 Pro 上不存在（实际为 persist.oplus.display.vrr.pdfr），导致按钮空转。现改为：备份并操作真实属性（兼容新旧机型）、persist 属性持久化写入、`cmd display set-user-preferred-display-mode` 固定框架层目标模式、启用内核 ADFR 并写入 min_fps 下限，且写入状态文件，开机后由 service.sh 自动重新应用，直到点击"还原默认"。已在 RMX5200 (GT8 Pro) 真机验证禁用/还原闭环。
 
