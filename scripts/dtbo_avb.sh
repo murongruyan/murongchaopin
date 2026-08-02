@@ -191,15 +191,17 @@ dtbo_apply_stock_avb() {
             dtbo_raw_size="$dtbo_old_original_size"
         fi
     fi
-    [ "$dtbo_raw_size" -le "$DTBO_STOCK_VBMETA_OFFSET" ] || {
-        dtbo_msg "! 修改后的 DTBO 超出官方 AVB 数据区"
-        rm -rf "$dtbo_work"
-        return 1
-    }
-
-    dtbo_padding_after=$((DTBO_STOCK_FOOTER_OFFSET - dtbo_raw_size - DTBO_STOCK_VBMETA_SIZE))
-    [ "$dtbo_padding_after" -ge 0 ] || {
-        dtbo_msg "! 修改后的 DTBO 没有足够的 AVB 空间"
+    # The VBMeta is relocated right after the modified payload (its offset is
+    # rewritten in the footer below), so only the total image size matters:
+    #
+    #   payload + VBMeta + 64B footer <= partition size
+    #
+    # Align the VBMeta to 4096 like the official layout does.
+    dtbo_vbmeta_offset=$(( (dtbo_raw_size + 4095) / 4096 * 4096 ))
+    dtbo_padding_before=$((dtbo_vbmeta_offset - dtbo_raw_size))
+    dtbo_padding_after=$((DTBO_STOCK_FOOTER_OFFSET - dtbo_vbmeta_offset - DTBO_STOCK_VBMETA_SIZE))
+    [ "$dtbo_padding_before" -ge 0 ] && [ "$dtbo_padding_after" -ge 0 ] || {
+        dtbo_msg "! 修改后的 DTBO 过大，分区无法容纳官方 AVB 数据"
         rm -rf "$dtbo_work"
         return 1
     }
@@ -208,6 +210,12 @@ dtbo_apply_stock_avb() {
         rm -rf "$dtbo_work"
         return 1
     }
+    if [ "$dtbo_padding_before" -gt 0 ]; then
+        dd if=/dev/zero bs=1 count="$dtbo_padding_before" 2>/dev/null >> "$dtbo_output" || {
+            rm -rf "$dtbo_work"
+            return 1
+        }
+    fi
     cat "$dtbo_vbmeta" >> "$dtbo_output" || {
         rm -rf "$dtbo_work"
         return 1
@@ -226,11 +234,11 @@ dtbo_apply_stock_avb() {
         rm -rf "$dtbo_work"
         return 1
     }
-    dtbo_write_be64 "$DTBO_STOCK_ORIGINAL_SIZE" "$dtbo_footer" || {
+    dtbo_write_be64 "$dtbo_raw_size" "$dtbo_footer" || {
         rm -rf "$dtbo_work"
         return 1
     }
-    dtbo_write_be64 "$dtbo_raw_size" "$dtbo_footer" || {
+    dtbo_write_be64 "$dtbo_vbmeta_offset" "$dtbo_footer" || {
         rm -rf "$dtbo_work"
         return 1
     }
