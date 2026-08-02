@@ -1,4 +1,7 @@
 # 更新日志
+## v2.6 (未发布)
+1.修复超频刷新率息屏后亮屏回到 120Hz 的 Bug：rate_daemon 新增屏幕状态监测，检测到息屏（OFF/DOZE）后再次亮屏时，强制重新下发目标模式并同步系统刷新率设置，不再依赖内存缓存的短路判断。可观察 daemon.log 中的 "Screen ON after OFF/DOZE" 与 "Forced reapply after screen-on" 日志确认触发。
+
 ## v2.5
 1.修复 WebUI 刷入链路：删节点/改节点后"应用更改"与"刷写 DTBO"统一走官方 AVB 信息复用（raw 复制官方 VBMeta，不自签名），AVB 处理失败时**中止刷入**并提示"请勿重启"。
 2.修复 flash_dtbo 成功输出无 Success 前缀导致 WebUI 误报刷写失败的问题（前后端判断已统一）。

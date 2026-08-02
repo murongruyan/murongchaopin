@@ -34,6 +34,7 @@ int app_config_count = 0;
 int default_mode_id = 1;
 
 int current_mode_id = -1;
+int force_reapply = 0;  // 亮屏后强制重放目标模式（修复息屏后回 120Hz）
 
 // Function Prototypes
 void set_surface_flinger(int id);
@@ -41,6 +42,7 @@ void sync_android_settings(int id);
 int get_mode_width(int id);
 void get_sorted_fps_modes(int width, int *out_ids, int *out_count);
 int is_valid_mode(int id);
+int get_screen_state(void);
 
 #define LOG_FILE "/data/adb/modules/murongchaopin/daemon.log"
 
@@ -224,8 +226,57 @@ int get_current_system_mode() {
     return -1;
 }
 
+// 获取屏幕状态
+// 返回: 1=ON(亮屏), 0=OFF/DOZE(息屏/待机), -1=未知(解析失败)
+int get_screen_state() {
+    FILE *fp = popen("dumpsys display 2>/dev/null", "r");
+    if (!fp) return -1;
+
+    char line[256];
+    int result = -1;
+    while (fgets(line, sizeof(line), fp)) {
+        char *p = strstr(line, "mScreenState=");
+        const char *val = NULL;
+        if (p) {
+            val = p + 13; // strlen("mScreenState=")
+        } else {
+            p = strstr(line, "mGlobalDisplayState=");
+            if (p) val = p + 20; // strlen("mGlobalDisplayState=")
+        }
+        if (!val) continue;
+
+        // 跳过空白
+        while (*val == ' ' || *val == '\t') val++;
+
+        if (strncmp(val, "ON", 2) == 0) {
+            result = 1;
+            break; // 首个 ON 即视为亮屏
+        }
+        if (strncmp(val, "OFF", 3) == 0 || strncmp(val, "DOZE", 4) == 0) {
+            result = 0;
+            // 继续扫描，后面的 mScreenState= 可能更准确
+        }
+    }
+    pclose(fp);
+    return result;
+}
+
 // 平滑切换核心逻辑
 void smooth_switch(int target_id) {
+    if (force_reapply) {
+        force_reapply = 0;
+        if (current_mode_id == target_id || current_mode_id == -1) {
+            // 息屏后面板被重置，但缓存仍为目标模式：直接重新下发
+            log_msg("Forced reapply after screen-on / 亮屏后强制重放: -> %d", target_id);
+            set_surface_flinger(target_id);
+            sync_android_settings(target_id);
+            current_mode_id = target_id;
+            return;
+        }
+        // 缓存与实际目标不一致：继续走下方正常切换流程
+        log_msg("Forced reapply after screen-on, smooth switching / 亮屏后强制重放，继续平滑切换");
+    }
+
     if (current_mode_id == -1) {
         // 首次启动，尝试获取当前系统状态
         int actual = get_current_system_mode();
@@ -525,6 +576,7 @@ int main(int argc, char *argv[]) {
     }
 
     char last_pkg[MAX_PKG_LEN] = "";
+    int last_screen_state = -1;
     
     // 初始化 inotify
     int inotify_fd = inotify_init();
@@ -594,6 +646,25 @@ int main(int argc, char *argv[]) {
             }
         }
 
+        // 屏幕状态监测：息屏时面板被框架重置为 120Hz，但缓存未失效，
+        // 亮屏后检测不到差异就不会重新下发，导致一直停在 120Hz。
+        // 这里检测 OFF/DOZE -> ON 的跳变，强制重放一次目标模式。
+        int screen_state = get_screen_state();
+        if (screen_state != last_screen_state) {
+            if (screen_state == 1) {
+                log_msg("Screen state -> ON / 屏幕状态 -> 亮屏");
+                if (last_screen_state == 0) {
+                    log_msg("Screen ON after OFF/DOZE / 息屏后亮屏: 稍后强制重放刷新率");
+                    // 等 SurfaceFlinger 完成亮屏初始化后再重放
+                    usleep(300000);
+                    force_reapply = 1;
+                }
+            } else if (screen_state == 0) {
+                log_msg("Screen state -> OFF/DOZE / 屏幕状态 -> 息屏/待机");
+            }
+            last_screen_state = screen_state;
+        }
+
         // 获取前台应用
         char current_pkg[MAX_PKG_LEN] = "";
         get_foreground_app(current_pkg, sizeof(current_pkg));
@@ -614,7 +685,7 @@ int main(int argc, char *argv[]) {
                 }
             }
             
-                if (is_valid_mode(target_id) && target_id != current_mode_id) {
+                if (is_valid_mode(target_id) && (target_id != current_mode_id || force_reapply)) {
                      smooth_switch(target_id);
                 }
             
