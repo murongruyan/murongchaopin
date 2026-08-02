@@ -5,6 +5,8 @@
 # 设置模块路径
 MODPATH="$1"
 
+[ -f "$MODPATH/scripts/dtbo_avb.sh" ] && . "$MODPATH/scripts/dtbo_avb.sh"
+
 # 延迟输出函数
 ui_print() {
   echo "$@" >&2
@@ -86,7 +88,14 @@ ui_print "正在恢复原始 DTBO..."
 ui_print "从: $BACKUP_DTBO"
 ui_print "到: $DTBO_PARTITION"
 
-if dd if="$BACKUP_DTBO" of="$DTBO_PARTITION" bs=4096; then
+if [ -f "$MODPATH/scripts/dtbo_avb.sh" ]; then
+  dtbo_write_partition "$BACKUP_DTBO" "$DTBO_PARTITION"
+  RESTORE_STATUS=$?
+else
+  dd if="$BACKUP_DTBO" of="$DTBO_PARTITION" bs=4096 conv=fsync
+  RESTORE_STATUS=$?
+fi
+if [ "$RESTORE_STATUS" -eq 0 ]; then
   ui_print "原始 DTBO 恢复成功!"
   
   # 清理模块文件（可选）

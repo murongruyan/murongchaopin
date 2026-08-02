@@ -12,6 +12,9 @@ IMG_DIR="$MOD_PATH/img"
 WORK_DIR="$MOD_PATH/workspace"
 CONFIG_FILE="$MOD_PATH/config/mode.txt"
 DAEMON_BIN="$BIN_DIR/rate_daemon"
+AVB_HELPER="$MOD_PATH/scripts/dtbo_avb.sh"
+
+[ -f "$AVB_HELPER" ] && . "$AVB_HELPER"
 
 mkdir -p "$(dirname "$CONFIG_FILE")"
 [ ! -f "$CONFIG_FILE" ] && echo "1" > "$CONFIG_FILE"
@@ -164,7 +167,23 @@ case "$1" in
              NEW_DTBO="dtbo.img" # Fallback just in case
         fi
 
-        if dd if="$NEW_DTBO" of="$DTBO_PARTITION" 2>&1; then
+        STOCK_DTBO="$IMG_DIR/dtbo.img"
+        FINAL_DTBO="$BIN_DIR/dtbo_final.img"
+        PARTITION_SIZE=$(blockdev --getsize64 "$DTBO_PARTITION" 2>/dev/null)
+        if [ ! -f "$AVB_HELPER" ]; then
+            echo "错误：缺少 DTBO AVB 处理脚本"
+            exit 1
+        fi
+        if [ ! -f "$STOCK_DTBO" ]; then
+            echo "错误：找不到原厂 DTBO 备份，无法复用官方 AVB 信息"
+            exit 1
+        fi
+        if ! dtbo_apply_stock_avb "$STOCK_DTBO" "$NEW_DTBO" "$FINAL_DTBO" "$PARTITION_SIZE"; then
+            echo "错误：官方 AVB 信息复用失败，未执行刷入"
+            exit 1
+        fi
+
+        if dtbo_write_partition "$FINAL_DTBO" "$DTBO_PARTITION"; then
             echo "Success: 刷入成功！请重启生效。"
         else
             echo "错误：刷入失败"
@@ -253,7 +272,18 @@ case "$1" in
         
         echo "5. 刷入分区..."
         NEW_DTBO="$BIN_DIR/new_dtbo.img"
-        if dd if="$NEW_DTBO" of="$DTBO_PARTITION" bs=4096 2>&1; then
+        STOCK_DTBO="$IMG_DIR/dtbo.img"
+        FINAL_DTBO="$BIN_DIR/dtbo_final.img"
+        PARTITION_SIZE=$(blockdev --getsize64 "$DTBO_PARTITION" 2>/dev/null)
+        if [ ! -f "$STOCK_DTBO" ]; then
+            echo "错误：找不到原厂 DTBO 备份，无法复用官方 AVB 信息"
+            exit 1
+        fi
+        if ! dtbo_apply_stock_avb "$STOCK_DTBO" "$NEW_DTBO" "$FINAL_DTBO" "$PARTITION_SIZE"; then
+            echo "错误：官方 AVB 信息复用失败，未执行刷入"
+            exit 1
+        fi
+        if dtbo_write_partition "$FINAL_DTBO" "$DTBO_PARTITION"; then
             echo "刷入成功"
         else
             echo "错误：刷入失败"
@@ -392,7 +422,11 @@ case "$1" in
         if [ ! -z "$BACKUP_FILE" ]; then
             SLOT=$(getprop ro.boot.slot_suffix)
             DTBO_PARTITION="/dev/block/by-name/dtbo$SLOT"
-            dd if="$BACKUP_FILE" of="$DTBO_PARTITION" bs=4096
+            if [ -f "$AVB_HELPER" ]; then
+                dtbo_write_partition "$BACKUP_FILE" "$DTBO_PARTITION" || exit 1
+            else
+                dd if="$BACKUP_FILE" of="$DTBO_PARTITION" bs=4096 conv=fsync || exit 1
+            fi
         fi
         
         # 2. Create remove file for Magisk/KSU to handle cleanup on next boot

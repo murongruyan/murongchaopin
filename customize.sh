@@ -95,16 +95,28 @@ BIN_DIR="$MOD_PATH/bin"
 IMG_DIR="$MOD_PATH/img"
 DTBO_PARTITION="/dev/block/by-name/dtbo$SLOT"
 
+[ -f "$MODPATH/scripts/dtbo_avb.sh" ] && . "$MODPATH/scripts/dtbo_avb.sh" || abort "缺少 DTBO AVB 处理脚本"
+
+DTBO_PARTITION_IMAGE_SIZE=$(blockdev --getsize64 "$DTBO_PARTITION" 2>/dev/null)
+case "$DTBO_PARTITION_IMAGE_SIZE" in
+  ""|*[!0-9]*|0)
+    abort "无法读取 DTBO 分区大小"
+    ;;
+esac
+
 mkdir -p "$IMG_DIR"
 mkdir -p "$BIN_DIR/dtbo_dts"
 
 # 4. 提取 DTBO
 ui_print "正在提取当前 DTBO..."
-if dd if="$DTBO_PARTITION" of="$IMG_DIR/dtbo.img" bs=4096; then
+if dd if="$DTBO_PARTITION" of="$IMG_DIR/dtbo.img" bs=1 count="$DTBO_PARTITION_IMAGE_SIZE" 2>/dev/null; then
   ui_print "DTBO 提取成功: $IMG_DIR/dtbo.img"
 else
   ui_print "错误: DTBO 提取失败"
   abort
+fi
+if [ "$(dtbo_file_size "$IMG_DIR/dtbo.img")" != "$DTBO_PARTITION_IMAGE_SIZE" ]; then
+  abort "DTBO 备份大小校验失败"
 fi
 
 # 4.1 提取 AVB 信息 (已集成到 unpack_dtbo)
@@ -150,13 +162,14 @@ if [ ! -f "$NEW_DTBO" ]; then
   abort
 fi
 
-# 6. 刷入新 DTBO
-# 6.0 重新签名 (AVB) - 已集成到 pack_dtbo
-# ui_print "正在添加 AVB 签名..."
-# ... (Removed manual signing logic)
+# 6. 使用官方 DTBO 的 AVB 信息合成免解镜像
+FINAL_DTBO="$BIN_DIR/dtbo_final.img"
+if ! dtbo_apply_stock_avb "$IMG_DIR/dtbo.img" "$NEW_DTBO" "$FINAL_DTBO" "$DTBO_PARTITION_IMAGE_SIZE"; then
+  abort "官方 AVB 信息复用失败，已停止刷入"
+fi
 
 ui_print "正在刷入修改后的 DTBO..."
-if dd if="$NEW_DTBO" of="$DTBO_PARTITION" bs=4096; then
+if dtbo_write_partition "$FINAL_DTBO" "$DTBO_PARTITION"; then
   ui_print "刷入成功!"
 else
   ui_print "错误: 刷入失败"

@@ -232,7 +232,8 @@ jobs:
             "$STAGE_DIR/customize.sh" \
             "$STAGE_DIR/service.sh" \
             "$STAGE_DIR/uninstall.sh" \
-            "$STAGE_DIR/scripts/web_handler.sh"
+            "$STAGE_DIR/scripts/web_handler.sh" \
+            "$STAGE_DIR/scripts/dtbo_avb.sh"
 
           for path in bin config img META-INF scripts webroot action.sh customize.sh module.prop KsuWebUI.apk service.sh uninstall.sh; do
             if [ ! -e "$STAGE_DIR/$path" ]; then

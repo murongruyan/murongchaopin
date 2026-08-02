@@ -56,5 +56,6 @@
 - **bybycode**（http://www.coolapk.com/u/716079）
 - **破星**（http://www.coolapk.com/u/21669766）
 - **酷安望月古川** (http://www.coolapk.com/u/843974)
-- **qq傻瓜我爱你呀** (QQ: 3844041986)
+- **傻瓜我爱你呀**（https://www.coolapk.com/u/33802586）
+- **小宇同学**（https://www.coolapk.com/u/12778615）
 - **COPG开源项目**（https://github.com/AlirezaParsi/COPG）

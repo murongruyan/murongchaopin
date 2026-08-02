@@ -92,7 +92,9 @@ int main() {
 
     printf("打包成功! 输出文件: new_dtbo.img\n");
 
-    // AVB Signing Logic
+    // AVB is applied later by scripts/dtbo_avb.sh using official metadata.
+    // Keep the legacy block unreachable for source compatibility.
+    if (0) {
     char partition_size[64] = "0";
     char hash_alg[64] = "";
     char partition_name[64] = "";
@@ -160,6 +162,8 @@ int main() {
         } else {
             printf("警告: 无法生成密钥或不支持的算法 %s，跳过签名。\n", algorithm);
         }
+    }
+
     }
 
     // 清理DTB文件
