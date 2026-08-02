@@ -446,30 +446,75 @@ case "$1" in
         # $2 = "disable" or "enable"
         ACTION="$2"
         PROP_BACKUP="$MOD_PATH/config/prop_backup.txt"
+        ADFR_STATE="$MOD_PATH/config/adfr_state.txt"
+        ADFR_CONFIG="/sys/kernel/oplus_display/adfr_config"
+        ADFR_MIN_FPS="/sys/kernel/oplus_display/min_fps"
+        
+        # 解析目标模式规格: 优先取 mode.txt 默认档位 (HWC ID) 对应的 W H FPS
+        # 输出: "W H FPS" 或空
+        get_target_mode_spec() {
+            DEFAULT_ID=$(head -n 1 "$MOD_PATH/config/mode.txt" 2>/dev/null | tr -d '[:space:]')
+            if [ -n "$DEFAULT_ID" ] && [ "$DEFAULT_ID" -eq "$DEFAULT_ID" ] 2>/dev/null; then
+                MODE_LINE=$(dumpsys SurfaceFlinger 2>/dev/null | \
+                    grep -oE "id=${DEFAULT_ID}, hwcId=[0-9]+, resolution=[0-9]+x[0-9]+, vsyncRate=[0-9.]+" | \
+                    head -n 1)
+                if [ -n "$MODE_LINE" ]; then
+                    RES=$(echo "$MODE_LINE" | sed -n 's/.*resolution=\([0-9]*\)x\([0-9]*\).*/\1 \2/p')
+                    FPS=$(echo "$MODE_LINE" | sed -n 's/.*vsyncRate=\([0-9.]*\).*/\1/p')
+                    W=$(echo "$RES" | cut -d' ' -f1)
+                    H=$(echo "$RES" | cut -d' ' -f2)
+                    if [ -n "$W" ] && [ -n "$H" ] && [ -n "$FPS" ]; then
+                        echo "$W $H $FPS"
+                        return 0
+                    fi
+                fi
+            fi
+            return 1
+        }
         
         if [ "$ACTION" == "disable" ]; then
             # Backup current values if not exists
             if [ ! -f "$PROP_BACKUP" ]; then
                 touch "$PROP_BACKUP"
+                # GT8 Pro 使用 pdfr，旧机型使用 adfr，两个都备份
                 echo "persist.oplus.display.vrr=$(getprop persist.oplus.display.vrr)" >> "$PROP_BACKUP"
                 echo "persist.oplus.display.vrr.adfr=$(getprop persist.oplus.display.vrr.adfr)" >> "$PROP_BACKUP"
-                echo "debug.oplus.display.dynamic_fps_switch=$(getprop debug.oplus.display.dynamic_fps_switch)" >> "$PROP_BACKUP"
+                echo "persist.oplus.display.vrr.pdfr=$(getprop persist.oplus.display.vrr.pdfr)" >> "$PROP_BACKUP"
                 echo "sys.display.vrr.vote.support=$(getprop sys.display.vrr.vote.support)" >> "$PROP_BACKUP"
                 echo "vendor.display.enable_dpps_dynamic_fps=$(getprop vendor.display.enable_dpps_dynamic_fps)" >> "$PROP_BACKUP"
-                echo "ro.display.brightness.brightness.mode=$(getprop ro.display.brightness.brightness.mode)" >> "$PROP_BACKUP"
+                echo "vendor.display.enable_optimal_refresh_rate=$(getprop vendor.display.enable_optimal_refresh_rate)" >> "$PROP_BACKUP"
+                echo "vendor.display.enable_idle_content_fps_hint=$(getprop vendor.display.enable_idle_content_fps_hint)" >> "$PROP_BACKUP"
+                echo "persist.sys.oplus.display.brightness.mode=$(getprop persist.sys.oplus.display.brightness.mode)" >> "$PROP_BACKUP"
                 echo "debug.egl.swapinterval=$(getprop debug.egl.swapinterval)" >> "$PROP_BACKUP"
             fi
             
             # Apply disable values
-            resetprop -n persist.oplus.display.vrr 0
-            resetprop -n persist.oplus.display.vrr.adfr 0
-            resetprop -n debug.oplus.display.dynamic_fps_switch 0
+            # persist.* 使用持久化写入，重启后 HAL 仍能读到 0
+            resetprop persist.oplus.display.vrr 0
+            resetprop persist.oplus.display.vrr.adfr 0
+            resetprop persist.oplus.display.vrr.pdfr 0
             resetprop -n sys.display.vrr.vote.support 0
             resetprop -n vendor.display.enable_dpps_dynamic_fps 0
-            resetprop -n ro.display.brightness.brightness.mode 1
+            resetprop -n vendor.display.enable_optimal_refresh_rate 0
+            resetprop -n vendor.display.enable_idle_content_fps_hint 0
+            resetprop persist.sys.oplus.display.brightness.mode 1
             setprop debug.egl.swapinterval 1
             
-            echo "Success: ADFR Disabled"
+            # 固定框架层显示模式（用户首选模式 = 目标档位），并启用内核 ADFR 下限
+            SPEC=$(get_target_mode_spec)
+            if [ -n "$SPEC" ]; then
+                set -- $SPEC
+                W="$1"; H="$2"; FPS="$3"
+                echo "$W $H $FPS" > "$ADFR_STATE"
+                cmd display set-user-preferred-display-mode "$W" "$H" "$FPS" > /dev/null 2>&1
+                if [ -w "$ADFR_CONFIG" ]; then
+                    echo 1 > "$ADFR_CONFIG" 2>/dev/null
+                    echo "$FPS" > "$ADFR_MIN_FPS" 2>/dev/null
+                fi
+                echo "Success: ADFR Disabled (fixed ${FPS}Hz)"
+            else
+                echo "Success: ADFR Disabled (props only)"
+            fi
             
         elif [ "$ACTION" == "enable" ]; then
             if [ -f "$PROP_BACKUP" ]; then
@@ -480,19 +525,31 @@ case "$1" in
                         # or just setprop for normal ones. resetprop is safer for "restoring" system state.
                         if [ -z "$value" ]; then
                              # If value was empty, maybe we should unset it? or set to empty.
-                             resetprop -n "$key" ""
+                             case "$key" in
+                                 persist.*) resetprop "$key" "" ;;
+                                 *) resetprop -n "$key" "" ;;
+                             esac
                         else
-                             resetprop -n "$key" "$value"
+                             case "$key" in
+                                 persist.*) resetprop "$key" "$value" ;;
+                                 *) resetprop -n "$key" "$value" ;;
+                             esac
                         fi
                     fi
                 done < "$PROP_BACKUP"
                 
                 # Clean up backup
                 rm "$PROP_BACKUP"
-                echo "Success: ADFR Restored"
             else
                 echo "Error: No backup found, cannot restore."
+                exit 1
             fi
+            rm -f "$ADFR_STATE"
+            cmd display clear-user-preferred-display-mode > /dev/null 2>&1
+            if [ -w "$ADFR_CONFIG" ]; then
+                echo 0 > "$ADFR_CONFIG" 2>/dev/null
+            fi
+            echo "Success: ADFR Restored"
         else
             echo "Error: Invalid action"
         fi
