@@ -35,9 +35,9 @@ function toggleDebug() {
 
 window.toggleDebug = toggleDebug;
 
-// 兼容 KSU 的 exec 封装
-async function ksuExec(cmd) {
-    debugLog(`[Exec] ${cmd}`);
+// 兼容 KSU 的 exec 封装（quiet=true 时不刷 debug，用于高频轮询）
+async function ksuExec(cmd, quiet = false) {
+    if (!quiet) debugLog(`[Exec] ${cmd}`);
     return new Promise((resolve, reject) => {
         if (typeof ksu === 'undefined') {
             debugLog("[Mock] ksu undefined");
@@ -51,14 +51,14 @@ async function ksuExec(cmd) {
                 // 新版 KSU 支持 Promise
                 result.then(res => {
                     if (typeof res === 'string') {
-                        debugLog(`[Res] length=${res.length}`);
+                        if (!quiet) debugLog(`[Res] length=${res.length}`);
                         resolve(res);
                     } else {
-                        debugLog(`[Res] stdout length=${res.stdout ? res.stdout.length : 0}`);
+                        if (!quiet) debugLog(`[Res] stdout length=${res.stdout ? res.stdout.length : 0}`);
                         resolve(res.stdout || "");
                     }
                 }).catch(err => {
-                    debugLog(`[Err] ${err}`);
+                    if (!quiet) debugLog(`[Err] ${err}`);
                     console.error("KSU Promise Error:", err);
                     resolve("");
                 });
@@ -444,45 +444,91 @@ async function saveGlobalMode() {
     }
 }
 
-// 刷写 DTBO
+// 刷写 DTBO（后台执行 + 流式日志：立即弹出 → 确认 → setsid 后台跑 → 轮询日志 → 重启按钮）
 async function flashDtbo() {
     const customRateInput = document.getElementById('custom-rate');
     const customRate = customRateInput ? customRateInput.value.trim() : "";
-    
-    let msg = "确定要刷入超频 DTBO 吗？\n这可能导致设备无法启动。请确保已有备份。";
+
+    // 立即打开流程弹窗（同步显示，不等命令，解决"等5秒才弹窗"）
+    const term = openFlowModal("刷写超频 DTBO");
+
+    // 确认步骤
+    term.log("⚠️ 即将执行以下操作：", 'warn');
+    term.log("  1. 智能添加刷新率（提取 → 解包 → 补丁）", 'info');
+    term.log("  2. 打包 new_dtbo.img", 'info');
+    term.log("  3. 合并官方 AVB 签名（免解锁）", 'info');
+    term.log("  4. 写入 DTBO 分区并回读校验", 'info');
     if (customRate) {
-        msg = `⚠️ 警告：您设置了自定义刷新率 ${customRate}Hz。\n\n这是一个实验性功能，可能导致黑屏或系统不稳定。\n请务必确认您有救砖能力。\n\n确定要继续吗？`;
+        term.log(`⚠️ 检测到自定义刷新率: ${customRate}Hz（实验性，可能导致不稳定）`, 'warn');
     }
+    term.log("刷入后需要重启生效。请确保已有救砖备份。", 'warn');
 
-    // if (!confirm(msg)) return;
-    const confirmed = await showModal("刷写确认", msg);
-    if (!confirmed) return;
-    
-    // Give UI a chance to close modal
-    await new Promise(resolve => setTimeout(resolve, 100));
+    term.setButtons([
+        { id: 'start', label: '▶ 开始刷写', cls: 'btn-danger' },
+        { id: 'cancel', label: '取消', cls: 'btn-secondary' }
+    ]);
+    const action = await term.waitButton();
+    if (action !== 'start') { term.close(); return; }
 
-    showToast("正在刷写 DTBO，请稍候...");
-    
-    // Give Toast a chance to render
-    await new Promise(resolve => setTimeout(resolve, 50));
+    term.log(""); term.log("========== 开始执行 ==========", 'step');
+    await nextPaint();
 
     const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
-    
-    // Pass custom rate as 2nd argument (empty string if not set)
+    const logPath = `${MOD_DIR}/apply.log`;
+    const statusPath = `${MOD_DIR}/apply.status`;
+
     try {
-        const result = await ksuExec(`sh "${scriptPath}" flash_dtbo "${customRate}"`);
-        if (isFlashSuccess(result)) {
-             await showModal("成功", "刷写成功！\n" + result);
-        } else if (/AVB|签名/.test(result)) {
-             await showModal("失败", "AVB 处理失败，DTBO 分区未被修改，请勿重启设备。\n\n" + extractFlashError(result));
+        // 启动后台任务（setsid 立即返回，不阻塞 UI；日志流式写入 apply.log）
+        const started = await ksuExec(`sh "${scriptPath}" start_flash "${customRate}"`);
+        term.log(started || "(已启动)", 'info');
+        if (!started.includes('Started')) {
+            term.log("✖ 无法启动后台任务", 'err');
+            term.setButtons([{ id: 'ok', label: '知道了', cls: 'btn-secondary' }]);
+            await term.waitButton(); term.close();
+            return;
+        }
+
+        term.log("⏳ 后台执行中，日志实时刷新...", 'info');
+        const status = await pollProcessLog(logPath, statusPath, term);
+
+        if (status === 'SUCCESS') {
+            term.log(""); term.log("✔ 全部完成！刷写成功，重启后生效。", 'done');
+            term.setButtons([
+                { id: 'reboot', label: '🔄 立即重启', cls: 'btn-danger' },
+                { id: 'later', label: '⏰ 稍后重启', cls: 'btn-secondary' }
+            ]);
+            const act = await term.waitButton();
+            term.close();
+            if (act === 'reboot') {
+                showToast("正在重启设备...");
+                await ksuExec("reboot");
+            }
         } else {
-             await showModal("失败", "刷写失败，DTBO 分区未被修改:\n" + extractFlashError(result));
+            term.log("✖ 流程失败，已中止（DTBO 分区未被修改）", 'err');
+            term.setButtons([{ id: 'ok', label: '知道了', cls: 'btn-secondary' }]);
+            await term.waitButton(); term.close();
         }
     } catch (e) {
-        await showModal("错误", "执行出错: " + e.message);
+        term.log("✖ 异常: " + e.message, 'err');
+        term.setButtons([{ id: 'ok', label: '知道了', cls: 'btn-secondary' }]);
+        await term.waitButton(); term.close();
     }
 
     await loadSystemStatus();
+}
+
+// 刷入成功弹窗：立即重启 / 稍后重启
+async function showRebootModal(title, message) {
+    const action = await showModal(title, message, {
+        buttons: [
+            { id: 'reboot', label: '🔄 立即重启', className: 'btn-danger' },
+            { id: 'later', label: '⏰ 稍后重启', className: 'btn-secondary' }
+        ]
+    });
+    if (action === 'reboot') {
+        showToast("正在重启设备...");
+        await ksuExec("reboot");
+    }
 }
 
 // 恢复 DTBO
@@ -507,7 +553,7 @@ async function restoreDtbo() {
         debugLog(`Restore result: ${result}`);
         
         if (result.includes("Success")) {
-            await showModal("成功", "恢复成功！请重启设备。");
+            await showRebootModal("恢复成功", "原厂 DTBO 已恢复。\n请重启设备以生效。");
         } else {
             await showModal("失败", "恢复失败:\n" + result);
         }
@@ -966,8 +1012,10 @@ async function scanRates() {
                 <td>${rate.clock}</td>
                 <td>${rate.file}</td>
                 <td>
-                    <button class="btn btn-sm btn-primary" style="margin-right:5px;" onclick="modifyRate('${rate.node}', ${rate.fps})">修改</button>
-                    <button class="btn btn-sm btn-danger" onclick="removeRate('${rate.node}')">删除</button>
+                    <div class="row-actions">
+                        <button class="btn btn-rate-edit" onclick="modifyRate('${rate.node}', ${rate.fps}, ${rate.clock || 0}, ${rate.transfer || 0})">✏️ 修改</button>
+                        <button class="btn btn-rate-del" onclick="removeRate('${rate.node}')">🗑️ 删除</button>
+                    </div>
                 </td>
             `;
             tableBody.appendChild(row);
@@ -976,14 +1024,90 @@ async function scanRates() {
             const option = document.createElement('option');
             option.value = rate.node;
             option.text = `${rate.fps} Hz (${rate.node})`;
+            option.dataset.fps = rate.fps;
+            option.dataset.clock = rate.clock || 0;
+            option.dataset.transfer = rate.transfer || 0;
             if (rate.fps === 120) option.selected = true;
             select.appendChild(option);
         });
+
+        // 绑定高级选项默认值实时回填（option 已重建，需重新绑定）
+        setupRateDefaults();
 
     } catch (e) {
         console.error("Scan failed:", e);
         tableBody.innerHTML = `<tr><td colspan="4" style="color:red;">扫描失败: ${e.message}<br><small>${result.substring(0, 100)}...</small></td></tr>`;
     }
+}
+
+// 3.0 Auto Calc Helper
+// 与后端 dts_tool.c 公式保持一致（C 整数除法 = 截断）：
+//   new_clock   = base_clock   * target_fps / base_fps
+//   new_transfer = base_transfer * base_fps  / target_fps
+function calcAuto(fps, clock, transfer, targetFps) {
+    if (!fps || fps <= 0 || !targetFps || targetFps <= 0) return null;
+    return {
+        clock: clock > 0 ? Math.floor(clock * targetFps / fps) : 0,
+        transfer: transfer > 0 ? Math.floor(transfer * fps / targetFps) : 0
+    };
+}
+
+// 3.0.1 添加区块：基准节点 / 目标 FPS 变化时，实时把默认值回填到高级选项输入框
+// 默认值 = 有原值则按目标 FPS 自动换算；无原值(0)则留空并提示。
+// 用户手动编辑过则不再覆盖；清空后恢复自动回填。
+function setupRateDefaults() {
+    const baseSelect = document.getElementById('base-node-select');
+    const targetInput = document.getElementById('target-fps');
+    const clockInput = document.getElementById('custom-clock');
+    const transferInput = document.getElementById('custom-transfer');
+    if (!baseSelect || !targetInput || !clockInput || !transferInput) return;
+
+    function refreshDefaults() {
+        const opt = baseSelect.options[baseSelect.selectedIndex];
+        const fps = opt ? parseFloat(opt.dataset.fps) : 0;
+        const clock = opt ? parseFloat(opt.dataset.clock) : 0;
+        const transfer = opt ? parseFloat(opt.dataset.transfer) : 0;
+        const targetFps = parseFloat(targetInput.value);
+        const auto = calcAuto(fps, clock, transfer, targetFps);
+
+        if (!clockInput.dataset.touched) {
+            if (auto && auto.clock > 0) {
+                clockInput.value = auto.clock;
+                clockInput.placeholder = `自动计算: ${auto.clock}`;
+            } else {
+                clockInput.value = '';
+                clockInput.placeholder = clock > 0 ? '自动计算' : '该节点无原值，留空由后端自动计算';
+            }
+        }
+        if (!transferInput.dataset.touched) {
+            if (auto && auto.transfer > 0) {
+                transferInput.value = auto.transfer;
+                transferInput.placeholder = `自动计算: ${auto.transfer}`;
+            } else {
+                transferInput.value = '';
+                transferInput.placeholder = transfer > 0 ? '自动计算' : '该节点无原值，留空由后端自动计算';
+            }
+        }
+    }
+
+    // 解绑旧监听（scanRates 每次重建 option 后都会重新调用本函数）
+    if (baseSelect._onRateDefaultsChange) baseSelect.removeEventListener('change', baseSelect._onRateDefaultsChange);
+    if (targetInput._onRateDefaultsInput) targetInput.removeEventListener('input', targetInput._onRateDefaultsInput);
+    if (clockInput._onRateDefaultsManual) clockInput.removeEventListener('input', clockInput._onRateDefaultsManual);
+    if (transferInput._onRateDefaultsManual) transferInput.removeEventListener('input', transferInput._onRateDefaultsManual);
+
+    baseSelect._onRateDefaultsChange = refreshDefaults;
+    targetInput._onRateDefaultsInput = refreshDefaults;
+    clockInput._onRateDefaultsManual = () => { clockInput.dataset.touched = clockInput.value !== '' ? '1' : ''; };
+    transferInput._onRateDefaultsManual = () => { transferInput.dataset.touched = transferInput.value !== '' ? '1' : ''; };
+
+    baseSelect.addEventListener('change', baseSelect._onRateDefaultsChange);
+    targetInput.addEventListener('input', targetInput._onRateDefaultsInput);
+    clockInput.addEventListener('input', clockInput._onRateDefaultsManual);
+    transferInput.addEventListener('input', transferInput._onRateDefaultsManual);
+
+    // 初始回填一次
+    refreshDefaults();
 }
 
 // 3. Add Rate
@@ -1000,14 +1124,28 @@ async function addRate() {
         return;
     }
 
-    showToast(`正在添加 ${targetFps}Hz...`);
+    // 高级选项：自定义时钟 / 传输时间（留空 = 自动计算）
+    const customClock = document.getElementById('custom-clock').value.trim();
+    const customTransfer = document.getElementById('custom-transfer').value.trim();
+    const clockArg = (customClock && !isNaN(customClock) && customClock > 0) ? customClock : "";
+    const transferArg = (customTransfer && !isNaN(customTransfer) && customTransfer > 0) ? customTransfer : "";
+
+    let extra = "";
+    if (clockArg || transferArg) {
+        extra = `（自定义 clock=${clockArg || "自动"} transfer=${transferArg || "自动"}）`;
+    }
+    showToast(`正在添加 ${targetFps}Hz ${extra}...`);
     const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
     
-    const result = await ksuExec(`sh "${scriptPath}" add_rate "${baseNode}" "${targetFps}"`);
+    const result = await ksuExec(`sh "${scriptPath}" add_rate "${baseNode}" "${targetFps}" "${clockArg}" "${transferArg}"`);
     
     if (result.includes("Success") || result.includes("Added")) {
         showToast("添加成功！");
         document.getElementById('target-fps').value = '';
+        const clockEl = document.getElementById('custom-clock');
+        const transferEl = document.getElementById('custom-transfer');
+        if (clockEl) { clockEl.value = ''; clockEl.dataset.touched = ''; }
+        if (transferEl) { transferEl.value = ''; transferEl.dataset.touched = ''; }
         await scanRates();
     } else {
         await showModal("失败", "添加失败:\n" + result);
@@ -1019,6 +1157,7 @@ let modalResolve = null;
 
 function closeModal(result) {
     document.getElementById('custom-modal').style.display = 'none';
+    document.getElementById('modal-log').style.display = 'none';
     if (modalResolve) {
         // If result is provided, use it; otherwise default to false (cancel)
         modalResolve(result !== undefined ? result : false);
@@ -1027,7 +1166,16 @@ function closeModal(result) {
 }
 window.closeModal = closeModal;
 
-function showModal(title, message, isInput = false, inputPlaceholder = "", inputValue = "") {
+// 可复用弹窗
+// 用法:
+//   showModal(title, msg)                          → 确定/取消，resolve true/false
+//   showModal(title, msg, true, placeholder, val)  → 输入框，resolve 输入值
+//   showModal(title, msg, {buttons:[{id,label,className}]}) → 自定义按钮，resolve 按钮 id
+//   openLogModal(title) → 返回 {append(text), close()}，用于流程日志弹窗
+function showModal(title, message, opts = false, inputPlaceholder = "", inputValue = "") {
+    if (typeof opts === 'boolean') {
+        opts = { isInput: opts, inputPlaceholder, inputValue };
+    }
     return new Promise((resolve) => {
         // If there's an existing modal pending, cancel it first
         if (modalResolve) {
@@ -1037,48 +1185,237 @@ function showModal(title, message, isInput = false, inputPlaceholder = "", input
         
         document.getElementById('modal-title').innerText = title;
         document.getElementById('modal-message').innerText = message;
+        document.getElementById('modal-log').style.display = 'none';
         
         const inputContainer = document.getElementById('modal-input-container');
         const input = document.getElementById('modal-input');
         
-        if (isInput) {
+        if (opts.isInput) {
             inputContainer.style.display = 'block';
-            input.placeholder = inputPlaceholder;
-            input.value = inputValue;
+            input.placeholder = opts.inputPlaceholder;
+            input.value = opts.inputValue;
             input.focus();
         } else {
             inputContainer.style.display = 'none';
         }
         
+        // 多字段表单 (fields: [{id,label,value,placeholder,type,onInput}])
+        const fieldsContainer = document.getElementById('modal-fields');
+        if (opts.fields && opts.fields.length) {
+            fieldsContainer.style.display = 'block';
+            fieldsContainer.innerHTML = '';
+            opts.fields.forEach(f => {
+                const group = document.createElement('div');
+                group.className = 'form-group modal-field';
+                const label = document.createElement('label');
+                label.innerText = f.label;
+                const fieldInput = document.createElement('input');
+                fieldInput.type = f.type || 'number';
+                fieldInput.className = 'form-input';
+                fieldInput.placeholder = f.placeholder || '';
+                fieldInput.value = f.value || '';
+                fieldInput.dataset.fieldId = f.id;
+                if (typeof f.onInput === 'function') {
+                    fieldInput.addEventListener('input', () => f.onInput(fieldInput, fieldsContainer));
+                }
+                group.appendChild(label);
+                group.appendChild(fieldInput);
+                fieldsContainer.appendChild(group);
+            });
+        } else {
+            fieldsContainer.style.display = 'none';
+            fieldsContainer.innerHTML = '';
+        }
+        
+        // 构建按钮
+        const actionsEl = document.querySelector('.modal-actions');
+        actionsEl.innerHTML = '';
+        let buttons;
+        if (opts.buttons && opts.buttons.length) {
+            buttons = opts.buttons;
+        } else if (opts.isInput) {
+            buttons = [{ id: 'ok', label: '确定', className: 'btn-primary' }];
+        } else if (opts.fields && opts.fields.length) {
+            buttons = [
+                { id: 'cancel', label: '取消', className: 'btn-secondary' },
+                { id: 'ok', label: '确定', className: 'btn-primary' }
+            ];
+        } else {
+            buttons = [
+                { id: 'cancel', label: '取消', className: 'btn-secondary' },
+                { id: 'ok', label: '确定', className: 'btn-primary' }
+            ];
+        }
+        buttons.forEach(b => {
+            const btn = document.createElement('button');
+            btn.className = `btn ${b.className || 'btn-primary'}`;
+            btn.innerText = b.label;
+            btn.onclick = () => {
+                let val;
+                if (opts.isInput && b.id === 'ok') {
+                    val = input.value;
+                } else if (opts.fields && opts.fields.length && b.id === 'ok') {
+                    // 收集所有字段值
+                    val = {};
+                    fieldsContainer.querySelectorAll('input[data-field-id]').forEach(fi => {
+                        val[fi.dataset.fieldId] = fi.value.trim();
+                    });
+                } else {
+                    val = b.id === 'ok' ? true : (b.id === 'cancel' ? false : b.id);
+                }
+                closeModal(val);
+            };
+            actionsEl.appendChild(btn);
+        });
+        
         document.getElementById('custom-modal').style.display = 'flex';
-        
-        // Unbind previous listener by cloning
-        const btn = document.getElementById('modal-confirm-btn');
-        const newBtn = btn.cloneNode(true);
-        btn.parentNode.replaceChild(newBtn, btn);
-        
-        newBtn.onclick = () => {
-            const val = isInput ? document.getElementById('modal-input').value : true;
-            closeModal(val);
-        };
     });
 }
 
+// ===== 流程日志弹窗（亮色主题：合并确认 + 分步日志） =====
+let flowButtonsResolve = null;
+
+// 打开流程弹窗：同步立即显示（不等命令，保持亮色主题）
+// 返回 {log(text, cls), setButtons([...]), waitButton(), close()}
+function openFlowModal(title) {
+    // 关闭可能残留的弹窗
+    if (modalResolve) { modalResolve(false); modalResolve = null; }
+    if (flowButtonsResolve) { flowButtonsResolve(null); flowButtonsResolve = null; }
+
+    const modal = document.getElementById('custom-modal');
+    const content = modal.querySelector('.modal-content');
+    content.classList.add('modal-lg');
+    document.getElementById('modal-title').innerText = title;
+    document.getElementById('modal-message').innerText = '';
+    document.getElementById('modal-input-container').style.display = 'none';
+    document.getElementById('modal-fields').style.display = 'none';
+    const logEl = document.getElementById('modal-log');
+    logEl.style.display = 'block';
+    logEl.innerHTML = '';
+    const actionsEl = document.querySelector('.modal-actions');
+    actionsEl.innerHTML = '';
+    modal.style.display = 'flex';
+
+    return {
+        // cls: step / ok / err / warn / info / cmd / done（对应 CSS .log-* 着色）
+        log(text, cls = '') {
+            if (cls) {
+                const span = document.createElement('span');
+                span.className = 'log-' + cls;
+                span.innerText = text;
+                logEl.appendChild(span);
+            } else {
+                logEl.appendChild(document.createTextNode(text));
+            }
+            logEl.appendChild(document.createTextNode('\n'));
+            logEl.scrollTop = logEl.scrollHeight;
+        },
+        setButtons(buttons) { // [{id,label,cls}]
+            const act = document.querySelector('.modal-actions');
+            act.innerHTML = '';
+            buttons.forEach(b => {
+                const btn = document.createElement('button');
+                btn.className = `btn ${b.cls || 'btn-secondary'}`;
+                btn.innerText = b.label;
+                btn.onclick = () => {
+                    act.innerHTML = '';
+                    if (flowButtonsResolve) {
+                        const r = flowButtonsResolve;
+                        flowButtonsResolve = null;
+                        r(b.id);
+                    }
+                };
+                act.appendChild(btn);
+            });
+        },
+        waitButton() {
+            return new Promise(resolve => { flowButtonsResolve = resolve; });
+        },
+        close() {
+            if (flowButtonsResolve) { flowButtonsResolve(null); flowButtonsResolve = null; }
+            content.classList.remove('modal-lg');
+            modal.style.display = 'none';
+            logEl.style.display = 'none';
+        }
+    };
+}
+
+// 让浏览器先渲染再执行命令（避免主线程忙导致弹窗延迟出现）
+const nextPaint = () => new Promise(r => setTimeout(r, 30));
+
 // 3.5 Modify Rate
-async function modifyRate(nodeName, currentFps) {
+async function modifyRate(nodeName, currentFps, currentClock, currentTransfer) {
     debugLog(`Clicked Modify: ${nodeName}, ${currentFps}`);
     
-    // Use custom modal instead of prompt
-    const newFps = await showModal(`修改 ${nodeName}`, "请输入新的刷新率:", true, "例如: 150", currentFps);
+    currentClock = currentClock || 0;
+    currentTransfer = currentTransfer || 0;
     
+    // 修改弹窗：FPS + 高级选项（默认值 = 原值；改 FPS 时自动按公式换算）
+    // 时钟/传输时间输入框预填原值；若手动修改过则不再被自动换算覆盖；清空后恢复自动。
+    const values = await showModal(`修改 ${nodeName}`, "以下为默认值（原值或按目标 FPS 自动换算），可直接修改；留空则按基准节点自动计算。", {
+        fields: [
+            {
+                id: 'fps',
+                label: '目标刷新率 (FPS):',
+                value: currentFps,
+                placeholder: '例如: 150',
+                onInput: (input, container) => {
+                    const targetFps = parseFloat(input.value);
+                    const auto = calcAuto(currentFps, currentClock, currentTransfer, targetFps);
+                    if (!auto) return;
+                    const clockIn = container.querySelector('input[data-field-id="clock"]');
+                    const transferIn = container.querySelector('input[data-field-id="transfer"]');
+                    if (clockIn && !clockIn.dataset.touched) {
+                        if (auto.clock > 0) {
+                            clockIn.value = auto.clock;
+                            clockIn.placeholder = `自动计算: ${auto.clock}`;
+                        } else {
+                            clockIn.value = '';
+                            clockIn.placeholder = currentClock > 0 ? '自动计算' : '该节点无原值，留空由后端自动计算';
+                        }
+                    }
+                    if (transferIn && !transferIn.dataset.touched) {
+                        if (auto.transfer > 0) {
+                            transferIn.value = auto.transfer;
+                            transferIn.placeholder = `自动计算: ${auto.transfer}`;
+                        } else {
+                            transferIn.value = '';
+                            transferIn.placeholder = currentTransfer > 0 ? '自动计算' : '该节点无原值，留空由后端自动计算';
+                        }
+                    }
+                }
+            },
+            {
+                id: 'clock',
+                label: '时钟频率 (clockrate, Hz):',
+                value: currentClock > 0 ? currentClock : '',
+                placeholder: currentClock > 0 ? `原值: ${currentClock}` : '该节点无原值，留空由后端自动计算',
+                onInput: (input) => { input.dataset.touched = input.value !== '' ? '1' : ''; }
+            },
+            {
+                id: 'transfer',
+                label: '传输时间 (transfer-time-us, µs):',
+                value: currentTransfer > 0 ? currentTransfer : '',
+                placeholder: currentTransfer > 0 ? `原值: ${currentTransfer}` : '该节点无原值，留空由后端自动计算',
+                onInput: (input) => { input.dataset.touched = input.value !== '' ? '1' : ''; }
+            }
+        ]
+    });
+    
+    if (!values) return;
+    
+    const newFps = values.fps;
     if (!newFps || isNaN(newFps) || newFps == currentFps) return;
+    
+    const clockArg = (values.clock && !isNaN(values.clock) && values.clock > 0) ? values.clock : "";
+    const transferArg = (values.transfer && !isNaN(values.transfer) && values.transfer > 0) ? values.transfer : "";
     
     // 1. Add new node based on old node
     showToast(`正在添加 ${newFps}Hz...`);
     const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
     
     // Use the nodeName as the base for the new node
-    const resultAdd = await ksuExec(`sh "${scriptPath}" add_rate "${nodeName}" "${newFps}"`);
+    const resultAdd = await ksuExec(`sh "${scriptPath}" add_rate "${nodeName}" "${newFps}" "${clockArg}" "${transferArg}"`);
     
     if (resultAdd.includes("Success") || resultAdd.includes("Added")) {
         // 2. Remove old node
@@ -1123,12 +1460,16 @@ async function removeRate(nodeName) {
 }
 
 // 5. Apply Changes
-// 判断刷入类命令是否成功：明确的失败标记优先，
-// 兼容旧版模块输出的 "警告:AVB签名添加失败" / "刷入成功!" 等日志。
+// 判断刷入类命令是否成功：
+//   后端阶段命令（pack_only / merge_avb / flash_final / smart_add_rate）
+//   成功时统一输出 "Success: ..." 前缀，错误时输出 "错误：/Error:"。
+//   因此只要输出包含 Success 标记即为成功，不再用失败关键词正则误伤
+//   （例如 smart_add_rate 中 process_dts 的"提示：…发生错误"只是警告，不应判失败）。
 function isFlashSuccess(result) {
     if (!result) return false;
-    if (/错误|失败|警告|签名失败|AVB信息复用失败|打包失败|刷入失败/.test(result)) return false;
-    return result.includes("Success") || result.includes("刷入成功") || result.includes("操作完成");
+    if (result.includes("Success")) return true;
+    if (result.includes("刷入成功") || result.includes("操作完成")) return true;
+    return false;
 }
 
 // 提取明确的错误信息用于提示
@@ -1138,30 +1479,113 @@ function extractFlashError(result) {
     return m ? m[0] : result;
 }
 
+// 后台任务日志流式轮询：
+//   后端已用 setsid 把流程放到后台执行，输出实时写入 logPath，
+//   完成时写入 statusPath（SUCCESS / FAIL）。
+//   这里每 interval 毫秒读取一次增量并追加到流程弹窗，实现真正的流式显示，
+//   同时主线程不阻塞（不再 await 长命令），解决刷入卡顿。
+// 返回 Promise<'SUCCESS' | 'FAIL'>，并给每行日志着色。
+function pollProcessLog(logPath, statusPath, term, interval = 500) {
+    return new Promise((resolve) => {
+        let lastLen = 0;
+        let pending = '';
+        const timer = setInterval(async () => {
+            try {
+                // 增量读取日志（从上次读到的字节偏移继续）
+                const chunk = await ksuExec(`tail -c +${lastLen + 1} "${logPath}" 2>/dev/null`, true);
+                if (chunk) {
+                    lastLen += chunk.length;
+                    const all = pending + chunk;
+                    const lines = all.split('\n');
+                    pending = lines.pop() || ''; // 可能是不完整行，留到下次拼接
+                    lines.forEach(line => {
+                        const t = line.trim();
+                        if (!t) return;
+                        let cls = 'info';
+                        if (t.includes('Success:') || t.includes('操作完成')) cls = 'ok';
+                        else if (t.includes('错误') || t.includes('Error:')) cls = 'err';
+                        else if (t.includes('== 步骤') || t.includes('步骤')) cls = 'step';
+                        else if (t.includes('WARNING')) cls = 'warn';
+                        term.log(t, cls);
+                    });
+                }
+                // 检查状态文件
+                const st = (await ksuExec(`cat "${statusPath}" 2>/dev/null`, true)).trim();
+                if (st === 'SUCCESS' || st === 'FAIL') {
+                    clearInterval(timer);
+                    resolve(st);
+                }
+            } catch (e) {
+                // 轮询异常忽略，继续
+            }
+        }, interval);
+    });
+}
+
+// 应用更改并刷入（后台执行 + 流式日志：立即弹出 → 确认 → setsid 后台跑 → 轮询日志 → 重启按钮）
 async function applyChanges() {
-    // if (!confirm("确定要应用更改并刷入设备吗？\n\n这将会重新打包 DTBO 并刷入分区。\n请确保所有修改都已确认无误。")) return;
-    const confirmed = await showModal("应用确认", "确定要应用更改并刷入设备吗？\n\n这将会重新打包 DTBO 并刷入分区。\n请确保所有修改都已确认无误。");
-    if (!confirmed) return;
+    // 立即打开流程弹窗（同步显示，不等命令，解决"等5秒才弹窗"）
+    const term = openFlowModal("应用更改 & 刷入 DTBO");
 
-    // Give UI a chance to close modal
-    await new Promise(resolve => setTimeout(resolve, 100));
+    // 确认步骤
+    term.log("⚠️ 即将执行以下操作：", 'warn');
+    term.log("  1. 打包 new_dtbo.img（合并你的所有修改）", 'info');
+    term.log("  2. 合并官方 AVB 签名（免解锁方案）", 'info');
+    term.log("  3. 写入 DTBO 分区并回读校验", 'info');
+    term.log("刷入后需要重启生效。请确保已有救砖备份。", 'warn');
 
-    showToast("正在应用更改并刷入...");
-    
-    // Give Toast a chance to render
-    await new Promise(resolve => setTimeout(resolve, 50));
+    term.setButtons([
+        { id: 'start', label: '▶ 开始执行', cls: 'btn-danger' },
+        { id: 'cancel', label: '取消', cls: 'btn-secondary' }
+    ]);
+    const action = await term.waitButton();
+    if (action !== 'start') { term.close(); return; }
+
+    term.log(""); term.log("========== 开始执行 ==========", 'step');
+    await nextPaint();
 
     const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
-    
-    const result = await ksuExec(`sh "${scriptPath}" apply_changes`);
-    
-    if (isFlashSuccess(result)) {
-        await showModal("成功", "成功！DTBO 已刷入。\n请重启设备以生效。");
-    } else if (/AVB|签名/.test(result)) {
-        await showModal("失败", "AVB 处理失败，DTBO 分区未被修改，请勿重启设备。\n\n" + extractFlashError(result));
-    } else {
-        await showModal("失败", "操作失败，DTBO 分区未被修改：\n" + extractFlashError(result));
+    const logPath = `${MOD_DIR}/apply.log`;
+    const statusPath = `${MOD_DIR}/apply.status`;
+
+    try {
+        // 启动后台任务（setsid 立即返回，不阻塞 UI；日志流式写入 apply.log）
+        const started = await ksuExec(`sh "${scriptPath}" start_apply`);
+        term.log(started || "(已启动)", 'info');
+        if (!started.includes('Started')) {
+            term.log("✖ 无法启动后台任务", 'err');
+            term.setButtons([{ id: 'ok', label: '知道了', cls: 'btn-secondary' }]);
+            await term.waitButton(); term.close();
+            return;
+        }
+
+        term.log("⏳ 后台执行中，日志实时刷新...", 'info');
+        const status = await pollProcessLog(logPath, statusPath, term);
+
+        if (status === 'SUCCESS') {
+            term.log(""); term.log("✔ 全部完成！刷入成功，重启后生效。", 'done');
+            term.setButtons([
+                { id: 'reboot', label: '🔄 立即重启', cls: 'btn-danger' },
+                { id: 'later', label: '⏰ 稍后重启', cls: 'btn-secondary' }
+            ]);
+            const act = await term.waitButton();
+            term.close();
+            if (act === 'reboot') {
+                showToast("正在重启设备...");
+                await ksuExec("reboot");
+            }
+        } else {
+            term.log("✖ 流程失败，已中止（DTBO 分区未被修改）", 'err');
+            term.setButtons([{ id: 'ok', label: '知道了', cls: 'btn-secondary' }]);
+            await term.waitButton(); term.close();
+        }
+    } catch (e) {
+        term.log("✖ 异常: " + e.message, 'err');
+        term.setButtons([{ id: 'ok', label: '知道了', cls: 'btn-secondary' }]);
+        await term.waitButton(); term.close();
     }
+
+    await loadSystemStatus();
 }
 
 // 6. Uninstall Module

@@ -1,5 +1,19 @@
 # 更新日志
-## v2.6
+## v2.8
+1. WebUI 点击"应用更改"后新增**流程日志弹窗**：不再是一次性等待整条命令（原实现 10~30 秒无反馈，易误判卡死）。后端 `web_handler.sh` 拆分为 `pack_only`（打包）→ `merge_avb`（复用官方 VBMeta 合成签名）→ `flash_final`（写入分区+回读校验）三个阶段子命令。**后台执行 + 前端流式轮询**：点击立即弹出弹窗，打包/签名/刷入全流程在后台运行（setsid），前端每 500ms 增量读取日志逐行追加（不再阻塞 UI 线程、日志像 customize.sh 一样逐行滚动），任一步失败立即中止并标红，DTBO 分区不会被修改。"刷写 DTBO"同样拆分为 提取→解包→补丁→smart_add → 打包 → 签名 → 刷入 分步日志。
+2. 刷入完成弹窗改为双按钮：**🔄 立即重启** / **⏰ 稍后重启**（恢复原厂、卸载成功弹窗同样生效）。立即重启直接执行 reboot，稍后重启关闭弹窗。
+3. 添加刷新率新增**折叠高级选项**：时钟频率 (clockrate, Hz) 与传输时间 (transfer-time-us, µs) 两个可选自定义输入，**输入框实时显示自动计算值**（基于基准节点按目标 FPS 等比换算），无原值时提示"留空由后端自动计算"，用户可改可清空；填写时**自定义值覆盖自动计算**（framerate 仍使用目标 FPS）。`dts_tool add`/`smart_add` 增加可选 clock/transfer 参数（缺省行为与旧版完全一致，向后兼容）。
+4. "修改当前刷新率"弹窗同步支持高级选项：打开即**预填节点原值**（clockrate/transfer-time-us），修改目标 FPS 时实时按比例换算并回填（手动编辑过则尊重用户输入），解决"不知道原值不会填"的问题。
+5. WebUI 表格"修改/删除"按钮间距加大、按钮尺寸加大，避免误触。
+6. 修复打包日志显示 WARNING: linker 噪音（avbtool 加载 Python 扩展 .so 的 DT_RPATH 提示），打包日志展示时过滤，界面干净。
+7. 修复"应用更改"误报"打包失败"：前后端成功标记统一为 `Success:` 前缀，删除失败关键词正则误伤（smart_add 输出中的"提示：…发生错误"不再误判为失败），失败弹窗保留完整日志内容。
+
+## v2.7
+1.修复 Web 刷入修改版 DTBO 后不开机（必须还原 DTBO 才能开机）的隐藏 Bug：`dtbo_write_be64` 原实现通过 `>> 56/48/40/32/...` 移位循环写入 64 位大端字段，但 Android mksh 是 32 位有符号算术，移位 ≥32 会回绕（`>>48` 被当作 `>>16`），导致 AVB footer 的 original_image_size / vbmeta_offset / vbmeta_size 三个 64 位字段全部错位（写成"4 字节值重复两次"），bootloader 按错误偏移定位 VBMeta 失败 → AVB 校验不过 → 拒启变砖。已重写为"前导 4 个 NUL + 低 32 位大端"写法（所有取值均 < 2^31），真机验证 footer 输出正确，刷入后正常开机。
+2.新增合成后结构自检（防再变砖）：dtbo_apply_stock_avb 生成 dtbo_final.img 后强制回读 footer 三字段校验、VBMeta magic 校验、与官方备份逐字节 cmp，任一失败即中止刷入并提示，绝不把未验证镜像写入分区。
+3.修复说明：`bin/new_dtbo.img` 是解包重打包后的裸中间产物（本就无 AVB），Web 实际刷入的是合成官方 VBMeta 的 `dtbo_final.img`；变砖根因是合成时 footer 字段写错，而非"没签名"。
+
+## v2.6 (未发布)
 1.修复超频刷新率息屏后亮屏回到 120Hz 的 Bug：rate_daemon 新增屏幕状态监测，检测到息屏（OFF/DOZE）后再次亮屏时，强制重新下发目标模式并同步系统刷新率设置，不再依赖内存缓存的短路判断。可观察 daemon.log 中的 "Screen ON after OFF/DOZE" 与 "Forced reapply after screen-on" 日志确认触发。
 2.修复 WebUI "禁用 ADFR" 无效的问题：原脚本操作的属性（persist.oplus.display.vrr.adfr 等）在 GT8 Pro 上不存在（实际为 persist.oplus.display.vrr.pdfr），导致按钮空转。现改为：备份并操作真实属性（兼容新旧机型）、persist 属性持久化写入、`cmd display set-user-preferred-display-mode` 固定框架层目标模式、启用内核 ADFR 并写入 min_fps 下限，且写入状态文件，开机后由 service.sh 自动重新应用，直到点击"还原默认"。已在 RMX5200 (GT8 Pro) 真机验证禁用/还原闭环。
 
@@ -48,7 +62,7 @@
 - 扩展支持范围，适配更多 OnePlus 和 Realme 机型（具体视测试情况而定）。
 - 优化文件结构和说明文档。
 - 适配"1+15"修改 DTBO，删除原有60，90hz，120更改为123hz，使用165添加170，175，180，185，190，195，199档位并使用165添加60来修复高挡位ltpo。
-- 适配“1+12”修改 DTBO, 删除原有的60和90hz，电池解容至6000mah，修复cell-index排序问题。
+- 适配"1+12"修改 DTBO, 删除原有的60和90hz，电池解容至6000mah，修复cell-index排序问题。
 - 添加无需禁用avb效验即可修改dtbo（此处致谢大肥鱼，bybycode和破星）。
 
 ## v1.1

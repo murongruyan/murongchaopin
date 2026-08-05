@@ -19,6 +19,169 @@ AVB_HELPER="$MOD_PATH/scripts/dtbo_avb.sh"
 mkdir -p "$(dirname "$CONFIG_FILE")"
 [ ! -f "$CONFIG_FILE" ] && echo "1" > "$CONFIG_FILE"
 
+# ============================================================
+# 阶段化子流程（供 WebUI 日志弹窗分步调用）
+#   pack_only   → 仅打包 → new_dtbo.img
+#   merge_avb   → 复用官方 VBMeta 合成 → dtbo_final.img（签名）
+#   flash_final → 写入分区 + 回读校验
+# 每个子命令独立执行、单独返回，前端每步追加一行日志。
+# ============================================================
+
+# 阶段 1：打包（仅生成 new_dtbo.img，不刷入）
+do_pack() {
+    cd "$BIN_DIR" || { echo "错误：无法进入 $BIN_DIR"; return 1; }
+    chmod +x * 2>/dev/null
+
+    echo "== 步骤 1/3：打包 DTBO =="
+    PACK_LOG="$BIN_DIR/pack.log"
+    ./pack_dtbo >"$PACK_LOG" 2>&1
+    if [ $? -ne 0 ]; then
+        echo "错误：打包失败"
+        cat "$PACK_LOG"
+        return 1
+    fi
+
+    NEW_DTBO="$BIN_DIR/new_dtbo.img"
+    if [ ! -f "$NEW_DTBO" ]; then
+        NEW_DTBO="$BIN_DIR/dtbo.img"
+    fi
+    SIZE=$(ls -l "$NEW_DTBO" 2>/dev/null | awk '{print $5}')
+    echo "打包工具输出（pack.log）:"
+    # 过滤 avbtool 加载 .so 时的 linker DT_RPATH 警告噪音（不影响功能）
+    tail -n 20 "$PACK_LOG" 2>/dev/null | grep -v 'WARNING: linker' | sed 's/^/  /'
+    echo "生成镜像: $(basename "$NEW_DTBO") ($SIZE 字节)"
+    echo "Success: 打包完成: $(basename "$NEW_DTBO")"
+    return 0
+}
+
+# 阶段 2：合并官方 AVB（签名）
+do_merge_avb() {
+    SLOT=$(getprop ro.boot.slot_suffix)
+    DTBO_PARTITION="/dev/block/by-name/dtbo$SLOT"
+
+    NEW_DTBO="$BIN_DIR/new_dtbo.img"
+    if [ ! -f "$NEW_DTBO" ]; then
+        NEW_DTBO="$BIN_DIR/dtbo.img"
+    fi
+
+    STOCK_DTBO="$IMG_DIR/dtbo.img"
+    FINAL_DTBO="$BIN_DIR/dtbo_final.img"
+    PARTITION_SIZE=$(blockdev --getsize64 "$DTBO_PARTITION" 2>/dev/null)
+
+    echo "== 步骤 2/3：合并官方 AVB 签名 =="
+    echo "  目标分区: $DTBO_PARTITION ($PARTITION_SIZE 字节)"
+    echo "  官方备份: $(basename "$STOCK_DTBO")"
+    echo "  待签名镜像: $(basename "$NEW_DTBO")"
+
+    if [ ! -f "$AVB_HELPER" ]; then
+        echo "错误：缺少 DTBO AVB 处理脚本"
+        return 1
+    fi
+    if [ ! -f "$STOCK_DTBO" ]; then
+        echo "错误：找不到原厂 DTBO 备份，无法复用官方 AVB 信息"
+        return 1
+    fi
+
+    echo "正在提取官方 VBMeta 并重算偏移..."
+    if ! dtbo_apply_stock_avb "$STOCK_DTBO" "$NEW_DTBO" "$FINAL_DTBO" "$PARTITION_SIZE"; then
+        echo "错误：官方 AVB 信息复用失败，未执行刷入（请勿重启，DTBO 分区未被修改）"
+        return 1
+    fi
+    SIZE=$(ls -l "$FINAL_DTBO" 2>/dev/null | awk '{print $5}')
+    echo "签名镜像: $(basename "$FINAL_DTBO") ($SIZE 字节)"
+    echo "Success: 签名完成: $(basename "$FINAL_DTBO")"
+    return 0
+}
+
+# 阶段 3：刷入 + 回读校验
+do_flash() {
+    SLOT=$(getprop ro.boot.slot_suffix)
+    DTBO_PARTITION="/dev/block/by-name/dtbo$SLOT"
+    FINAL_DTBO="$BIN_DIR/dtbo_final.img"
+
+    echo "== 步骤 3/3：写入分区并回读校验 =="
+    if [ ! -f "$FINAL_DTBO" ]; then
+        echo "错误：找不到 dtbo_final.img，请先执行合并步骤"
+        return 1
+    fi
+    SIZE=$(ls -l "$FINAL_DTBO" 2>/dev/null | awk '{print $5}')
+    echo "  目标分区: $DTBO_PARTITION"
+    echo "  写入镜像: $(basename "$FINAL_DTBO") ($SIZE 字节)"
+    if dtbo_write_partition "$FINAL_DTBO" "$DTBO_PARTITION"; then
+        echo "Success: 刷入成功！请重启生效。"
+        return 0
+    else
+        echo "错误：刷入失败（分区未被修改）"
+        return 1
+    fi
+}
+
+# 阶段 0（flash_dtbo 专用）：提取→解包→通用补丁→smart_add
+do_smart_add() {
+    CUSTOM_RATE="$1"
+    echo "开始执行超频流程 (Multi-Model Mode)..."
+    if [ ! -z "$CUSTOM_RATE" ]; then
+        echo "目标自定义刷新率: ${CUSTOM_RATE}Hz"
+    fi
+
+    SLOT=$(getprop ro.boot.slot_suffix)
+    DTBO_PARTITION="/dev/block/by-name/dtbo$SLOT"
+
+    MODEL=$(getprop ro.product.vendor.model)
+    TARGET_PANEL=""
+    case "$MODEL" in
+        "RMX5200") TARGET_PANEL="qcom,mdss_dsi_panel_AE084_P_3_A0033_dsc_cmd_dvt02" ;;
+        "PLK110") TARGET_PANEL="qcom,mdss_dsi_panel_AD296_P_3_A0020_dsc_cmd" ;;
+        "PJD110") TARGET_PANEL="qcom,mdss_dsi_panel_AA545_P_3_A0005_dsc_cmd" ;;
+    esac
+
+    mkdir -p "$WORK_DIR"
+    mkdir -p "$BIN_DIR/dtbo_dts"
+
+    echo "1. 提取 DTBO..."
+    if dd if="$DTBO_PARTITION" of="$WORK_DIR/dtbo.img" bs=4096 2>&1; then
+        echo "提取成功"
+    else
+        echo "错误：提取失败"
+        return 1
+    fi
+
+    cd "$BIN_DIR" || return 1
+    chmod +x * 2>/dev/null
+
+    echo "2. 解包..."
+    ./unpack_dtbo "../workspace/dtbo.img" >/dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        echo "错误：解包失败"
+        return 1
+    fi
+
+    echo "3. 应用通用补丁..."
+    ./process_dts
+    RET=$?
+    if [ $RET -ne 0 ]; then
+        echo "提示：通用补丁未应用或发生错误 (代码 $RET)，但这可能不影响自定义刷新率。"
+    fi
+
+    if [ ! -z "$CUSTOM_RATE" ]; then
+        echo "3.1 智能添加自定义刷新率 ($CUSTOM_RATE Hz)..."
+        if [ ! -z "$TARGET_PANEL" ]; then
+            echo "    - 目标面板: $TARGET_PANEL"
+        fi
+        PRJ_ID=$(getprop ro.boot.prjname)
+        echo "    - Project ID: $PRJ_ID"
+        ./dts_tool smart_add "$CUSTOM_RATE" "$TARGET_PANEL" "$PRJ_ID"
+        if [ $? -eq 0 ]; then
+            echo "Success: 自定义刷新率节点已生成。"
+        else
+            echo "错误：自定义刷新率添加失败！"
+            return 1
+        fi
+    fi
+    echo "Success: 超频流程处理完成"
+    return 0
+}
+
 
 case "$1" in
     "init_workspace")
@@ -96,6 +259,8 @@ case "$1" in
     "add_rate")
         BASE_NODE="$2"
         TARGET_FPS="$3"
+        CUSTOM_CLOCK="$4"      # 可选：自定义时钟 (Hz)，留空=自动计算
+        CUSTOM_TRANSFER="$5"   # 可选：自定义传输时间 (µs)，留空=自动计算
         cd "$BIN_DIR" || exit 1
         chmod +x dts_tool
         
@@ -111,13 +276,29 @@ case "$1" in
         # Get Project ID
         PRJ_ID=$(getprop ro.boot.prjname)
 
-        ./dts_tool add "$BASE_NODE" "$TARGET_FPS" "$TARGET_PANEL" "$PRJ_ID"
+        ./dts_tool add "$BASE_NODE" "$TARGET_FPS" "$TARGET_PANEL" "$PRJ_ID" "$CUSTOM_CLOCK" "$CUSTOM_TRANSFER"
         RET=$?
         if [ $RET -eq 0 ]; then
-             echo "Success"
+             echo "Success: 已添加 ${TARGET_FPS}Hz 节点"
         else
              echo "Error: dts_tool failed with code $RET"
         fi
+        ;;
+
+    "pack_only")
+        do_pack
+        ;;
+
+    "merge_avb")
+        do_merge_avb
+        ;;
+
+    "flash_final")
+        do_flash
+        ;;
+
+    "smart_add_rate")
+        do_smart_add "$2"
         ;;
 
     "remove_rate")
@@ -147,154 +328,56 @@ case "$1" in
         ;;
 
     "apply_changes")
-        cd "$BIN_DIR" || exit 1
-        chmod +x *
-        
-        echo "正在打包..."
-        PACK_LOG="$BIN_DIR/pack.log"
-        ./pack_dtbo >"$PACK_LOG" 2>&1
-        if [ $? -ne 0 ]; then
-            echo "错误：打包失败"
-            cat "$PACK_LOG"
-            exit 1
-        fi
-        
-        echo "正在刷入..."
-        SLOT=$(getprop ro.boot.slot_suffix)
-        DTBO_PARTITION="/dev/block/by-name/dtbo$SLOT"
-        
-        # pack_dtbo generates new_dtbo.img usually
-        NEW_DTBO="new_dtbo.img"
-        if [ ! -f "$NEW_DTBO" ]; then
-             NEW_DTBO="dtbo.img" # Fallback just in case
-        fi
-
-        STOCK_DTBO="$IMG_DIR/dtbo.img"
-        FINAL_DTBO="$BIN_DIR/dtbo_final.img"
-        PARTITION_SIZE=$(blockdev --getsize64 "$DTBO_PARTITION" 2>/dev/null)
-        if [ ! -f "$AVB_HELPER" ]; then
-            echo "错误：缺少 DTBO AVB 处理脚本"
-            exit 1
-        fi
-        if [ ! -f "$STOCK_DTBO" ]; then
-            echo "错误：找不到原厂 DTBO 备份，无法复用官方 AVB 信息"
-            exit 1
-        fi
-        if ! dtbo_apply_stock_avb "$STOCK_DTBO" "$NEW_DTBO" "$FINAL_DTBO" "$PARTITION_SIZE"; then
-            echo "错误：官方 AVB 信息复用失败，未执行刷入（请勿重启，DTBO 分区未被修改）"
-            exit 1
-        fi
-
-        if dtbo_write_partition "$FINAL_DTBO" "$DTBO_PARTITION"; then
-            echo "Success: 刷入成功！请重启生效。"
-        else
-            echo "错误：刷入失败（分区未被修改）"
-            exit 1
-        fi
+        echo "开始应用更改..."
+        do_pack || exit 1
+        do_merge_avb || exit 1
+        do_flash || exit 1
+        echo "操作完成！请重启设备。"
         ;;
 
     "flash_dtbo")
-        CUSTOM_RATE="$2"
-        echo "开始执行超频流程 (Multi-Model Mode)..."
-        if [ ! -z "$CUSTOM_RATE" ]; then
-            echo "目标自定义刷新率: ${CUSTOM_RATE}Hz"
-        fi
-
-        SLOT=$(getprop ro.boot.slot_suffix)
-        DTBO_PARTITION="/dev/block/by-name/dtbo$SLOT"
-        
-        # Detect Model and Target Panel
-        MODEL=$(getprop ro.product.vendor.model)
-        TARGET_PANEL=""
-        case "$MODEL" in
-            "RMX5200") TARGET_PANEL="qcom,mdss_dsi_panel_AE084_P_3_A0033_dsc_cmd_dvt02" ;;
-            "PLK110") TARGET_PANEL="qcom,mdss_dsi_panel_AD296_P_3_A0020_dsc_cmd" ;;
-            "PJD110") TARGET_PANEL="qcom,mdss_dsi_panel_AA545_P_3_A0005_dsc_cmd" ;;
-        esac
-
-        mkdir -p "$WORK_DIR"
-        mkdir -p "$BIN_DIR/dtbo_dts"
-        
-        echo "1. 提取 DTBO..."
-        if dd if="$DTBO_PARTITION" of="$WORK_DIR/dtbo.img" bs=4096 2>&1; then
-            echo "提取成功"
-        else
-            echo "错误：提取失败"
-            exit 1
-        fi
-        
-        cd "$BIN_DIR" || exit 1
-        chmod +x *
-        
-        echo "2. 解包..."
-        ./unpack_dtbo "../workspace/dtbo.img" >/dev/null 2>&1
-        if [ $? -ne 0 ]; then
-            echo "错误：解包失败"
-            exit 1
-        fi
-        
-        echo "3. 应用通用补丁..."
-        # process_dts 用于特定机型(如GT8Pro)的额外参数修正
-        # 对于其他机型，此步骤可能跳过或仅做基础检查
-        ./process_dts
-        RET=$?
-        if [ $RET -ne 0 ]; then
-             echo "提示：通用补丁未应用或发生错误 (代码 $RET)，但这可能不影响自定义刷新率。"
-        fi
-        
-        # 自定义刷新率处理 (真正多机型通用部分)
-        if [ ! -z "$CUSTOM_RATE" ]; then
-            echo "3.1 智能添加自定义刷新率 ($CUSTOM_RATE Hz)..."
-            if [ ! -z "$TARGET_PANEL" ]; then
-                echo "    - 目标面板: $TARGET_PANEL"
-            fi
-            
-            # Get Project ID
-            PRJ_ID=$(getprop ro.boot.prjname)
-            echo "    - Project ID: $PRJ_ID"
-
-            # 使用 dts_tool 的智能添加功能
-            # 自动扫描最大 FPS 节点作为模板，支持所有 Qualcomm 平台
-            ./dts_tool smart_add "$CUSTOM_RATE" "$TARGET_PANEL" "$PRJ_ID"
-            
-            if [ $? -eq 0 ]; then
-                echo "自定义刷新率节点已生成。"
-            else
-                echo "错误：自定义刷新率添加失败！"
-                exit 1
-            fi
-        fi
-        
-        echo "4. 打包..."
-        PACK_LOG="$BIN_DIR/pack.log"
-        ./pack_dtbo >"$PACK_LOG" 2>&1
-        if [ $? -ne 0 ]; then
-            echo "错误：打包失败"
-            cat "$PACK_LOG"
-            exit 1
-        fi
-        
-        echo "5. 刷入分区..."
-        NEW_DTBO="$BIN_DIR/new_dtbo.img"
-        STOCK_DTBO="$IMG_DIR/dtbo.img"
-        FINAL_DTBO="$BIN_DIR/dtbo_final.img"
-        PARTITION_SIZE=$(blockdev --getsize64 "$DTBO_PARTITION" 2>/dev/null)
-        if [ ! -f "$STOCK_DTBO" ]; then
-            echo "错误：找不到原厂 DTBO 备份，无法复用官方 AVB 信息"
-            exit 1
-        fi
-        if ! dtbo_apply_stock_avb "$STOCK_DTBO" "$NEW_DTBO" "$FINAL_DTBO" "$PARTITION_SIZE"; then
-            echo "错误：官方 AVB 信息复用失败，未执行刷入（请勿重启，DTBO 分区未被修改）"
-            exit 1
-        fi
-        if dtbo_write_partition "$FINAL_DTBO" "$DTBO_PARTITION"; then
-            echo "Success: 刷入成功！请重启生效。"
-        else
-            echo "错误：刷入失败（分区未被修改）"
-            exit 1
-        fi
-        
+        do_smart_add "$2" || exit 1
+        do_pack || exit 1
+        do_merge_avb || exit 1
+        do_flash || exit 1
         echo "操作完成！请重启设备。"
+        ;;
+
+    # ---- 后台执行（供前端流式轮询日志）----
+    # start_apply / start_flash：立即返回，流程在后台运行，日志写 apply.log，状态写 apply.status
+    # apply_changes_bg / flash_dtbo_bg：后台实际执行体
+    "start_apply")
+        rm -f "$MOD_PATH/apply.log" "$MOD_PATH/apply.status"
+        setsid sh "$MOD_PATH/scripts/web_handler.sh" apply_changes_bg > "$MOD_PATH/apply.log" 2>&1 &
+        echo "Started: $MOD_PATH/apply.log"
+        ;;
+
+    "apply_changes_bg")
+        rm -f "$MOD_PATH/apply.status"
+        do_pack && do_merge_avb && do_flash
+        if [ $? -eq 0 ]; then
+            echo "操作完成！请重启设备。"
+            echo "SUCCESS" > "$MOD_PATH/apply.status"
+        else
+            echo "FAIL" > "$MOD_PATH/apply.status"
+        fi
+        ;;
+
+    "start_flash")
+        rm -f "$MOD_PATH/apply.log" "$MOD_PATH/apply.status"
+        setsid sh "$MOD_PATH/scripts/web_handler.sh" flash_dtbo_bg "$2" > "$MOD_PATH/apply.log" 2>&1 &
+        echo "Started: $MOD_PATH/apply.log"
+        ;;
+
+    "flash_dtbo_bg")
+        rm -f "$MOD_PATH/apply.status"
+        do_smart_add "$2" && do_pack && do_merge_avb && do_flash
+        if [ $? -eq 0 ]; then
+            echo "操作完成！请重启设备。"
+            echo "SUCCESS" > "$MOD_PATH/apply.status"
+        else
+            echo "FAIL" > "$MOD_PATH/apply.status"
+        fi
         ;;
 
     "restore_dtbo")

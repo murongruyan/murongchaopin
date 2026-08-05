@@ -74,6 +74,18 @@
                             <label>目标刷新率 (Target FPS):</label>
                             <input type="number" id="target-fps" class="form-input" placeholder="例如: 150">
                         </div>
+                        <details class="adv-options">
+                            <summary>⚙️ 高级选项 (自定义参数，可选)</summary>
+                            <p class="text-hint">留空则使用自动计算预设（基于基准节点按目标 FPS 等比换算）。自定义值将覆盖自动计算。</p>
+                            <div class="form-group">
+                                <label>时钟频率 (clockrate, Hz):</label>
+                                <input type="number" id="custom-clock" class="form-input" placeholder="自动计算值将自动填入，可修改或清空">
+                            </div>
+                            <div class="form-group">
+                                <label>传输时间 (transfer-time-us, µs):</label>
+                                <input type="number" id="custom-transfer" class="form-input" placeholder="自动计算值将自动填入，可修改或清空">
+                            </div>
+                        </details>
                         <button id="btn-add-rate" class="btn btn-secondary" onclick="addRate()">添加 / 修改</button>
                     </div>
 
@@ -83,8 +95,6 @@
                     </div>
                 </div>
             </div>
-            
-            <div id="terminal"></div>
             
             <!-- Debug Console -->
             <!-- Moved to Log Tab -->
@@ -245,15 +255,17 @@
     </div>
 
     <div id="toast" class="ui-toast"></div>
-    
+
     <!-- Custom Modal -->
     <div id="custom-modal" class="modal-overlay" style="display: none;">
         <div class="modal-content">
             <h3 id="modal-title">标题</h3>
             <p id="modal-message">内容</p>
+            <pre id="modal-log" class="modal-log" style="display: none;"></pre>
             <div id="modal-input-container" style="display: none; margin-top: 15px;">
                 <input type="number" id="modal-input" class="form-input" placeholder="">
             </div>
+            <div id="modal-fields" style="display: none; margin-top: 15px;"></div>
             <div class="modal-actions">
                 <button class="btn btn-secondary" onclick="closeModal()">取消</button>
                 <button id="modal-confirm-btn" class="btn btn-primary">确定</button>

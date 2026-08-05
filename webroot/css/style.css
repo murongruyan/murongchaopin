@@ -448,6 +448,51 @@ select, input {
     color: var(--accent);
 }
 
+/* 表格操作按钮：加大尺寸 + 拉开间距 */
+.row-actions {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.row-actions .btn {
+    padding: 10px 16px;
+    font-size: 13px;
+    min-width: 76px;
+    text-align: center;
+    border-radius: 18px;
+}
+
+.btn-rate-edit {
+    background-color: var(--primary, #2196f3);
+    color: #fff;
+}
+
+.btn-rate-del {
+    background-color: var(--danger);
+    color: #fff;
+}
+
+/* 弹窗多字段表单 */
+.modal-field {
+    margin-bottom: 12px;
+}
+
+.modal-field label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: var(--text-secondary);
+}
+
+.modal-field .form-input {
+    width: 100%;
+    padding: 10px 12px;
+    font-size: 15px;
+}
+
 .table-container {
     max-height: 300px;
     overflow-y: auto;
@@ -493,6 +538,26 @@ select, input {
     animation: modalPop 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
 }
 
+/* 大号弹窗：流程日志（合并确认 + 分步日志） */
+.modal-content.modal-lg {
+    width: 94%;
+    max-width: 520px;
+    max-height: 86vh;
+    display: flex;
+    flex-direction: column;
+    padding: 20px;
+}
+
+.modal-content.modal-lg .modal-log {
+    flex: 1;
+    max-height: 48vh;
+    min-height: 160px;
+}
+
+.modal-content.modal-lg .modal-actions {
+    flex-shrink: 0;
+}
+
 @keyframes modalPop {
     from { opacity: 0; transform: scale(0.8); }
     to { opacity: 1; transform: scale(1); }
@@ -504,9 +569,68 @@ select, input {
     margin-bottom: 12px;
 }
 
+/* 流程日志区（亮色主题，白底深字） */
+.modal-log {
+    margin-top: 12px;
+    max-height: 220px;
+    overflow-y: auto;
+    background-color: #fdfdfd;
+    color: #333;
+    font-family: 'JetBrains Mono', Consolas, 'Courier New', monospace;
+    font-size: 11px;
+    line-height: 1.6;
+    border-radius: 8px;
+    padding: 10px 12px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    border: 1px solid var(--border);
+    box-shadow: inset 0 1px 4px rgba(0,0,0,0.06);
+}
+
+.modal-log::-webkit-scrollbar { width: 8px; }
+.modal-log::-webkit-scrollbar-thumb { background: #ffc0cb; border-radius: 4px; }
+
+/* 日志着色（亮色主题） */
+.log-step { color: #d63384; font-weight: bold; }        /* 步骤标题: 玫红 */
+.log-ok   { color: #2e9e44; font-weight: bold; }        /* 成功: 绿 */
+.log-err  { color: #e03131; font-weight: bold; }        /* 错误: 红 */
+.log-warn { color: #c07f00; }                           /* 警告: 橙 */
+.log-info { color: #666; }                              /* 次要信息: 灰 */
+.log-cmd  { color: #0b7285; }                           /* 命令: 青 */
+.log-done { color: #2e9e44; font-weight: bold; font-size: 13px; }
+
 .modal-actions {
     margin-top: 20px;
     display: flex;
     justify-content: flex-end;
     gap: 12px;
 }
+
+/* 高级选项折叠块 */
+.adv-options {
+    margin: 4px 0 12px 0;
+    padding: 10px;
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.5);
+}
+
+.adv-options summary {
+    cursor: pointer;
+    font-weight: bold;
+    color: var(--text-secondary);
+    font-size: 13px;
+    user-select: none;
+    margin-bottom: 4px;
+}
+
+.adv-options[open] summary {
+    color: var(--accent);
+    margin-bottom: 8px;
+}
+
+.text-hint {
+    color: #888;
+    font-size: 12px;
+}
+

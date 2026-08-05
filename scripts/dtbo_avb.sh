@@ -41,13 +41,20 @@ dtbo_read_be64() {
 dtbo_write_be64() {
     dtbo_be64_value="$1"
     dtbo_be64_output="$2"
-    dtbo_be64_shift=56
-    while [ "$dtbo_be64_shift" -ge 0 ]; do
-        dtbo_be64_byte=$(( (dtbo_be64_value >> dtbo_be64_shift) & 255 ))
-        dtbo_be64_octal=$(printf '%03o' "$dtbo_be64_byte") || return 1
-        printf "\\$dtbo_be64_octal" >> "$dtbo_be64_output" || return 1
-        dtbo_be64_shift=$((dtbo_be64_shift - 8))
-    done
+    # Android mksh uses 32-bit signed arithmetic: shifts of >= 32 wrap
+    # (e.g. >> 48 behaves like >> 16), which corrupted the 64-bit AVB
+    # footer fields and bricked devices. All values written here are
+    # < 2^31, so emit 4 NUL bytes then the low 32 bits big-endian.
+    printf '\000\000\000\000' >> "$dtbo_be64_output" || return 1
+    dtbo_be64_b3=$(( (dtbo_be64_value >> 24) & 255 ))
+    dtbo_be64_b2=$(( (dtbo_be64_value >> 16) & 255 ))
+    dtbo_be64_b1=$(( (dtbo_be64_value >> 8) & 255 ))
+    dtbo_be64_b0=$(( dtbo_be64_value & 255 ))
+    dtbo_be64_o3=$(printf '%03o' "$dtbo_be64_b3") || return 1
+    dtbo_be64_o2=$(printf '%03o' "$dtbo_be64_b2") || return 1
+    dtbo_be64_o1=$(printf '%03o' "$dtbo_be64_b1") || return 1
+    dtbo_be64_o0=$(printf '%03o' "$dtbo_be64_b0") || return 1
+    printf "\\$dtbo_be64_o3\\$dtbo_be64_o2\\$dtbo_be64_o1\\$dtbo_be64_o0" >> "$dtbo_be64_output" || return 1
 }
 
 dtbo_hash_file() {
@@ -272,6 +279,39 @@ dtbo_apply_stock_avb() {
         return 1
     }
 
+    # Structural self-check: the footer must parse back to exactly what we
+    # wrote and must point at a valid VBMeta identical to the official one.
+    dtbo_check_orig=$(dtbo_read_be64 "$dtbo_output" $((dtbo_output_size - 52)))
+    dtbo_check_voff=$(dtbo_read_be64 "$dtbo_output" $((dtbo_output_size - 44)))
+    dtbo_check_vsize=$(dtbo_read_be64 "$dtbo_output" $((dtbo_output_size - 36)))
+    dtbo_is_number "$dtbo_check_orig" && dtbo_is_number "$dtbo_check_voff" && dtbo_is_number "$dtbo_check_vsize" || {
+        dtbo_msg "! 组合后的 DTBO footer 字段解析失败"
+        rm -rf "$dtbo_work"
+        return 1
+    }
+    [ "$dtbo_check_orig" -eq "$dtbo_raw_size" ] && \
+        [ "$dtbo_check_voff" -eq "$dtbo_vbmeta_offset" ] && \
+        [ "$dtbo_check_vsize" -eq "$DTBO_STOCK_VBMETA_SIZE" ] || {
+        dtbo_msg "! 组合后的 DTBO footer 字段校验失败 (size/offset 不一致)"
+        rm -rf "$dtbo_work"
+        return 1
+    }
+    [ "$dtbo_check_voff" -le $((dtbo_output_size - 64)) ] && \
+        [ "$(dtbo_read_magic "$dtbo_output" "$dtbo_check_voff")" = "41564230" ] || {
+        dtbo_msg "! 组合后的 DTBO VBMeta 定位失败"
+        rm -rf "$dtbo_work"
+        return 1
+    }
+    dd if="$dtbo_output" bs=1 skip="$dtbo_check_voff" count="$dtbo_check_vsize" \
+        of="$dtbo_work/check_vbmeta.bin" 2>/dev/null || {
+        rm -rf "$dtbo_work"
+        return 1
+    }
+    cmp -s "$dtbo_work/check_vbmeta.bin" "$dtbo_vbmeta" || {
+        dtbo_msg "! 组合后的 DTBO VBMeta 与官方备份不一致"
+        rm -rf "$dtbo_work"
+        return 1
+    }
     mv -f "$dtbo_output" "$dtbo_output_image" || {
         rm -rf "$dtbo_work"
         return 1

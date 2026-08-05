@@ -443,7 +443,10 @@ void cmd_remove(const char *target_node, const char *target_panel, const char *p
 }
 
 // ---- Command: ADD (Internal) ----
-void internal_add_node(const char *filename, const char *base_node, int target_fps, const char *target_panel) {
+// custom_clock / custom_transfer 为可选参数：>0 时覆盖自动计算（自定义优先），
+// 否则沿用自动计算预设（base_clock*target/base_fps、base_transfer*base_fps/target_fps）。
+void internal_add_node(const char *filename, const char *base_node, int target_fps, const char *target_panel,
+                       unsigned long long custom_clock, unsigned long long custom_transfer) {
     char path[512];
     char temp_path[512];
     snprintf(path, sizeof(path), "%s/%s", DIR_NAME, filename);
@@ -692,10 +695,20 @@ check_insertion:
                     // Generate New Node Content
                     replace_str(base_content, base_node, target_node_name);
                     
-                    // Calc new values
+                    // Calc new values：自定义参数覆盖自动计算
                     if (base_fps > 0) {
-                        unsigned long long new_clock = base_clock * target_fps / base_fps;
-                        unsigned long long new_transfer = base_transfer * base_fps / target_fps;
+                        unsigned long long new_clock;
+                        unsigned long long new_transfer;
+                        if (custom_clock > 0) {
+                            new_clock = custom_clock;
+                        } else {
+                            new_clock = base_clock * target_fps / base_fps;
+                        }
+                        if (custom_transfer > 0) {
+                            new_transfer = custom_transfer;
+                        } else {
+                            new_transfer = base_transfer * base_fps / target_fps;
+                        }
                         
                         // Line-by-line replacement for safety and correctness
                         char *ptr = base_content;
@@ -808,7 +821,8 @@ check_insertion:
 }
 
 
-void cmd_add(const char *base_node, int target_fps, const char *target_panel, const char *project_id) {
+void cmd_add(const char *base_node, int target_fps, const char *target_panel, const char *project_id,
+             unsigned long long custom_clock, unsigned long long custom_transfer) {
     DIR *d;
     struct dirent *dir;
     char path[512];
@@ -825,7 +839,7 @@ void cmd_add(const char *base_node, int target_fps, const char *target_panel, co
                 continue;
             }
             
-            internal_add_node(dir->d_name, base_node, target_fps, target_panel);
+            internal_add_node(dir->d_name, base_node, target_fps, target_panel, custom_clock, custom_transfer);
         }
 
         closedir(d);
@@ -833,7 +847,8 @@ void cmd_add(const char *base_node, int target_fps, const char *target_panel, co
 }
 
 // ---- Command: SMART ADD ----
-void cmd_smart_add(int target_fps, const char *target_panel, const char *project_id) {
+void cmd_smart_add(int target_fps, const char *target_panel, const char *project_id,
+                   unsigned long long custom_clock, unsigned long long custom_transfer) {
     // 1. Scan for best base node
     DIR *d;
     struct dirent *dir;
@@ -975,7 +990,7 @@ void cmd_smart_add(int target_fps, const char *target_panel, const char *project
                 if (access(path2, F_OK) != 0) snprintf(path2, sizeof(path2), "%s", dir2->d_name);
                 
                 if (check_project_id(path2, project_id)) {
-                    internal_add_node(dir2->d_name, best_base_node, target_fps, target_panel);
+                    internal_add_node(dir2->d_name, best_base_node, target_fps, target_panel, custom_clock, custom_transfer);
                 }
             }
             closedir(d2);
@@ -990,8 +1005,8 @@ int main(int argc, char *argv[]) {
         printf("Usage: %s <command> [args]\n", argv[0]);
         printf("Commands:\n");
         printf("  scan [target_panel] [project_id]\n");
-        printf("  add <base_node> <fps> [target_panel] [project_id]\n");
-        printf("  smart_add <fps> [target_panel] [project_id]\n");
+        printf("  add <base_node> <fps> [target_panel] [project_id] [clock] [transfer]\n");
+        printf("  smart_add <fps> [target_panel] [project_id] [clock] [transfer]\n");
         printf("  remove <node_name> [target_panel] [project_id]\n");
         return 1;
     }
@@ -1002,20 +1017,24 @@ int main(int argc, char *argv[]) {
         cmd_scan(panel, prj);
     } else if (strcmp(argv[1], "add") == 0) {
         if (argc < 4) {
-            printf("Usage: add <base_node> <fps> [target_panel] [project_id]\n");
+            printf("Usage: add <base_node> <fps> [target_panel] [project_id] [clock] [transfer]\n");
             return 1;
         }
         const char *panel = (argc >= 5) ? argv[4] : NULL;
         const char *prj = (argc >= 6) ? argv[5] : NULL;
-        cmd_add(argv[2], atoi(argv[3]), panel, prj);
+        unsigned long long cclock = (argc >= 7 && argv[6][0]) ? strtoull(argv[6], NULL, 10) : 0;
+        unsigned long long ctransfer = (argc >= 8 && argv[7][0]) ? strtoull(argv[7], NULL, 10) : 0;
+        cmd_add(argv[2], atoi(argv[3]), panel, prj, cclock, ctransfer);
     } else if (strcmp(argv[1], "smart_add") == 0) {
         if (argc < 3) {
-            printf("Usage: smart_add <fps> [target_panel] [project_id]\n");
+            printf("Usage: smart_add <fps> [target_panel] [project_id] [clock] [transfer]\n");
             return 1;
         }
         const char *panel = (argc >= 4) ? argv[3] : NULL;
         const char *prj = (argc >= 5) ? argv[4] : NULL;
-        cmd_smart_add(atoi(argv[2]), panel, prj);
+        unsigned long long cclock = (argc >= 6 && argv[5][0]) ? strtoull(argv[5], NULL, 10) : 0;
+        unsigned long long ctransfer = (argc >= 7 && argv[6][0]) ? strtoull(argv[6], NULL, 10) : 0;
+        cmd_smart_add(atoi(argv[2]), panel, prj, cclock, ctransfer);
     } else if (strcmp(argv[1], "remove") == 0) {
         if (argc < 3) {
             printf("Usage: remove <node_name> [target_panel] [project_id]\n");
