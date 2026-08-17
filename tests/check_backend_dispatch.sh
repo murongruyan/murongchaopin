@@ -18,14 +18,29 @@ grep -q 'MURONGCHAOPIN_INSTALL_BACKEND' "$CUSTOMIZE"
 grep -q 'dts_backend.txt' "$CUSTOMIZE"
 grep -q 'if \[ "\$INSTALL_BACKEND" = "dtbo" \]; then' "$CUSTOMIZE"
 grep -q '已选择 DRM-KO：高刷 timing 仅由 KO 注入' "$CUSTOMIZE"
-grep -q 'ui_print "请选择首次应用后端:" >&2' "$CUSTOMIZE"
+grep -q 'ui_print "第二次确认：请选择首次应用后端:" >&2' "$CUSTOMIZE"
 grep -q 'dtbo|drm) ;;' "$CUSTOMIZE"
-grep -q 'timeout 1 getevent -qlc 1' "$CUSTOMIZE"
+grep -q 'Read_volume_key_press' "$CUSTOMIZE"
+grep -q 'KEY_VOLUMEUP.*DOWN' "$CUSTOMIZE"
+grep -q 'KEY_VOLUMEDOWN.*DOWN' "$CUSTOMIZE"
+grep -q '"\$pressed".*UP' "$CUSTOMIZE"
+grep -q 'sleep 0.35' "$CUSTOMIZE"
+if grep -q 'timeout=10\|timeout 1 getevent\|未检测到选择，默认使用 DTBO\|未检测到后端选择，已取消安装' "$CUSTOMIZE"; then
+    echo "FAIL: install backend flow still has timeout/default behavior" >&2
+    exit 1
+fi
 
 # Install_backend_selection is called through command substitution. Prompts
 # must never pollute the single-line value persisted to dts_backend.txt.
-if grep -q 'ui_print "请选择首次应用后端:"$' "$CUSTOMIZE"; then
+if grep -q 'ui_print "第二次确认：请选择首次应用后端:"$' "$CUSTOMIZE"; then
     echo "FAIL: backend prompt is still written to captured stdout" >&2
+    exit 1
+fi
+
+# The backend prompt must block on an explicit volume-key event rather than
+# using a one-shot timeout that can silently choose a write path.
+if grep -q 'timeout 1 getevent' "$CUSTOMIZE"; then
+    echo "FAIL: backend prompt still uses a timed getevent poll" >&2
     exit 1
 fi
 

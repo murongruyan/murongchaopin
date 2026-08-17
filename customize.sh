@@ -7,24 +7,40 @@ Outputs() {
   sleep 0.07
 }
 
-# 音量键检测优化（超时+事件过滤）
-Volume_key_monitoring() {
-  local choose
-  # 设置10秒超时防止卡死
-  timeout=10
-  while [ $timeout -gt 0 ]; do
-    # 精确匹配按键事件
-    choose=$(timeout 1 getevent -qlc 1 2>/dev/null | awk -F' ' '/KEY_VOLUME(UP|DOWN)/ {print $3; exit}')
-    case "$choose" in
-      KEY_VOLUMEUP) echo 0; return 0 ;;
-      KEY_VOLUMEDOWN) echo 1; return 0 ;;
+# 音量键检测：只把 DOWN 当作选择，并等待同一按键的 UP 后再返回。
+# 这样一次完整的按下/抬起不会被后一个提示重复消费。
+Read_volume_key_press() {
+  local event pressed
+  while :; do
+    event=$(getevent -qlc 1 2>/dev/null)
+    case "$event" in
+      *EV_KEY*KEY_VOLUMEUP*" DOWN") pressed=KEY_VOLUMEUP; break ;;
+      *EV_KEY*KEY_VOLUMEDOWN*" DOWN") pressed=KEY_VOLUMEDOWN; break ;;
     esac
-    timeout=$((timeout - 1))
   done
-  echo 1
+
+  while :; do
+    event=$(getevent -qlc 1 2>/dev/null)
+    case "$event" in
+      *EV_KEY*"$pressed"*" UP") break ;;
+    esac
+  done
+
+  # 给下一次独立选择留出防抖间隔，但不设置整体选择超时。
+  sleep 0.35
+  echo "$pressed"
 }
 
-# 安装阶段选择应用后端。原版确认仍在前面完成；这里超时默认 DTBO。
+Volume_key_monitoring() {
+  case "$(Read_volume_key_press)" in
+    KEY_VOLUMEUP) echo 0 ;;
+    KEY_VOLUMEDOWN) echo 1 ;;
+  esac
+}
+
+# 安装阶段选择应用后端。原厂基线确认与后端选择必须是两次明确操作；
+# 后端选择必须由用户明确完成，绝不默认写入 DTBO，避免用户只确认原厂基线
+# 后发生隐式修改。这里不设选择倒计时，避免用户阅读提示期间被取消或误判。
 Install_backend_selection() {
     case "${MURONGCHAOPIN_INSTALL_BACKEND:-}" in
     dtbo|drm)
@@ -35,20 +51,13 @@ Install_backend_selection() {
 
   # The function is called through command substitution. Keep prompts off
   # stdout so INSTALL_BACKEND receives exactly one machine-readable value.
-  ui_print "请选择首次应用后端:" >&2
-  ui_print "- 按 音量+ 选择 DTBO（默认，写入 DTBO 分区）" >&2
-  ui_print "- 按 音量- 选择 DRM-KO（显示由 KO 注入；PJD110 同步解容，DTBO 不写高刷）" >&2
-  timeout=10
-  while [ $timeout -gt 0 ]; do
-    choose=$(timeout 1 getevent -qlc 1 2>/dev/null | awk -F' ' '/KEY_VOLUME(UP|DOWN)/ {print $3; exit}')
-    case "$choose" in
-      KEY_VOLUMEUP) echo dtbo; return 0 ;;
-      KEY_VOLUMEDOWN) echo drm; return 0 ;;
-    esac
-    timeout=$((timeout - 1))
-  done
-  ui_print "未检测到选择，默认使用 DTBO" >&2
-  echo dtbo
+  ui_print "第二次确认：请选择首次应用后端:" >&2
+  ui_print "- 按 音量+ 选择 DTBO（本次安装会生成、合成并写入修改后的 DTBO）" >&2
+  ui_print "- 按 音量- 选择 DRM-KO（高刷由 KO 注入；PJD110 仅写入配套解容 DTBO）" >&2
+  case "$(Read_volume_key_press)" in
+    KEY_VOLUMEUP) echo dtbo ;;
+    KEY_VOLUMEDOWN) echo drm ;;
+  esac
 }
 
 # 安装/更新模块函数
@@ -95,7 +104,7 @@ ui_print "    真我GT8 Pro DTBO 超频模块    "
 ui_print "=============================="
 
 # 按键确认
-ui_print "- 请按 音量+ 确认是官方原版DTBO"
+ui_print "- 请按 音量+ 确认当前是官方原版 DTBO（这里只确认基线，不会单独修改）"
 ui_print "- 请按 音量- 退出安装"
 
 # 使用新的音量键检测函数
