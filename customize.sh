@@ -34,22 +34,22 @@ Volume_key_monitoring() {
 # 后端选择必须由用户明确完成，绝不默认写入 DTBO，避免用户只确认原厂基线
 # 后发生隐式修改。这里不设选择倒计时，避免用户阅读提示期间被取消或误判。
 Install_backend_selection() {
-    case "${MURONGCHAOPIN_INSTALL_BACKEND:-}" in
+  case "${MURONGCHAOPIN_INSTALL_BACKEND:-}" in
     dtbo|drm)
-      echo "$MURONGCHAOPIN_INSTALL_BACKEND"
+      INSTALL_BACKEND="$MURONGCHAOPIN_INSTALL_BACKEND"
       return 0
       ;;
   esac
 
-  # The function is called through command substitution. Keep prompts off
-  # stdout so INSTALL_BACKEND receives exactly one machine-readable value.
-  ui_print "第二次确认：请选择首次应用后端:" >&2
-  ui_print "- 按 音量+ 选择 DTBO（本次安装会生成、合成并写入修改后的 DTBO）" >&2
-  ui_print "- 按 音量- 选择 DRM-KO（高刷由 KO 注入；PJD110 仅写入配套解容 DTBO）" >&2
+  # This function is called normally rather than through $(...). Keep prompts
+  # on stdout so KernelSU streams the second step to the installer UI.
+  ui_print "第二次确认：请选择首次应用后端:"
+  ui_print "- 按 音量+ 选择 DTBO（本次安装会生成、合成并写入修改后的 DTBO）"
+  ui_print "- 按 音量- 选择 DRM-KO（高刷由 KO 注入；PJD110 仅写入配套解容 DTBO）"
   case "$(Read_volume_key)" in
-    KEY_VOLUMEUP) echo dtbo ;;
-    KEY_VOLUMEDOWN) echo drm ;;
-    *) echo cancel ;;
+    KEY_VOLUMEUP) INSTALL_BACKEND=dtbo ;;
+    KEY_VOLUMEDOWN) INSTALL_BACKEND=drm ;;
+    *) INSTALL_BACKEND=cancel ;;
   esac
 }
 
@@ -241,7 +241,8 @@ dtbo_write_stock_recovery "$STOCK_DTBO" "$STOCK_MANIFEST" "$STOCK_RECOVERY" || \
   abort "无法创建原厂 DTBO 压缩恢复副本"
 ui_print "原厂 DTBO 备份: $(dtbo_hash_file "$STOCK_DTBO")"
 
-INSTALL_BACKEND=$(Install_backend_selection)
+INSTALL_BACKEND=""
+Install_backend_selection
 case "$INSTALL_BACKEND" in
   dtbo|drm) ;;
   *) abort "安装后端选择返回了无效值" ;;

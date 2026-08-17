@@ -9,6 +9,10 @@ CUSTOMIZE="${1:-customize.sh}"
 # and must not run in this host-side parser test.
 eval "$(awk '/^# 安装\/更新模块函数/ { exit } { print }' "$CUSTOMIZE")"
 
+ui_print() {
+  printf '%s\n' "$1"
+}
+
 getevent() {
   printf '%s\n' '/dev/input/event2: EV_KEY KEY_VOLUMEUP DOWN'
 }
@@ -27,9 +31,26 @@ getevent() {
   exit 1
 }
 
+getevent() {
+  printf '%s\n' '/dev/input/event2: EV_KEY KEY_VOLUMEUP DOWN'
+}
+
+prompt_log=$(mktemp)
+trap 'rm -f "$prompt_log"' EXIT
+INSTALL_BACKEND=""
+Install_backend_selection > "$prompt_log"
+[ "$INSTALL_BACKEND" = "dtbo" ] || {
+  echo "FAIL: normal backend function call did not retain its result" >&2
+  exit 1
+}
+grep -q '第二次确认：请选择首次应用后端:' "$prompt_log" || {
+  echo "FAIL: backend prompt was not written to live stdout" >&2
+  exit 1
+}
+
 grep -q 'sleep 1' "$CUSTOMIZE" || {
   echo "FAIL: missing delay between the two installer selections" >&2
   exit 1
 }
 
-echo "PASS: simple volume-key parser and inter-selection delay are present"
+echo "PASS: simple volume-key parser, visible backend prompt, and delay are present"
