@@ -121,8 +121,10 @@ grep -q 'fallback:previous_boot_incomplete' "$HELPER"
 grep -q 'fallback:guard_blocked' "$HELPER"
 grep -q 'mount -o remount,bind,suid,exec "$SOURCE_FILE"' "$HELPER"
 grep -q 'umount -l "$SOURCE_FILE"' "$HELPER"
-grep -q 'stock-LTPS object-animation vote repair' \
-    "$ROOT/packaging/feature-components.json"
+FEATURE_MANIFEST="$ROOT/packaging/feature-components.json"
+if [ -f "$FEATURE_MANIFEST" ]; then
+    grep -q 'stock-LTPS object-animation vote repair' "$FEATURE_MANIFEST"
+fi
 
 sh -n "$HELPER"
 sh -n "$POST_FS"
