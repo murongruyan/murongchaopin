@@ -658,6 +658,28 @@ textarea.form-input {
     color: var(--text);
 }
 
+.update-release-notes {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(217, 70, 142, 0.2);
+}
+
+.update-release-notes-title {
+    margin-bottom: 6px;
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 650;
+}
+
+.update-release-notes-body {
+    max-height: 180px;
+    overflow-y: auto;
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.65;
+    overflow-wrap: anywhere;
+}
+
 /* ---------- 超频页 ---------- */
 .oc-actions {
     margin-top: 12px;

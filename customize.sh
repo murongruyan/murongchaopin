@@ -365,6 +365,35 @@ fi
 # 开机时由 premium_post_fs_data.sh 按授权执行 install-payload，安装阶段
 # 不再处理任何 premium 载荷。免费 Hook 仍在上面安装（display_settings_hook.apk）。
 
+# 更新免费底座时，如果旧模块已经保存了可验证的付费租约和账号 Token，
+# 直接为新模块目录下载并原子安装最高兼容版本。首次安装、未授权、离线或
+# 服务端异常都只跳过本步骤；已迁移的旧付费包和基础模块安装结果不会丢失。
+if [ -f "$MODPATH/scripts/web_handler.sh" ] &&
+   [ -s "$MODPATH/config/auth/lease.json" ] &&
+   [ -s "$MODPATH/config/auth/account.json" ]; then
+  ui_print "正在检查已授权账号的最新付费组件..."
+  PAID_AUTO_RESULT=$(MURONGCHAOPIN_MOD_PATH="$MODPATH" \
+    sh "$MODPATH/scripts/web_handler.sh" auth_install_latest 2>&1)
+  PAID_AUTO_STATUS=$(printf '%s\n' "$PAID_AUTO_RESULT" |
+    sed -n 's/^status=//p' | tail -n 1)
+  PAID_AUTO_VERSION=$(printf '%s\n' "$PAID_AUTO_RESULT" |
+    sed -n 's/^version=//p' | tail -n 1)
+  case "$PAID_AUTO_STATUS" in
+    updated)
+      ui_print "付费组件已自动更新至 ${PAID_AUTO_VERSION:-最新版}，重启后生效"
+      ;;
+    current)
+      ui_print "付费组件已是最新版本 ${PAID_AUTO_VERSION}"
+      ;;
+    skipped)
+      ui_print "未检测到可自动续装的有效付费授权，继续安装免费底座"
+      ;;
+    *)
+      ui_print "付费组件自动更新暂不可用，已保留现有组件并继续安装"
+      ;;
+  esac
+fi
+
 # 清理临时文件（可选，建议保留以便调试）
 # ui_print "清理临时文件..."
 # rm -rf "$IMG_DIR"

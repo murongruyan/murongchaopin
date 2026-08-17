@@ -38,6 +38,8 @@ MODE_MANIFEST_HELPER="$MOD_PATH/scripts/mode_manifest.sh"
 COLOROS_CONFIG_HELPER="$MOD_PATH/scripts/coloros_config.sh"
 VIDEO_MEMC_APPS_FILE="$MOD_PATH/config/video_memc_apps.txt"
 VIDEO_MOTION_TARGET_KEY="murong_video_motion_target_rate"
+BASE_API_URL="https://murongdiaodu.rl1.cc/api"
+BASE_UPDATE_JSON_URL="https://raw.githubusercontent.com/murongruyan/murongchaopin/main/update.json"
 STOCK_DTBO="$IMG_DIR/dtbo.img"
 STOCK_MANIFEST="$IMG_DIR/dtbo.img.sha256"
 STOCK_RECOVERY="$IMG_DIR/dtbo.img.gz"
@@ -716,8 +718,380 @@ apply_video_memc_config() {
         sh "$COLOROS_PREMIUM_HELPER" apply-premium
 }
 
+http_get_file() {
+    HTTP_URL="$1"
+    HTTP_OUTPUT="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl --fail --silent --show-error --location \
+            --connect-timeout 10 --max-time 25 --retry 2 --retry-delay 1 \
+            --proto '=https' "$HTTP_URL" -o "$HTTP_OUTPUT"
+        return $?
+    fi
+    if [ -x /data/adb/ksu/bin/busybox ]; then
+        /data/adb/ksu/bin/busybox wget -q -T 25 -O "$HTTP_OUTPUT" "$HTTP_URL"
+        return $?
+    fi
+    return 127
+}
+
+base64url_file() {
+    if [ -x "$BIN_DIR/openssl" ]; then
+        "$BIN_DIR/openssl" base64 -A -in "$1" 2>/dev/null | tr '/+' '_-' | tr -d '='
+    else
+        base64 "$1" 2>/dev/null | tr -d '\r\n' | tr '/+' '_-' | tr -d '='
+    fi
+}
+
+check_base_update() {
+    UPDATE_TMP=$(mktemp) || {
+        echo "Error: 无法创建更新检查临时文件"
+        return 1
+    }
+    if ! http_get_file "$BASE_UPDATE_JSON_URL" "$UPDATE_TMP"; then
+        rm -f "$UPDATE_TMP"
+        echo "Error: 无法连接更新服务器"
+        return 1
+    fi
+
+    REMOTE_VERSION_CODE=$(sed -n 's/.*"versionCode"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$UPDATE_TMP" | head -n 1)
+    REMOTE_ZIP_URL=$(sed -n 's/.*"zipUrl"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$UPDATE_TMP" | head -n 1)
+    case "$REMOTE_VERSION_CODE" in ''|*[!0-9]*)
+        rm -f "$UPDATE_TMP"
+        echo "Error: 更新信息缺少有效 versionCode"
+        return 1
+        ;;
+    esac
+    case "$REMOTE_ZIP_URL" in
+        https://github.com/murongruyan/murongchaopin/releases/download/*) ;;
+        *)
+            rm -f "$UPDATE_TMP"
+            echo "Error: 更新下载地址不受信任"
+            return 1
+            ;;
+    esac
+
+    LOCAL_VERSION=$(sed -n 's/^version=//p' "$MOD_PATH/module.prop" 2>/dev/null | head -n 1 | tr -d '\r')
+    LOCAL_VERSION_CODE=$(sed -n 's/^versionCode=//p' "$MOD_PATH/module.prop" 2>/dev/null | head -n 1 | tr -d '[:space:]')
+    case "$LOCAL_VERSION_CODE" in ''|*[!0-9]*) LOCAL_VERSION_CODE=0 ;; esac
+    echo "local_version=$LOCAL_VERSION"
+    echo "local_version_code=$LOCAL_VERSION_CODE"
+    printf 'remote_json_b64='
+    base64url_file "$UPDATE_TMP"
+    printf '\n'
+    rm -f "$UPDATE_TMP"
+}
+
+api_get_proxy() {
+    API_PATH="$1"
+    API_AUTH="$2"
+    case "$API_PATH" in ''|/*|*://*|*..*) API_PATH_INVALID=1 ;; *) API_PATH_INVALID=0 ;; esac
+    printf '%s\n' "$API_PATH" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_./?&=%+-]*$' || API_PATH_INVALID=1
+    if [ "$API_PATH_INVALID" = 1 ]; then
+        echo "Error: 非法 API 路径"
+        return 1
+    fi
+    command -v curl >/dev/null 2>&1 || {
+        echo "Error: 系统缺少 curl，无法使用后端网络通道"
+        return 1
+    }
+
+    set -- --silent --show-error --location --connect-timeout 10 --max-time 25 \
+        --retry 2 --retry-delay 1 --proto '=https' \
+        -H 'Accept: application/json'
+    if [ "$API_AUTH" = 1 ]; then
+        [ -f "$GATE_HELPER" ] || {
+            echo "Error: 授权组件缺失"
+            return 1
+        }
+        gate_init
+        API_TOKEN=$(gate_json_field "$GATE_ACCOUNT_FILE" token)
+        [ -n "$API_TOKEN" ] || {
+            echo "Error: 请先登录账号"
+            return 1
+        }
+        set -- "$@" -H "Authorization: Bearer $API_TOKEN"
+    fi
+    API_RESPONSE=$(mktemp) || {
+        echo "Error: 无法创建 API 临时文件"
+        return 1
+    }
+    if ! curl "$@" "$BASE_API_URL/$API_PATH" -o "$API_RESPONSE"; then
+        rm -f "$API_RESPONSE"
+        echo "Error: 服务器网络请求失败"
+        return 1
+    fi
+    [ -s "$API_RESPONSE" ] || {
+        rm -f "$API_RESPONSE"
+        echo "Error: 服务器返回空响应"
+        return 1
+    }
+    cat "$API_RESPONSE"
+    rm -f "$API_RESPONSE"
+}
+
+json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+download_paid_package() {
+    PACKAGE_ID="$1"
+    EXPECTED_SHA="$2"
+    case "$PACKAGE_ID" in ''|*[!0-9]*) echo "Error: 付费组件 ID 无效"; return 1 ;; esac
+    case "$EXPECTED_SHA" in ''|*[!0-9a-fA-F]*) echo "Error: 付费组件哈希无效"; return 1 ;; esac
+    [ "${#EXPECTED_SHA}" -eq 64 ] || { echo "Error: 付费组件哈希长度无效"; return 1; }
+    command -v curl >/dev/null 2>&1 || {
+        echo "Error: 系统缺少 curl，无法下载付费组件"
+        return 1
+    }
+    [ -f "$GATE_HELPER" ] || { echo "Error: 授权组件缺失"; return 1; }
+    gate_init
+    API_TOKEN=$(gate_json_field "$GATE_ACCOUNT_FILE" token)
+    [ -n "$API_TOKEN" ] || { echo "Error: 请先登录账号"; return 1; }
+
+    PACKAGE_REQUEST=$(mktemp) || { echo "Error: 无法创建下载请求"; return 1; }
+    TOKEN_RESPONSE=$(mktemp) || { rm -f "$PACKAGE_REQUEST"; echo "Error: 无法创建令牌响应"; return 1; }
+    DEVICE_HASH=$(gate_device_id_hash)
+    DEVICE_MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
+    SOC_MODEL=$(getprop ro.soc.model 2>/dev/null)
+    BUILD_FINGERPRINT=$(getprop ro.build.fingerprint 2>/dev/null)
+    BASE_VERSION=$(sed -n 's/^version=//p' "$MOD_PATH/module.prop" 2>/dev/null | head -n 1 | tr -d '\r')
+    KERNEL_VERSION=$(uname -r 2>/dev/null)
+    BACKEND=$(sed -n '1{s/\r$//;p;q;}' "$DTS_BACKEND_FILE" 2>/dev/null | tr -d '[:space:]')
+    REQUEST_NONCE=$(cat /proc/sys/kernel/random/uuid 2>/dev/null)
+    [ -n "$REQUEST_NONCE" ] || REQUEST_NONCE="$(date +%s)-$$"
+    printf '{"device_id_hash":"%s","device_model":"%s","soc_model":"%s","build_fingerprint":"%s","base_version":"%s","kernel":"%s","backend":"%s","channel":"stable"}' \
+        "$(json_escape "$DEVICE_HASH")" "$(json_escape "$DEVICE_MODEL")" \
+        "$(json_escape "$SOC_MODEL")" "$(json_escape "$BUILD_FINGERPRINT")" \
+        "$(json_escape "$BASE_VERSION")" "$(json_escape "$KERNEL_VERSION")" \
+        "$(json_escape "$BACKEND")" > "$PACKAGE_REQUEST"
+
+    if ! curl --silent --show-error --location --connect-timeout 10 --max-time 30 \
+        --retry 2 --retry-delay 1 --proto '=https' \
+        -H 'Accept: application/json' -H 'Content-Type: application/json' \
+        -H "Authorization: Bearer $API_TOKEN" \
+        -H "X-Display-Request-Nonce: $REQUEST_NONCE" \
+        --data-binary "@$PACKAGE_REQUEST" \
+        "$BASE_API_URL/v1/display/packages/$PACKAGE_ID/download-token" \
+        -o "$TOKEN_RESPONSE"; then
+        rm -f "$PACKAGE_REQUEST" "$TOKEN_RESPONSE"
+        echo "Error: 获取下载令牌失败"
+        return 1
+    fi
+    rm -f "$PACKAGE_REQUEST"
+    DOWNLOAD_TOKEN=$(gate_json_field "$TOKEN_RESPONSE" download_token)
+    SERVER_SHA=$(gate_json_field "$TOKEN_RESPONSE" sha256 | tr 'A-F' 'a-f')
+    if [ -z "$DOWNLOAD_TOKEN" ]; then
+        SERVER_MESSAGE=$(gate_json_field "$TOKEN_RESPONSE" message)
+        rm -f "$TOKEN_RESPONSE"
+        echo "Error: ${SERVER_MESSAGE:-未获取到下载令牌}"
+        return 1
+    fi
+    rm -f "$TOKEN_RESPONSE"
+    case "$DOWNLOAD_TOKEN" in ''|*[!A-Za-z0-9._~-]*) echo "Error: 下载令牌格式无效"; return 1 ;; esac
+    EXPECTED_SHA=$(printf '%s' "$EXPECTED_SHA" | tr 'A-F' 'a-f')
+    [ -z "$SERVER_SHA" ] || [ "$SERVER_SHA" = "$EXPECTED_SHA" ] || {
+        echo "Error: 服务器返回的组件哈希与版本列表不一致"
+        return 1
+    }
+
+    gate_package_abort >/dev/null 2>&1
+    if ! curl --fail --silent --show-error --location --connect-timeout 10 --max-time 180 \
+        --retry 2 --retry-delay 1 --proto '=https' \
+        -H "Authorization: Bearer $API_TOKEN" \
+        "$BASE_API_URL/v1/display/packages/$PACKAGE_ID/download?download_token=$DOWNLOAD_TOKEN" \
+        -o "$GATE_DOWNLOAD_FILE"; then
+        gate_package_abort >/dev/null 2>&1
+        echo "Error: 付费组件下载失败"
+        return 1
+    fi
+    DOWNLOADED_BYTES=$(wc -c < "$GATE_DOWNLOAD_FILE" 2>/dev/null | tr -d '[:space:]')
+    case "$DOWNLOADED_BYTES" in ''|*[!0-9]*) DOWNLOADED_BYTES=0 ;; esac
+    [ "$DOWNLOADED_BYTES" -gt 0 ] && [ "$DOWNLOADED_BYTES" -le "$GATE_MAX_PACKAGE_BYTES" ] || {
+        gate_package_abort >/dev/null 2>&1
+        echo "Error: 付费组件大小无效"
+        return 1
+    }
+    ACTUAL_SHA=$(gate_sha256_bin "$GATE_DOWNLOAD_FILE")
+    [ "$ACTUAL_SHA" = "$EXPECTED_SHA" ] || {
+        gate_package_abort >/dev/null 2>&1
+        echo "Error: 付费组件下载哈希校验失败"
+        return 1
+    }
+    printf '%s\n' "$DOWNLOADED_BYTES" > "$GATE_DOWNLOAD_META"
+    chmod 0600 "$GATE_DOWNLOAD_FILE" "$GATE_DOWNLOAD_META" 2>/dev/null
+    echo "Success: paid package staged"
+    echo "downloaded_bytes=$DOWNLOADED_BYTES"
+    echo "sha256=$ACTUAL_SHA"
+}
+
+version_is_newer() {
+    VERSION_REMOTE="$1"
+    VERSION_LOCAL="$2"
+    awk -v remote="$VERSION_REMOTE" -v local="$VERSION_LOCAL" 'BEGIN {
+        remote_count = split(remote, r, ".")
+        local_count = split(local, l, ".")
+        count = remote_count > local_count ? remote_count : local_count
+        for (i = 1; i <= count; i++) {
+            rv = r[i] + 0
+            lv = l[i] + 0
+            if (rv > lv) exit 0
+            if (rv < lv) exit 1
+        }
+        exit 1
+    }' 2>/dev/null
+}
+
+install_latest_paid_package() {
+    [ -f "$GATE_HELPER" ] || {
+        echo "status=skipped"
+        echo "reason=authorization_helper_missing"
+        return 0
+    }
+    gate_init
+    if ! gate_lease_verify; then
+        echo "status=skipped"
+        echo "reason=no_valid_signed_lease"
+        return 0
+    fi
+    API_TOKEN=$(gate_json_field "$GATE_ACCOUNT_FILE" token)
+    if [ -z "$API_TOKEN" ]; then
+        echo "status=skipped"
+        echo "reason=account_token_missing"
+        return 0
+    fi
+
+    DEVICE_HASH=$(gate_device_id_hash)
+    DEVICE_MODEL=$(getprop ro.product.vendor.model 2>/dev/null | tr -cd 'A-Za-z0-9._-')
+    SOC_MODEL=$(getprop ro.soc.model 2>/dev/null | tr -cd 'A-Za-z0-9._-')
+    BASE_VERSION=$(sed -n 's/^version=//p' "$MOD_PATH/module.prop" 2>/dev/null |
+        head -n 1 | tr -cd '0-9A-Za-z._-')
+    KERNEL_PREFIX=$(uname -r 2>/dev/null | sed -n 's/^\([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
+    BACKEND=$(sed -n '1{s/\r$//;p;q;}' "$DTS_BACKEND_FILE" 2>/dev/null |
+        tr -cd 'A-Za-z0-9._-')
+    [ -n "$BACKEND" ] || BACKEND=dtbo
+    if [ -z "$DEVICE_HASH" ] || [ -z "$DEVICE_MODEL" ] ||
+       [ -z "$BASE_VERSION" ] || [ -z "$KERNEL_PREFIX" ]; then
+        echo "status=deferred"
+        echo "reason=device_compatibility_data_missing"
+        return 0
+    fi
+
+    PACKAGES_RESPONSE=$(mktemp) || {
+        echo "status=deferred"
+        echo "reason=temporary_file_failed"
+        return 0
+    }
+    PACKAGES_PATH="v1/display/packages?device_id_hash=$DEVICE_HASH&device_model=$DEVICE_MODEL&soc_model=$SOC_MODEL&base_version=$BASE_VERSION&kernel=$KERNEL_PREFIX&backend=$BACKEND&channel=stable"
+    if ! api_get_proxy "$PACKAGES_PATH" 1 > "$PACKAGES_RESPONSE"; then
+        rm -f "$PACKAGES_RESPONSE"
+        echo "status=deferred"
+        echo "reason=package_query_failed"
+        return 0
+    fi
+    if ! grep -q '"success"[[:space:]]*:[[:space:]]*true' "$PACKAGES_RESPONSE" 2>/dev/null; then
+        rm -f "$PACKAGES_RESPONSE"
+        echo "status=deferred"
+        echo "reason=package_query_rejected"
+        return 0
+    fi
+    if grep -q '"data"[[:space:]]*:[[:space:]]*\[\]' "$PACKAGES_RESPONSE" 2>/dev/null; then
+        rm -f "$PACKAGES_RESPONSE"
+        echo "status=skipped"
+        echo "reason=no_compatible_package"
+        return 0
+    fi
+
+    # The API is ordered by version_code descending. Trim before the next
+    # top-level package; nested manifest file objects never contain an id key.
+    FIRST_PACKAGE=$(mktemp) || {
+        rm -f "$PACKAGES_RESPONSE"
+        echo "status=deferred"
+        echo "reason=temporary_file_failed"
+        return 0
+    }
+    sed 's/},{"id"[[:space:]]*:[[:space:]]*[0-9][0-9]*.*/}/' \
+        "$PACKAGES_RESPONSE" > "$FIRST_PACKAGE"
+    rm -f "$PACKAGES_RESPONSE"
+    REMOTE_ID=$(gate_json_number "$FIRST_PACKAGE" id)
+    REMOTE_VERSION=$(gate_json_field "$FIRST_PACKAGE" version)
+    REMOTE_VERSION_CODE=$(gate_json_number "$FIRST_PACKAGE" version_code)
+    REMOTE_SHA=$(gate_json_field "$FIRST_PACKAGE" file_sha256 | tr 'A-F' 'a-f')
+    REMOTE_STATUS=$(gate_json_field "$FIRST_PACKAGE" status)
+    REMOTE_COMPATIBLE=0
+    grep -q '"compatible"[[:space:]]*:[[:space:]]*true' "$FIRST_PACKAGE" 2>/dev/null &&
+        REMOTE_COMPATIBLE=1
+    rm -f "$FIRST_PACKAGE"
+
+    case "$REMOTE_ID" in ''|*[!0-9]*) REMOTE_METADATA_INVALID=1 ;; *) REMOTE_METADATA_INVALID=0 ;; esac
+    case "$REMOTE_VERSION_CODE" in ''|*[!0-9]*) REMOTE_METADATA_INVALID=1 ;; esac
+    case "$REMOTE_VERSION" in ''|*[!0-9A-Za-z._-]*) REMOTE_METADATA_INVALID=1 ;; esac
+    case "$REMOTE_SHA" in ''|*[!0-9a-f]*) REMOTE_METADATA_INVALID=1 ;; esac
+    [ "${#REMOTE_SHA}" -eq 64 ] || REMOTE_METADATA_INVALID=1
+    [ "$REMOTE_STATUS" = published ] || REMOTE_METADATA_INVALID=1
+    [ "$REMOTE_COMPATIBLE" = 1 ] || REMOTE_METADATA_INVALID=1
+    if [ "$REMOTE_METADATA_INVALID" = 1 ]; then
+        echo "status=deferred"
+        echo "reason=latest_package_metadata_invalid"
+        return 0
+    fi
+
+    LOCAL_VERSION=$(gate_json_field "$GATE_PACKAGE_FILE" version)
+    LOCAL_VERSION_CODE=$(gate_json_number "$GATE_PACKAGE_FILE" version_code)
+    if [ -n "$LOCAL_VERSION_CODE" ]; then
+        case "$LOCAL_VERSION_CODE" in
+            *[!0-9]*) LOCAL_VERSION_CODE=0 ;;
+        esac
+        if [ "$LOCAL_VERSION_CODE" -ge "$REMOTE_VERSION_CODE" ] 2>/dev/null; then
+            echo "status=current"
+            echo "version=$LOCAL_VERSION"
+            echo "version_code=$LOCAL_VERSION_CODE"
+            return 0
+        fi
+    elif [ -n "$LOCAL_VERSION" ] && ! version_is_newer "$REMOTE_VERSION" "$LOCAL_VERSION"; then
+        echo "status=current"
+        echo "version=$LOCAL_VERSION"
+        return 0
+    fi
+
+    echo "status=downloading"
+    echo "version=$REMOTE_VERSION"
+    echo "version_code=$REMOTE_VERSION_CODE"
+    if ! download_paid_package "$REMOTE_ID" "$REMOTE_SHA"; then
+        gate_package_abort >/dev/null 2>&1
+        echo "status=deferred"
+        echo "reason=package_download_failed"
+        return 0
+    fi
+    if ! gate_package_commit "$REMOTE_SHA" "$REMOTE_ID" "$REMOTE_VERSION" "$REMOTE_VERSION_CODE"; then
+        gate_package_abort >/dev/null 2>&1
+        echo "status=deferred"
+        echo "reason=package_verification_or_install_failed"
+        return 0
+    fi
+    echo "status=updated"
+    echo "version=$REMOTE_VERSION"
+    echo "version_code=$REMOTE_VERSION_CODE"
+    return 0
+}
+
 
 case "$1" in
+    "check_base_update")
+        check_base_update
+        ;;
+
+    "api_get")
+        api_get_proxy "$2" "$3"
+        ;;
+
+    "auth_package_download")
+        download_paid_package "$2" "$3"
+        ;;
+
+    "auth_install_latest")
+        install_latest_paid_package
+        ;;
+
     "get_video_motion_config")
         require_premium video_memc
         VIDEO_TARGET=$(settings get secure "$VIDEO_MOTION_TARGET_KEY" 2>/dev/null)
@@ -1530,7 +1904,7 @@ case "$1" in
 
     "auth_package_commit")
         [ -f "$GATE_HELPER" ] || { echo "Error: authorization gate is missing"; exit 1; }
-        gate_package_commit "$2" "$3" "$4"
+        gate_package_commit "$2" "$3" "$4" "$5"
         ;;
 
     "auth_package_remove")

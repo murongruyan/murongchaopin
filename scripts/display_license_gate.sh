@@ -348,6 +348,7 @@ gate_state_print() {
     echo "premium_features="
     echo "premium_available=0"
     echo "package_version="
+    echo "package_version_code=0"
     echo "package_installed=0"
     echo "package_pending=0"
     echo "reboot_required=0"
@@ -394,6 +395,9 @@ gate_state_print() {
     if gate_premium_installed; then
         echo "package_installed=1"
         echo "package_version=$(gate_json_field "$GATE_PACKAGE_FILE" version)"
+        _package_version_code=$(gate_json_number "$GATE_PACKAGE_FILE" version_code)
+        case "$_package_version_code" in ''|*[!0-9]*) _package_version_code=0 ;; esac
+        echo "package_version_code=$_package_version_code"
     fi
     [ -f "$GATE_DOWNLOAD_FILE" ] && echo "package_pending=1"
     [ "$(gate_json_field "$GATE_STATE_FILE" reboot_required)" = "1" ] && echo "reboot_required=1"
@@ -593,11 +597,12 @@ gate_package_state_print() {
 }
 
 gate_package_commit() {
-    # $1 expected sha256 (hex), $2 release_id, $3 version
+    # $1 expected sha256 (hex), $2 release_id, $3 version, $4 version_code (optional)
     gate_init
     _sha="$1"
     _release="$2"
     _version="$3"
+    _version_code="${4:-}"
     [ -n "$_sha" ] && [ -n "$_release" ] && [ -n "$_version" ] || {
         echo "Error: missing sha256/release_id/version"
         return 1
@@ -638,6 +643,8 @@ gate_package_commit() {
 
     # manifest identity + compatibility
     _schema=$(gate_json_number "$_staging/manifest.json" schema_version)
+    _manifest_version=$(gate_json_field "$_staging/manifest.json" version)
+    _manifest_version_code=$(gate_json_number "$_staging/manifest.json" version_code)
     _manifest_keyid=$(gate_json_field "$_staging/manifest.json" signature_key_id)
     _min_base=$(gate_json_field "$_staging/manifest.json" min_base_version)
     _base=$(sed -n 's/^version=//p' "$GATE_MOD_PATH/module.prop" 2>/dev/null | head -n 1 | tr -d '[:space:]')
@@ -646,6 +653,22 @@ gate_package_commit() {
     _kernel=$(uname -r 2>/dev/null)
     _backend=$(sed -n '1{s/\r$//;p;q;}' "$GATE_MOD_PATH/config/dts_backend.txt" 2>/dev/null | tr -d '[:space:]')
     [ "$_schema" = "1" ] || { rm -rf "$_staging"; echo "Error: unsupported manifest schema"; return 1; }
+    [ -n "$_manifest_version" ] && [ "$_manifest_version" = "$_version" ] || {
+        rm -rf "$_staging"; echo "Error: package version does not match signed manifest"; return 1
+    }
+    case "$_manifest_version_code" in
+        ''|*[!0-9]*) rm -rf "$_staging"; echo "Error: manifest version_code is invalid"; return 1 ;;
+    esac
+    if [ -n "$_version_code" ]; then
+        case "$_version_code" in
+            *[!0-9]*) rm -rf "$_staging"; echo "Error: package version_code is invalid"; return 1 ;;
+        esac
+        [ "$_version_code" = "$_manifest_version_code" ] || {
+            rm -rf "$_staging"; echo "Error: package version_code does not match signed manifest"; return 1
+        }
+    else
+        _version_code="$_manifest_version_code"
+    fi
     [ -n "$_manifest_keyid" ] && [ "$_manifest_keyid" = "$_pkg_keyid" ] || {
         rm -rf "$_staging"; echo "Error: manifest signature key_id mismatch"; return 1
     }
@@ -794,8 +817,8 @@ gate_package_commit() {
     chmod 700 "$GATE_PREMIUM_DIR" 2>/dev/null
 
     _pkgtmp="$GATE_PACKAGE_FILE.tmp.$$"
-    printf '{"release_id":"%s","version":"%s","sha256":"%s","installed_at":"%s"}\n' \
-        "$_release" "$_version" "$_sha" "$(date +%s 2>/dev/null)" > "$_pkgtmp" || true
+    printf '{"release_id":"%s","version":"%s","version_code":%s,"sha256":"%s","installed_at":"%s"}\n' \
+        "$_release" "$_version" "$_version_code" "$_sha" "$(date +%s 2>/dev/null)" > "$_pkgtmp" || true
     mv -f "$_pkgtmp" "$GATE_PACKAGE_FILE" 2>/dev/null
     chmod 600 "$GATE_PACKAGE_FILE" 2>/dev/null
 

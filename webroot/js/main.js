@@ -17,6 +17,7 @@ const TOKEN_KEY = "murongchaopin_token";
 const PAYMENT_ORDER_KEY = "murongchaopin_pending_payment";
 const VIDEO_MOTION_TARGET_KEY = "murong_video_motion_target_rate";
 const SHOW_SYSTEM_APPS_KEY = "murongchaopin_show_system_apps";
+const UPDATE_NOTICE_SESSION_KEY = "murongchaopin_update_notice";
 
 let currentMode = -1;
 let appliedMode = -1;
@@ -55,6 +56,8 @@ let downloadBusy = false;
 let paymentCatalog = null;
 let paymentOrder = null;
 let paymentPollTimer = null;
+let updateCheckBusy = false;
+let automaticUpdateCheckStarted = false;
 let paymentCheckBusy = false;
 let authorizationRefreshPromise = null;
 
@@ -203,6 +206,15 @@ function bytesToBase64Url(bytes) {
 function utf8ToBase64Url(str) {
     const bytes = new TextEncoder().encode(str);
     return bytesToBase64Url(bytes);
+}
+
+function base64UrlToUtf8(value) {
+    const normalized = String(value || '').replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4);
+    const binary = atob(padded);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new TextDecoder().decode(bytes);
 }
 
 function formatBytes(n) {
@@ -852,6 +864,25 @@ async function apiFetch(path, opts = {}) {
             payload = JSON.stringify(opts.body);
         }
     }
+    // KsuWebUI uses a local WebView origin. Some ROM WebViews reject an
+    // otherwise valid cross-origin request before HTTP/CORS is reached. GET
+    // requests therefore use the module's root-side HTTPS channel first.
+    if (method === 'GET' && opts.auth) {
+        try {
+            const raw = await ksuExec(handlerCmd('api_get', path, opts.auth ? '1' : '0'), true);
+            if (raw && !raw.startsWith('Error:')) {
+                const proxied = JSON.parse(raw);
+                if (proxied.success === false || proxied.error) {
+                    throw new Error(proxied.message || proxied.error || '请求失败');
+                }
+                return proxied;
+            }
+            if (raw && raw.startsWith('Error:')) debugLog(`root API channel: ${raw}`);
+        } catch (e) {
+            debugLog(`root API channel failed: ${e.message}`);
+        }
+    }
+
     let resp;
     try {
         resp = await fetch(`${BASE_API}/${path}`, { method, headers, body: payload });
@@ -886,6 +917,10 @@ async function refreshAuthState() {
     authState.entitlement = authState.entitlement || 'unknown';
     authState.premium_available = authState.premium_available === '1' ? 1 : 0;
     authState.package_installed = authState.package_installed === '1' ? 1 : 0;
+    authState.package_version_code = Number(authState.package_version_code || 0);
+    if (!Number.isInteger(authState.package_version_code) || authState.package_version_code < 0) {
+        authState.package_version_code = 0;
+    }
     authState.package_pending = authState.package_pending === '1' ? 1 : 0;
     authState.device_bound = authState.device_bound === '1' ? 1 : 0;
     authState.lease_valid = authState.lease_valid === '1' ? 1 : 0;
@@ -1226,20 +1261,180 @@ async function doDownload() {
 }
 
 async function doCheckUpdate() {
-    showToast('正在检查更新…');
-    try {
-        const pkg = await pickDownloadablePackage();
-        if (!pkg) { showToast('暂无可用付费组件'); return; }
-        if (pkg.compatible === false) { showToast('设备或包不兼容'); return; }
-        const cur = authState.package_version || '';
-        if (cur && String(pkg.pkg.version) === String(cur)) {
-            showToast('已是最新版本');
-        } else {
-            await startPackageDownload(pkg.pkg);
-        }
-    } catch (e) {
-        showToast('检查更新失败：' + e.message);
+    return checkForUpdates({ automatic: false });
+}
+
+function numericVersionParts(version) {
+    const parts = String(version || '').match(/\d+/g);
+    return parts ? parts.map(Number) : [];
+}
+
+function compareVersions(left, right) {
+    const a = numericVersionParts(left);
+    const b = numericVersionParts(right);
+    const length = Math.max(a.length, b.length);
+    for (let i = 0; i < length; i++) {
+        const delta = (a[i] || 0) - (b[i] || 0);
+        if (delta) return delta > 0 ? 1 : -1;
     }
+    return 0;
+}
+
+function trustedUpdateUrl(value, kind) {
+    const url = String(value || '');
+    if (kind === 'zip') {
+        return url.startsWith('https://github.com/murongruyan/murongchaopin/releases/download/');
+    }
+    return url.startsWith('https://github.com/murongruyan/murongchaopin')
+        || url.startsWith('https://raw.githubusercontent.com/murongruyan/murongchaopin/');
+}
+
+async function fetchBaseUpdateInfo() {
+    const raw = await ksuExec(handlerCmd('check_base_update'), true);
+    if (!raw || raw.startsWith('Error:')) {
+        throw new Error((raw || '更新后端无响应').replace(/^Error:\s*/, ''));
+    }
+    const values = parseKeyValueOutput(raw);
+    let remote;
+    try {
+        remote = JSON.parse(base64UrlToUtf8(values.remote_json_b64));
+    } catch (e) {
+        throw new Error('更新信息格式错误');
+    }
+    const localCode = Number(values.local_version_code);
+    const remoteCode = Number(remote.versionCode);
+    if (!Number.isInteger(localCode) || localCode < 0
+        || !Number.isInteger(remoteCode) || remoteCode <= 0) {
+        throw new Error('更新版本号无效');
+    }
+    if (!trustedUpdateUrl(remote.zipUrl, 'zip')) throw new Error('更新下载地址不受信任');
+    if (remote.changelog && !trustedUpdateUrl(remote.changelog, 'changelog')) {
+        throw new Error('更新日志地址不受信任');
+    }
+    const info = {
+        localVersion: values.local_version || '—',
+        localCode,
+        remoteVersion: String(remote.version || remoteCode),
+        remoteCode,
+        zipUrl: remote.zipUrl,
+        changelogUrl: remote.changelog || '',
+        available: remoteCode > localCode
+    };
+    const versionEl = document.getElementById('module-version');
+    if (versionEl) versionEl.innerText = `${info.localVersion} (${info.localCode})`;
+    return info;
+}
+
+async function collectUpdates() {
+    const result = { base: null, paid: null, baseError: null, paidError: null };
+    try {
+        result.base = await fetchBaseUpdateInfo();
+    } catch (e) {
+        result.baseError = e;
+    }
+    if (authState.package_installed === 1) {
+        try {
+            const candidate = await pickDownloadablePackage();
+            if (candidate && candidate.compatible !== false) {
+                const current = String(authState.package_version || '');
+                const remote = String(candidate.pkg.version || '');
+                const currentCode = Number(authState.package_version_code || 0);
+                const remoteCode = Number(candidate.pkg.version_code || 0);
+                const hasValidCodes = Number.isInteger(currentCode) && currentCode > 0
+                    && Number.isInteger(remoteCode) && remoteCode > 0;
+                if ((hasValidCodes && remoteCode > currentCode)
+                    || (!hasValidCodes && (!current || compareVersions(remote, current) > 0))) {
+                    result.paid = candidate.pkg;
+                }
+            }
+        } catch (e) {
+            result.paidError = e;
+        }
+    }
+    return result;
+}
+
+function updateNoticeId(result) {
+    const baseCode = result.base && result.base.available ? result.base.remoteCode : 0;
+    const paidCode = result.paid ? (result.paid.version_code || result.paid.version || '') : '';
+    return `base:${baseCode}|paid:${paidCode}`;
+}
+
+async function showAvailableUpdate(result, automatic) {
+    const body = document.createElement('div');
+    const rows = [];
+    if (result.base && result.base.available) {
+        rows.push(`<li><span class="kv-label">基础模块</span><span class="kv-value">${esc(result.base.localVersion)} → ${esc(result.base.remoteVersion)}</span></li>`);
+    }
+    if (result.paid) {
+        rows.push(`<li><span class="kv-label">付费组件</span><span class="kv-value">${esc(authState.package_version || '—')} → ${esc(result.paid.version || '—')}</span></li>`);
+    }
+    const paidNotes = result.paid && String(result.paid.release_notes || '').trim();
+    const paidNotesHtml = paidNotes
+        ? `<section class="update-release-notes">
+            <div class="update-release-notes-title">付费组件更新日志</div>
+            <div class="update-release-notes-body">${esc(paidNotes).replace(/\r?\n/g, '<br>')}</div>
+        </section>`
+        : '';
+    body.innerHTML = `
+        <div class="notice notice-info">检测到可用更新</div>
+        <ul class="kv-list">${rows.join('')}</ul>
+        ${paidNotesHtml}
+        ${result.base && result.base.available && result.base.changelogUrl ? '<p class="text-hint">基础模块更新日志可在下载页面查看。</p>' : ''}`;
+    const buttons = [{ label: '稍后', className: 'btn-secondary', value: 'later' }];
+    if (result.base && result.base.available) {
+        buttons.push({ label: '下载基础模块', className: 'btn-primary', value: 'base' });
+    }
+    if (result.paid) {
+        buttons.push({ label: '更新付费组件', className: 'btn-primary', value: 'paid' });
+    }
+    const action = await showModalRaw(automatic ? '发现新版本' : '检查更新', body, buttons);
+    if (action === 'base') await openUrl(result.base.zipUrl);
+    if (action === 'paid') await startPackageDownload(result.paid);
+}
+
+async function checkForUpdates({ automatic = false } = {}) {
+    if (updateCheckBusy) return;
+    updateCheckBusy = true;
+    if (!automatic) showToast('正在检查更新…');
+    try {
+        const result = await collectUpdates();
+        const hasUpdate = Boolean((result.base && result.base.available) || result.paid);
+        if (!hasUpdate) {
+            if (!automatic) {
+                const errors = [result.baseError, result.paidError].filter(Boolean);
+                if (errors.length) throw errors[0];
+                showToast('基础模块和付费组件均为最新版本');
+            }
+            return;
+        }
+        const noticeId = updateNoticeId(result);
+        if (automatic) {
+            try {
+                if (sessionStorage.getItem(UPDATE_NOTICE_SESSION_KEY) === noticeId) return;
+                sessionStorage.setItem(UPDATE_NOTICE_SESSION_KEY, noticeId);
+            } catch (e) { /* session storage unavailable; still show once per runtime */ }
+        }
+        await showAvailableUpdate(result, automatic);
+    } catch (e) {
+        if (!automatic) showToast('检查更新失败：' + e.message);
+        else debugLog(`automatic update check failed: ${e.message}`);
+    } finally {
+        updateCheckBusy = false;
+    }
+}
+
+function scheduleAutomaticUpdateCheck(attempt = 0) {
+    if (automaticUpdateCheckStarted && attempt === 0) return;
+    automaticUpdateCheckStarted = true;
+    setTimeout(() => {
+        const overlayBusy = modalEl() && !modalEl().hidden;
+        if (overlayBusy && attempt < 4) {
+            scheduleAutomaticUpdateCheck(attempt + 1);
+            return;
+        }
+        checkForUpdates({ automatic: true });
+    }, attempt === 0 ? 1200 : 1500);
 }
 
 // ============================================================
@@ -1766,69 +1961,29 @@ async function startPackageDownload(pkg) {
     try {
         term.log(`资源版本：${pkg.version || '—'}`, 'info');
         term.log(`文件大小：${formatBytes(pkg.file_size)}`, 'info');
-        term.log('正在获取下载令牌…', 'step');
-        const tokenResp = await apiFetch(`v1/display/packages/${pkg.id}/download-token`, {
-            method: 'POST', auth: true, nonce: true,
-            body: {
-                device_id_hash: (deviceInfo && deviceInfo.device_id_hash) || '',
-                device_model: (deviceInfo && deviceInfo.device_model) || '',
-                soc_model: (deviceInfo && deviceInfo.soc_model) || '',
-                build_fingerprint: (deviceInfo && deviceInfo.build_fingerprint) || '',
-                base_version: (deviceInfo && deviceInfo.base_version) || '',
-                kernel: (deviceInfo && deviceInfo.kernel) || '',
-                backend: (deviceInfo && deviceInfo.backend) || '',
-                channel: 'stable'
-            }
-        });
-        const d = tokenResp.data || {};
-        if (!d.download_token) throw new Error('未获取到下载令牌');
-        const sha256 = d.sha256 || pkg.file_sha256 || '';
-
-        term.log('开始下载…', 'step');
-        const resp = await fetch(`${BASE_API}/v1/display/packages/${pkg.id}/download?download_token=${encodeURIComponent(d.download_token)}`);
-        if (!resp.ok || !resp.body) throw new Error(`下载失败 HTTP ${resp.status}`);
-        const totalBytes = parseInt(resp.headers.get('Content-Length') || '0', 10) || 0;
-
-        // 放弃上一次未完成的 staging（保留当前可用版本）
-        await ksuExec(handlerCmd('auth_package_abort'), true);
-
-        // 流式下载：边下边分块写入，避免大包整体驻留内存
-        const reader = resp.body.getReader();
-        let pending = new Uint8Array(0);
-        let offset = 0;
-        let lastPct = -1;
-        for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            const merged = new Uint8Array(pending.length + value.length);
-            merged.set(pending, 0);
-            merged.set(value, pending.length);
-            pending = merged;
-            while (pending.length >= PKG_CHUNK_BYTES) {
-                const slice = pending.subarray(0, PKG_CHUNK_BYTES);
-                pending = pending.subarray(PKG_CHUNK_BYTES);
-                const b64 = bytesToBase64Url(slice);
-                const r = await ksuExec(handlerCmd('auth_package_write', String(offset), b64), true);
-                if (!r.includes('Success')) throw new Error(`分块写入失败 @${offset}`);
-                offset += slice.length;
-                if (totalBytes > 0) {
-                    const pct = Math.floor(offset / totalBytes * 100);
-                    if (pct >= lastPct + 20 || pct >= 100) {
-                        lastPct = pct;
-                        term.log(`写入进度 ${pct}%`, 'info');
-                    }
-                }
-            }
+        const sha256 = String(pkg.file_sha256 || pkg.sha256 || '').toLowerCase();
+        if (!/^[0-9a-f]{64}$/.test(sha256)) throw new Error('版本列表缺少有效 SHA-256');
+        term.log('正在通过系统网络通道获取令牌并下载…', 'step');
+        const staged = await ksuExec(
+            handlerCmd('auth_package_download', String(pkg.id), sha256),
+            true,
+            210000
+        );
+        if (!staged.includes('Success:')) {
+            throw new Error((staged || '下载后端无响应').replace(/^Error:\s*/, ''));
         }
-        if (pending.length > 0) {
-            const r = await ksuExec(handlerCmd('auth_package_write', String(offset), bytesToBase64Url(pending)), true);
-            if (!r.includes('Success')) throw new Error(`分块写入失败 @${offset}`);
-            offset += pending.length;
-        }
-        term.log(`已写入 ${formatBytes(offset)}，开始校验哈希并原子安装…`, 'info');
+        const stagedInfo = parseKeyValueOutput(staged);
+        const downloadedBytes = Number(stagedInfo.downloaded_bytes || 0);
+        term.log(`已下载并校验 ${formatBytes(downloadedBytes)}，开始原子安装…`, 'info');
 
         term.log('下载完成，正在校验哈希并原子安装…', 'step');
-        const commit = await ksuExec(handlerCmd('auth_package_commit', sha256, String(pkg.id), String(pkg.version || '')), true);
+        const commit = await ksuExec(handlerCmd(
+            'auth_package_commit',
+            sha256,
+            String(pkg.id),
+            String(pkg.version || ''),
+            String(pkg.version_code || '')
+        ), true);
         if (!commit.includes('Success')) throw new Error(commit || '安装校验失败（签名/哈希/兼容性不符）');
         term.log('', '');
         term.log('安装成功！重启后生效。', 'done');
@@ -3591,6 +3746,7 @@ function bindStaticEvents() {
     safeBind('theme-dark', 'onclick', () => applyTheme('dark'));
     safeBind('btn-donate-wechat', 'onclick', donateWechat);
     safeBind('btn-download-package', 'onclick', doDownload);
+    safeBind('btn-check-update', 'onclick', doCheckUpdate);
     safeBind('btn-payment-close', 'onclick', closePaymentOverlay);
 
     const paymentOverlay = paymentOverlayEl();
@@ -3649,6 +3805,7 @@ async function initializeModuleData() {
                 updatePaidMarkers();
             });
         }
+        scheduleAutomaticUpdateCheck();
     } catch (e) {
         console.error("Init failed:", e);
         showToast("初始化失败: " + e.message);
