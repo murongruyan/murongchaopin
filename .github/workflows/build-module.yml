@@ -9,14 +9,14 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "module.prop 中的新版本号，例如 2.9"
+        description: "module.prop 中的新版本号，例如 2.9.1"
         required: false
-        default: "2.9"
+        default: "2.9.1"
         type: string
       version_code:
-        description: "module.prop 中的新 versionCode，例如 29"
+        description: "module.prop 中的新 versionCode，例如 30"
         required: false
-        default: "29"
+        default: "30"
         type: string
 
 env:
@@ -193,7 +193,8 @@ jobs:
             tests/device_stock_backup_guard.sh \
             tests/device_invalid_backup_refusal.sh \
             tests/check_web_stock_isolation.sh \
-            tests/check_backend_dispatch.sh; do
+            tests/check_backend_dispatch.sh \
+            tests/check_volume_key_parser.sh; do
             sh -n "$script"
           done
           sh tests/check_drm_ko_profiles.sh
@@ -209,6 +210,7 @@ jobs:
           node --check webroot/js/main.js
           sh tests/check_web_stock_isolation.sh
           sh tests/check_backend_dispatch.sh
+          sh tests/check_volume_key_parser.sh
 
       - name: Read module metadata
         id: meta
@@ -441,7 +443,7 @@ jobs:
           artifactErrorsFailBuild: true
           artifacts: ${{ steps.package.outputs.zip_path }},${{ steps.package.outputs.checksum_path }}
           commit: ${{ env.RELEASE_COMMIT_SHA }}
-          bodyFile: docs/RELEASE_NOTES_v2.9.md
+          bodyFile: docs/RELEASE_NOTES_v2.9.1.md
           generateReleaseNotes: false
           makeLatest: true
           name: ${{ steps.release_meta.outputs.release_name }}

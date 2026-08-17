@@ -10,21 +10,30 @@ Outputs() {
 # 音量键检测：只把 DOWN 当作选择，并等待同一按键的 UP 后再返回。
 # 这样一次完整的按下/抬起不会被后一个提示重复消费。
 Read_volume_key_press() {
-  local event pressed
-  while :; do
-    event=$(getevent -qlc 1 2>/dev/null)
-    case "$event" in
-      *EV_KEY*KEY_VOLUMEUP*" DOWN") pressed=KEY_VOLUMEUP; break ;;
-      *EV_KEY*KEY_VOLUMEDOWN*" DOWN") pressed=KEY_VOLUMEDOWN; break ;;
-    esac
-  done
+  local pressed
+  # Keep one getevent fd open for the full press/release pair. Reopening it
+  # after DOWN can miss the UP event and leave the installer waiting forever.
+  pressed=$(getevent -ql 2>/dev/null | awk '
+    /EV_KEY/ {
+      key = ""
+      if (index($0, "KEY_VOLUMEUP")) {
+        key = "KEY_VOLUMEUP"
+      } else if (index($0, "KEY_VOLUMEDOWN")) {
+        key = "KEY_VOLUMEDOWN"
+      }
+      if (key == "") next
 
-  while :; do
-    event=$(getevent -qlc 1 2>/dev/null)
-    case "$event" in
-      *EV_KEY*"$pressed"*" UP") break ;;
-    esac
-  done
+      value = $NF
+      if (pressed == "" && (value == "DOWN" || value == "00000001")) {
+        pressed = key
+        next
+      }
+      if (pressed == key && (value == "UP" || value == "00000000")) {
+        print pressed
+        exit
+      }
+    }
+  ')
 
   # 给下一次独立选择留出防抖间隔，但不设置整体选择超时。
   sleep 0.35
@@ -35,6 +44,7 @@ Volume_key_monitoring() {
   case "$(Read_volume_key_press)" in
     KEY_VOLUMEUP) echo 0 ;;
     KEY_VOLUMEDOWN) echo 1 ;;
+    *) echo 1 ;;
   esac
 }
 
@@ -57,6 +67,7 @@ Install_backend_selection() {
   case "$(Read_volume_key_press)" in
     KEY_VOLUMEUP) echo dtbo ;;
     KEY_VOLUMEDOWN) echo drm ;;
+    *) echo cancel ;;
   esac
 }
 
