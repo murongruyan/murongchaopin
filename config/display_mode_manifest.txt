@@ -1,0 +1,25 @@
+# Canonical display mode source for DTBO, DRM-KO and WebUI.
+# Keep backend-specific entries explicit: DTBO has full DTS behavior, while a
+# DRM entry is present only when the corresponding Qualcomm ABI is validated.
+manifest_version=1
+rmx5200_width=1440
+rmx5200_height=3136
+rmx5200_dtbo_rates=123,150,155,160,165,170,175,180
+rmx5200_drm_rates=123,150,155,160,165,170,175,180
+rmx5200_hmbird_dtbo=1
+# The standalone free HMBIRD KO is backend-independent. It validates and
+# reuses a DTBO-provided node or creates one through dynamic OF when possible.
+hmbird_ko_free=1
+hmbird_ko_backends=dtbo,drm
+hmbird_ko_supported_socs=SM8850,SM8850P,SM8845,SM8750,SM8750P,SM8650,SM8650P,MT6991,MT6993
+hmbird_ko_consumer_reinit=0
+plk110_width=1272
+plk110_height=2772
+plk110_dtbo_rates=123,170,175,180,185,190,195,199
+plk110_drm_rates=170,175,180,185,190,195,199
+pjd110_hmbird_dtbo=1
+pjd110_capacity_unlock_dtbo=1
+pjd110_width=1440
+pjd110_height=3168
+pjd110_dtbo_rates=
+pjd110_drm_rates=

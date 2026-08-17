@@ -4,6 +4,9 @@
 
 # 设置模块路径
 MODPATH="$1"
+BIN_DIR="$MODPATH/bin"
+STOCK_MANIFEST="$MODPATH/img/dtbo.img.sha256"
+STOCK_RECOVERY="$MODPATH/img/dtbo.img.gz"
 
 [ -f "$MODPATH/scripts/dtbo_avb.sh" ] && . "$MODPATH/scripts/dtbo_avb.sh"
 
@@ -50,9 +53,42 @@ fi
 
 ui_print "开始卸载..."
 
+restore_runtime_state() {
+  # Stop processes that can recreate a bind mount while it is being removed.
+  pkill -f "$MODPATH/premium/scripts/libpwiris_memc_gate_patch.sh watch-final-view" \
+    >/dev/null 2>&1 || true
+  pkill -f "$MODPATH/scripts/libpwiris_memc_gate_patch.sh watch-final-view" \
+    >/dev/null 2>&1 || true
+  pkill -f "$MODPATH/scripts/display_settings_bridge.sh watch" \
+    >/dev/null 2>&1 || true
+
+  # Free VRR + refresh-rate overlay (MEMC overlay now lives in the paid package).
+  [ ! -f "$MODPATH/scripts/coloros_config.sh" ] ||
+    sh "$MODPATH/scripts/coloros_config.sh" remove >/dev/null 2>&1 || true
+
+  # Paid helpers live under premium/. Restore each only while the paid package
+  # is still present; a removed premium/ is a no-op.
+  PREMIUM_SCRIPTS="$MODPATH/premium/scripts"
+  [ ! -f "$PREMIUM_SCRIPTS/coloros_config_premium.sh" ] ||
+    sh "$PREMIUM_SCRIPTS/coloros_config_premium.sh" remove-premium >/dev/null 2>&1 || true
+  [ ! -f "$PREMIUM_SCRIPTS/libpwiris_memc_gate_patch.sh" ] ||
+    sh "$PREMIUM_SCRIPTS/libpwiris_memc_gate_patch.sh" restore >/dev/null 2>&1 || true
+  [ ! -f "$PREMIUM_SCRIPTS/premium_system_overlay.sh" ] ||
+    sh "$PREMIUM_SCRIPTS/premium_system_overlay.sh" remove >/dev/null 2>&1 || true
+  [ ! -f "$PREMIUM_SCRIPTS/surfaceflinger_ltpo_rise_patch.sh" ] ||
+    sh "$PREMIUM_SCRIPTS/surfaceflinger_ltpo_rise_patch.sh" restore >/dev/null 2>&1 || true
+  [ ! -f "$PREMIUM_SCRIPTS/surfaceflinger_vote_patch.sh" ] ||
+    sh "$PREMIUM_SCRIPTS/surfaceflinger_vote_patch.sh" restore >/dev/null 2>&1 || true
+  [ ! -f "$PREMIUM_SCRIPTS/adfr_lock.sh" ] ||
+    sh "$PREMIUM_SCRIPTS/adfr_lock.sh" restore >/dev/null 2>&1 || true
+  [ ! -f "$PREMIUM_SCRIPTS/generic_adfr_policy.sh" ] ||
+    sh "$PREMIUM_SCRIPTS/generic_adfr_policy.sh" restore >/dev/null 2>&1 || true
+}
+
 # 检查备份文件是否存在
 # 优先检查 img/dtbo.img (新版路径)，兼容 backup_dtbo.img (旧版路径)
-if [ -f "$MODPATH/img/dtbo.img" ]; then
+if [ -f "$MODPATH/img/dtbo.img" ] || \
+   { [ -f "$STOCK_MANIFEST" ] && [ -f "$STOCK_RECOVERY" ]; }; then
   BACKUP_DTBO="$MODPATH/img/dtbo.img"
 elif [ -f "$MODPATH/backup_dtbo.img" ]; then
   BACKUP_DTBO="$MODPATH/backup_dtbo.img"
@@ -83,6 +119,24 @@ if [ ! -e "$DTBO_PARTITION" ]; then
   exit 1
 fi
 
+DTBO_PARTITION_SIZE=$(blockdev --getsize64 "$DTBO_PARTITION" 2>/dev/null)
+chmod +x "$BIN_DIR/avbtool/avbtool" "$BIN_DIR/openssl" 2>/dev/null
+if [ ! -f "$MODPATH/scripts/dtbo_avb.sh" ]; then
+  ui_print "错误: 缺少原厂 DTBO 完整性校验脚本"
+  exit 1
+fi
+if ! dtbo_validate_stock_backup "$BACKUP_DTBO" "$STOCK_MANIFEST" \
+    "$DTBO_PARTITION_SIZE" "$BIN_DIR"; then
+  dtbo_recover_stock_backup "$BACKUP_DTBO" "$STOCK_MANIFEST" \
+    "$STOCK_RECOVERY" "$DTBO_PARTITION_SIZE" "$BIN_DIR" >/dev/null 2>&1
+fi
+if ! dtbo_validate_stock_backup "$BACKUP_DTBO" "$STOCK_MANIFEST" \
+    "$DTBO_PARTITION_SIZE" "$BIN_DIR"; then
+  ui_print "错误: 原厂 DTBO 备份未通过哈希和官方 AVB 完整性校验"
+  ui_print "为避免把修改版当成原厂版写入，已取消卸载"
+  exit 1
+fi
+
 # 恢复原始 DTBO
 ui_print "正在恢复原始 DTBO..."
 ui_print "从: $BACKUP_DTBO"
@@ -97,13 +151,28 @@ else
 fi
 if [ "$RESTORE_STATUS" -eq 0 ]; then
   ui_print "原始 DTBO 恢复成功!"
-  
+
+  # Only mutate userspace after the stock partition restore has succeeded.
+  # A cancelled or refused uninstall therefore leaves the installed Hook and
+  # every active module mount untouched.
+  restore_runtime_state
+  pm uninstall --user 0 com.murongchaopin.displayhook >/dev/null 2>&1 || true
+  pm uninstall --user 0 com.murongchaopin.displayhook.premium >/dev/null 2>&1 || true
+  for daemon_pid in $(pidof rate_daemon 2>/dev/null) $(pidof rate_daemon_premium 2>/dev/null); do
+    kill "$daemon_pid" >/dev/null 2>&1 || true
+  done
+
   # 清理模块文件（可选）
   ui_print "清理模块文件..."
   rm -rf "$MODPATH/bin"
   rm -rf "$MODPATH/img"
   rm -f "$MODPATH/backup_dtbo.img" 2>/dev/null
-  
+
+  # 付费授权与付费包本地状态一并清除。设计决定：卸载时不向服务器解绑，
+  # token/租约绑定关系保留在服务器侧，用户重装后可用原账号重新登录并恢复授权。
+  rm -rf "$MODPATH/config/auth"
+  rm -rf "$MODPATH/premium"
+
   # 保留卸载脚本直到下次重启
   ui_print ""
   ui_print "=============================="

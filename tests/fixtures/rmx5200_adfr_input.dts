@@ -1,0 +1,90 @@
+/dts-v1/;
+
+/ {
+	oplus,project-id = <0x1234>;
+
+	__local_fixups__ {
+		fragment@0 {
+			__overlay__ {
+				qcom,mdss_dsi_panel_AE084_P_3_A0033_dsc_cmd_dvt02 {
+					qcom,platform-reset-gpio = <0>;
+				};
+			};
+		};
+	};
+
+	fragment@0 {
+		__overlay__ {
+			qcom,mdss_dsi_panel_AE084_P_3_A0033_dsc_cmd_dvt02 {
+				qcom,mdss-dsi-panel-name = "AE084 P 3 A0033 dvt02";
+
+				qcom,mdss-dsi-display-timings {
+					timing@wqhd_sdc_60 {
+						cell-index = <0>;
+						qcom,mdss-dsi-panel-framerate = <60>;
+						qcom,mdss-dsi-panel-clockrate = <1000000000>;
+						qcom,mdss-mdp-transfer-time-us = <9000>;
+					};
+
+					timing@wqhd_sdc_90 {
+						cell-index = <1>;
+						qcom,mdss-dsi-panel-framerate = <90>;
+						qcom,mdss-dsi-panel-clockrate = <1000000000>;
+						qcom,mdss-mdp-transfer-time-us = <8000>;
+					};
+
+					timing@wqhd_sdc_120 {
+						cell-index = <2>;
+						qcom,mdss-dsi-panel-framerate = <120>;
+						qcom,mdss-dsi-panel-clockrate = <1000000000>;
+						qcom,mdss-mdp-transfer-time-us = <7000>;
+					};
+
+					timing@wqhd_sdc_187 {
+						cell-index = <99>;
+						qcom,mdss-dsi-panel-framerate = <187>;
+						qcom,mdss-dsi-panel-clockrate = <1298611111>;
+						qcom,mdss-mdp-transfer-time-us = <4620>;
+					};
+
+					timing@wqhd_sdc_144 {
+						cell-index = <3>;
+						qcom,mdss-dsi-panel-framerate = <144>;
+						qcom,mdss-dsi-panel-clockrate = <1000000000>;
+						qcom,mdss-mdp-transfer-time-us = <6000>;
+						qcom,mdss-dsi-h-sync-skew = <0>;
+					};
+
+					timing@fhd_sdc_120 {
+						cell-index = <4>;
+						qcom,mdss-dsi-panel-framerate = <120>;
+						qcom,mdss-dsi-panel-clockrate = <800000000>;
+						qcom,mdss-mdp-transfer-time-us = <7000>;
+					};
+
+					timing@fhd_sdc_90 {
+						cell-index = <5>;
+						qcom,mdss-dsi-panel-framerate = <90>;
+						qcom,mdss-dsi-panel-clockrate = <800000000>;
+						qcom,mdss-mdp-transfer-time-us = <8000>;
+					};
+
+					timing@fhd_sdc_60 {
+						cell-index = <6>;
+						qcom,mdss-dsi-panel-framerate = <60>;
+						qcom,mdss-dsi-panel-clockrate = <800000000>;
+						qcom,mdss-mdp-transfer-time-us = <9000>;
+					};
+
+					timing@fhd_sdc_144 {
+						cell-index = <7>;
+						qcom,mdss-dsi-panel-framerate = <144>;
+						qcom,mdss-dsi-panel-clockrate = <800000000>;
+						qcom,mdss-mdp-transfer-time-us = <6000>;
+						qcom,mdss-dsi-h-sync-skew = <0>;
+					};
+				};
+			};
+		};
+	};
+};

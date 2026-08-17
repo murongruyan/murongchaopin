@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # WebUI Handler Script
 
-MOD_PATH="/data/adb/modules/murongchaopin"
+MOD_PATH="${MURONGCHAOPIN_MOD_PATH:-/data/adb/modules/murongchaopin}"
 # 自动探测路径
 if [ ! -d "$MOD_PATH" ]; then
     MOD_PATH=$(dirname $(dirname "$0"))
@@ -13,11 +13,445 @@ WORK_DIR="$MOD_PATH/workspace"
 CONFIG_FILE="$MOD_PATH/config/mode.txt"
 DAEMON_BIN="$BIN_DIR/rate_daemon"
 AVB_HELPER="$MOD_PATH/scripts/dtbo_avb.sh"
+DISPLAY_HELPER="$MOD_PATH/scripts/display_backend.sh"
+HMBIRD_HELPER="$MOD_PATH/scripts/hmbird_backend.sh"
+GATE_HELPER="$MOD_PATH/scripts/display_license_gate.sh"
+PREMIUM_PATH="$MOD_PATH/premium"
+ADFR_LOCK_HELPER="$PREMIUM_PATH/scripts/adfr_lock.sh"
+GENERIC_ADFR_HELPER="$PREMIUM_PATH/scripts/generic_adfr_policy.sh"
+SF_VOTE_HELPER="$PREMIUM_PATH/scripts/surfaceflinger_vote_patch.sh"
+SF_RISE_HELPER="$PREMIUM_PATH/scripts/surfaceflinger_ltpo_rise_patch.sh"
+MEMC_GATE_HELPER="$PREMIUM_PATH/scripts/libpwiris_memc_gate_patch.sh"
+COLOROS_PREMIUM_HELPER="$PREMIUM_PATH/scripts/coloros_config_premium.sh"
+PREMIUM_SYSTEM_OVERLAY_HELPER="$PREMIUM_PATH/scripts/premium_system_overlay.sh"
+ADFR_POLICY_FILE="$MOD_PATH/config/rmx5200_adfr_mode.txt"
+ADFR_TEST_BYPASS_FILE="$MOD_PATH/config/adfr_lock_test_disabled"
+DISPLAY_POLICY_FILE="$MOD_PATH/config/rmx5200_display_policy.txt"
+LTPO_BOOT_TOKEN_FILE="$MOD_PATH/config/rmx5200_ltpo_boot_test_once"
+LTPO_RISE_TOKEN_FILE="$MOD_PATH/config/rmx5200_ltpo_rise_boot_test_once"
+DTS_BACKEND_FILE="$MOD_PATH/config/dts_backend.txt"
+DRM_SPECS_FILE="$MOD_PATH/runtime/drm_modes.txt"
+CUSTOM_RATES_FILE="$MOD_PATH/config/custom_refresh_rates.txt"
+MODE_MANIFEST_FILE="$MOD_PATH/config/display_mode_manifest.txt"
+SETTINGS_BRIDGE_HELPER="$MOD_PATH/scripts/display_settings_bridge.sh"
+MODE_MANIFEST_HELPER="$MOD_PATH/scripts/mode_manifest.sh"
+COLOROS_CONFIG_HELPER="$MOD_PATH/scripts/coloros_config.sh"
+VIDEO_MEMC_APPS_FILE="$MOD_PATH/config/video_memc_apps.txt"
+VIDEO_MOTION_TARGET_KEY="murong_video_motion_target_rate"
+STOCK_DTBO="$IMG_DIR/dtbo.img"
+STOCK_MANIFEST="$IMG_DIR/dtbo.img.sha256"
+STOCK_RECOVERY="$IMG_DIR/dtbo.img.gz"
 
 [ -f "$AVB_HELPER" ] && . "$AVB_HELPER"
+[ -r "$MODE_MANIFEST_HELPER" ] && . "$MODE_MANIFEST_HELPER"
+[ -f "$GATE_HELPER" ] && . "$GATE_HELPER"
+
+# require_premium <feature> - deny premium actions without a verified lease.
+# Exit codes: 0 authorized, 2 grace (allowed with warning), 1 denied.
+require_premium() {
+    if [ ! -f "$GATE_HELPER" ]; then
+        echo "Error: premium feature requires authorization (gate missing)"
+        exit 1
+    fi
+    gate_check "$1"
+    GATE_RC=$?
+    if [ "$GATE_RC" = 1 ]; then
+        echo "Error: premium feature requires authorization: $GATE_REASON"
+        exit 1
+    fi
+    if [ "$GATE_RC" = 2 ]; then
+        echo "Warning: lease expired, offline grace active"
+    fi
+    return 0
+}
 
 mkdir -p "$(dirname "$CONFIG_FILE")"
 [ ! -f "$CONFIG_FILE" ] && echo "1" > "$CONFIG_FILE"
+[ ! -f "$DTS_BACKEND_FILE" ] && echo "dtbo" > "$DTS_BACKEND_FILE"
+[ ! -f "$ADFR_POLICY_FILE" ] && printf 'on\n' > "$ADFR_POLICY_FILE"
+[ ! -f "$DISPLAY_POLICY_FILE" ] && printf 'stock_ltps\n' > "$DISPLAY_POLICY_FILE"
+
+mode_semantic_for_id() {
+    MODE_LINE=$(dumpsys SurfaceFlinger 2>/dev/null | \
+        grep -oE "id=$1, hwcId=[0-9]+, resolution=[0-9]+x[0-9]+, vsyncRate=[0-9.]+" | head -n 1)
+    [ -n "$MODE_LINE" ] || return 1
+    MODE_WIDTH=$(printf '%s\n' "$MODE_LINE" | sed -n 's/.*resolution=\([0-9]*\)x[0-9]*.*/\1/p')
+    MODE_FPS=$(printf '%s\n' "$MODE_LINE" | sed -n 's/.*vsyncRate=\([0-9.]*\).*/\1/p' | awk '{printf "%d", $1 + 0.5}')
+    case "$MODE_WIDTH" in
+        1080) printf 'FHD+ %s\n' "$MODE_FPS" ;;
+        1440) printf 'QHD+ %s\n' "$MODE_FPS" ;;
+        *) return 1 ;;
+    esac
+}
+
+read_adfr_policy() {
+    ADFR_POLICY=$(sed -n '1{s/\r$//;p;q;}' "$ADFR_POLICY_FILE" 2>/dev/null | \
+        tr -d '[:space:]')
+    case "$ADFR_POLICY" in
+        on|off) printf '%s\n' "$ADFR_POLICY" ;;
+        *) printf 'on\n' ;;
+    esac
+}
+
+write_adfr_policy() {
+    NEW_ADFR_POLICY="$1"
+    case "$NEW_ADFR_POLICY" in
+        on|off) ;;
+        *) return 1 ;;
+    esac
+    ADFR_POLICY_TMP="$ADFR_POLICY_FILE.tmp.$$"
+    printf '%s\n' "$NEW_ADFR_POLICY" > "$ADFR_POLICY_TMP" || return 1
+    mv -f "$ADFR_POLICY_TMP" "$ADFR_POLICY_FILE" || return 1
+    chmod 0644 "$ADFR_POLICY_FILE" 2>/dev/null
+}
+
+read_display_policy() {
+    DISPLAY_POLICY=$(sed -n '1{s/\r$//;p;q;}' "$DISPLAY_POLICY_FILE" 2>/dev/null |
+        tr -d '[:space:]')
+    case "$DISPLAY_POLICY" in
+        stock_ltps|stock_ltpo|custom_ltpo|adfr_off) printf '%s\n' "$DISPLAY_POLICY" ;;
+        *)
+            if [ "$(read_adfr_policy)" = on ]; then
+                printf 'stock_ltps\n'
+            else
+                printf 'adfr_off\n'
+            fi
+            ;;
+    esac
+}
+
+write_display_policy() {
+    NEW_DISPLAY_POLICY="$1"
+    case "$NEW_DISPLAY_POLICY" in
+        stock_ltps|stock_ltpo|custom_ltpo|adfr_off) ;;
+        *) return 1 ;;
+    esac
+    DISPLAY_POLICY_TMP="$DISPLAY_POLICY_FILE.tmp.$$"
+    printf '%s\n' "$NEW_DISPLAY_POLICY" > "$DISPLAY_POLICY_TMP" || return 1
+    mv -f "$DISPLAY_POLICY_TMP" "$DISPLAY_POLICY_FILE" || return 1
+    chmod 0644 "$DISPLAY_POLICY_FILE" 2>/dev/null
+}
+
+display_policy_for_model() {
+    POLICY_MODEL="$1"
+    POLICY_VALUE=$(read_display_policy)
+    case "$POLICY_MODEL" in
+        RMX5200)
+            case "$POLICY_VALUE" in
+                custom_ltpo|adfr_off) printf '%s\n' "$POLICY_VALUE" ;;
+                *) printf 'stock_ltps\n' ;;
+            esac
+            ;;
+        PLK110|PJD110)
+            case "$POLICY_VALUE" in
+                adfr_off) printf 'adfr_off\n' ;;
+                *) printf 'stock_ltpo\n' ;;
+            esac
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+validate_stock_backup() {
+    [ -f "$AVB_HELPER" ] || return 1
+    VALIDATE_SLOT=$(getprop ro.boot.slot_suffix)
+    VALIDATE_PARTITION="/dev/block/by-name/dtbo$VALIDATE_SLOT"
+    VALIDATE_SIZE=$(blockdev --getsize64 "$VALIDATE_PARTITION" 2>/dev/null)
+    chmod +x "$BIN_DIR/avbtool/avbtool" "$BIN_DIR/openssl" 2>/dev/null
+    dtbo_validate_stock_backup "$STOCK_DTBO" "$STOCK_MANIFEST" \
+        "$VALIDATE_SIZE" "$BIN_DIR"
+}
+
+ensure_stock_backup() {
+    if validate_stock_backup; then
+        if ! dtbo_validate_stock_recovery "$STOCK_MANIFEST" "$STOCK_RECOVERY"; then
+            dtbo_write_stock_recovery "$STOCK_DTBO" "$STOCK_MANIFEST" \
+                "$STOCK_RECOVERY" || return 1
+        fi
+        chmod 0444 "$STOCK_DTBO" "$STOCK_MANIFEST" "$STOCK_RECOVERY" 2>/dev/null
+        return 0
+    fi
+
+    [ -f "$AVB_HELPER" ] || return 1
+    VALIDATE_SLOT=$(getprop ro.boot.slot_suffix)
+    VALIDATE_PARTITION="/dev/block/by-name/dtbo$VALIDATE_SLOT"
+    VALIDATE_SIZE=$(blockdev --getsize64 "$VALIDATE_PARTITION" 2>/dev/null)
+    if dtbo_recover_stock_backup "$STOCK_DTBO" "$STOCK_MANIFEST" \
+        "$STOCK_RECOVERY" "$VALIDATE_SIZE" "$BIN_DIR" &&
+       validate_stock_backup; then
+        STOCK_BACKUP_RECOVERED=1
+        return 0
+    fi
+    return 1
+}
+
+stock_guard_begin() {
+    STOCK_BACKUP_RECOVERED=0
+    ensure_stock_backup || {
+        echo "错误：原厂 DTBO 基线无效，Web 工作区已停止"
+        return 1
+    }
+    STOCK_GUARD_HASH=$(dtbo_hash_file "$STOCK_DTBO")
+    [ "${#STOCK_GUARD_HASH}" -eq 64 ] || return 1
+    # A repair before this operation is acceptable; a repair during it is not.
+    STOCK_BACKUP_RECOVERED=0
+}
+
+stock_guard_end() {
+    ensure_stock_backup || {
+        echo "错误：Web 操作后原厂 DTBO 基线校验失败"
+        return 1
+    }
+    STOCK_GUARD_HASH_AFTER=$(dtbo_hash_file "$STOCK_DTBO")
+    if [ "$STOCK_GUARD_HASH_AFTER" != "$STOCK_GUARD_HASH" ]; then
+        echo "错误：Web 操作改变了原厂 DTBO 基线"
+        return 1
+    fi
+    if [ "$STOCK_BACKUP_RECOVERED" = 1 ]; then
+        echo "错误：检测到 Web 覆盖原厂 DTBO，已从压缩副本自动恢复"
+        return 1
+    fi
+    return 0
+}
+
+read_dts_backend() {
+    DTS_BACKEND=$(sed -n '1p' "$DTS_BACKEND_FILE" 2>/dev/null | tr -d '[:space:]')
+    case "$DTS_BACKEND" in
+        dtbo|drm) echo "$DTS_BACKEND" ;;
+        *) echo "dtbo" ;;
+    esac
+}
+
+write_dts_backend() {
+    NEW_BACKEND="$1"
+    case "$NEW_BACKEND" in
+        dtbo|drm) ;;
+        *) return 1 ;;
+    esac
+    BACKEND_TMP="$DTS_BACKEND_FILE.tmp.$$"
+    printf '%s\n' "$NEW_BACKEND" > "$BACKEND_TMP" || return 1
+    mv -f "$BACKEND_TMP" "$DTS_BACKEND_FILE" || return 1
+    chmod 0644 "$DTS_BACKEND_FILE" 2>/dev/null
+}
+
+dtbo_partition_matches_stock() {
+    [ -f "$STOCK_DTBO" ] || return 1
+    [ -f "$AVB_HELPER" ] || return 1
+    TRANSITION_SLOT=$(getprop ro.boot.slot_suffix 2>/dev/null)
+    TRANSITION_PARTITION="/dev/block/by-name/dtbo$TRANSITION_SLOT"
+    TRANSITION_SIZE=$(wc -c < "$STOCK_DTBO" 2>/dev/null | tr -d '[:space:]')
+    case "$TRANSITION_SIZE" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$(dtbo_hash_file "$STOCK_DTBO")" = \
+      "$(dtbo_hash_device_prefix "$TRANSITION_PARTITION" "$TRANSITION_SIZE")" ]
+}
+
+prepare_backend_transition() {
+    TRANSITION_TARGET="$1"
+    case "$TRANSITION_TARGET" in
+        drm)
+            # Build from the verified stock baseline. All models add the free
+            # HMBIRD node; PJD110 also keeps its DTBO-side capacity unlock.
+            # Display timing remains stock and the selected DRM-KO is the sole
+            # owner of overclock modes.
+            ensure_stock_backup || {
+                echo "错误：无法验证原厂 DTBO，拒绝切换到 DRM-KO"
+                return 1
+            }
+            TRANSITION_SLOT=$(getprop ro.boot.slot_suffix 2>/dev/null)
+            TRANSITION_PARTITION="/dev/block/by-name/dtbo$TRANSITION_SLOT"
+            [ -f "$HMBIRD_HELPER" ] || {
+                echo "错误：缺少免费风驰兼容后端"
+                return 1
+            }
+            echo "正在从原厂基线生成 KO 配套 DTBO（PJD110 含解容，显示 timing 不变）..."
+            sh "$HMBIRD_HELPER" prepare-dtbo "$TRANSITION_PARTITION" || return 1
+            ;;
+        dtbo)
+            # A loaded DRM mode injector is kept until the reboot boundary;
+            # display_backend.sh deliberately offers no online unload path.
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+run_process_dts() {
+    MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
+    DTS_BACKEND=$(read_dts_backend)
+    if [ "$MODEL" = RMX5200 ] && [ "$DTS_BACKEND" = dtbo ]; then
+        echo "RMX5200 display mode fix: dropping four native AE084 FHD timings"
+        ./process_dts --rmx5200-drop-stock-fhd
+    else
+        ./process_dts
+    fi
+}
+
+drm_profile_spec_defaults() {
+    DRM_SPEC_RES=""
+    DRM_SPEC_DEFAULTS=""
+    MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
+    case "$MODEL" in
+        RMX5200)
+            DRM_SPEC_RES=$(mode_manifest_resolution RMX5200) || return 1
+            DRM_SPEC_DEFAULTS=$(mode_manifest_specs RMX5200 drm) || return 1
+            ;;
+        PLK110)
+            return 1
+            ;;
+        PJD110|*)
+            if [ "$MODEL" = PJD110 ]; then
+                DRM_SPEC_RES=$(mode_manifest_resolution PJD110) || return 1
+                DRM_SPEC_DEFAULTS=""
+            else
+                return 1
+            fi
+            ;;
+    esac
+    return 0
+}
+
+remember_custom_rate() {
+    CUSTOM_RATE_VALUE="$1"
+    case "$CUSTOM_RATE_VALUE" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    mkdir -p "$(dirname "$CUSTOM_RATES_FILE")" || return 1
+    touch "$CUSTOM_RATES_FILE" || return 1
+    grep -Fxq "$CUSTOM_RATE_VALUE" "$CUSTOM_RATES_FILE" 2>/dev/null ||
+        printf '%s\n' "$CUSTOM_RATE_VALUE" >> "$CUSTOM_RATES_FILE"
+    chmod 0644 "$CUSTOM_RATES_FILE" 2>/dev/null
+}
+
+forget_custom_rate() {
+    CUSTOM_RATE_VALUE="$1"
+    [ -s "$CUSTOM_RATES_FILE" ] || return 0
+    CUSTOM_RATES_TMP="$CUSTOM_RATES_FILE.tmp.$$"
+    awk -v rate="$CUSTOM_RATE_VALUE" '$0 != rate' "$CUSTOM_RATES_FILE" \
+        > "$CUSTOM_RATES_TMP" && mv -f "$CUSTOM_RATES_TMP" "$CUSTOM_RATES_FILE"
+}
+
+ensure_drm_specs_file() {
+    [ -s "$DRM_SPECS_FILE" ] && return 0
+    drm_profile_spec_defaults || return 1
+    mkdir -p "$(dirname "$DRM_SPECS_FILE")" || return 1
+    printf '%s\n' "$DRM_SPEC_DEFAULTS" > "$DRM_SPECS_FILE" || return 1
+    chmod 0644 "$DRM_SPECS_FILE" 2>/dev/null
+}
+
+drm_add_spec() {
+    RATE="$1"
+    CLOCK="${2:-0}"
+    TRANSFER="${3:-0}"
+    SOURCE_REFRESH="${4:-0}"
+    case "$RATE" in
+        ''|*[!0-9]*) echo "错误：刷新率必须是整数"; return 1 ;;
+    esac
+    [ "$RATE" -ge 20 ] 2>/dev/null && [ "$RATE" -le 300 ] 2>/dev/null || {
+        echo "错误：刷新率必须在 20-300Hz 范围内"; return 1;
+    }
+    for VALUE in "$CLOCK" "$TRANSFER" "$SOURCE_REFRESH"; do
+        case "$VALUE" in ''|*[!0-9]*) echo "错误：时钟、传输时间和基准 timing 必须是整数"; return 1 ;; esac
+    done
+    [ "$TRANSFER" -eq 0 ] 2>/dev/null || {
+        [ "$TRANSFER" -ge 1000 ] 2>/dev/null && [ "$TRANSFER" -le 20000 ] 2>/dev/null;
+    } || { echo "错误：传输时间必须为 1000-20000us，0 表示自动"; return 1; }
+    [ "$SOURCE_REFRESH" -eq 0 ] 2>/dev/null || {
+        [ "$SOURCE_REFRESH" -ge 20 ] 2>/dev/null && [ "$SOURCE_REFRESH" -le 300 ] 2>/dev/null;
+    } || { echo "错误：基准 timing 必须为 20-300Hz，0 表示自动"; return 1; }
+    ensure_drm_specs_file || {
+        echo "错误：当前机型没有已验证的 DRM-KO 自定义规格路径"; return 1;
+    }
+    drm_profile_spec_defaults || return 1
+    MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
+    if [ "$MODEL" != RMX5200 ] && {
+        [ "$TRANSFER" -ne 0 ] 2>/dev/null || [ "$SOURCE_REFRESH" -ne 0 ] 2>/dev/null;
+    }; then
+        echo "错误：当前机型的 DRM-KO 尚未验证自定义传输时间或基准 timing"
+        return 1
+    fi
+    CURRENT_SPECS=$(sed -n '1p' "$DRM_SPECS_FILE" 2>/dev/null | tr -d '[:space:]')
+    if [ "$MODEL" = RMX5200 ]; then
+        ITEM="${DRM_SPEC_RES}@${RATE}:${CLOCK}:${TRANSFER}:${SOURCE_REFRESH}"
+    elif [ "$CLOCK" -gt 0 ] 2>/dev/null; then
+        ITEM="${DRM_SPEC_RES}@${RATE}:${CLOCK}"
+    else
+        ITEM="${DRM_SPEC_RES}@${RATE}"
+    fi
+    FILTERED_SPECS=$(printf '%s' "$CURRENT_SPECS" | tr ';' '\n' |
+        awk -F '[@:]' -v rate="$RATE" 'NF < 2 || $2 != rate' | paste -sd ';' -)
+    TMP="$DRM_SPECS_FILE.tmp.$$"
+    if [ -n "$FILTERED_SPECS" ]; then
+        printf '%s;%s\n' "$FILTERED_SPECS" "$ITEM" > "$TMP"
+    else
+        printf '%s\n' "$ITEM" > "$TMP"
+    fi
+    mv -f "$TMP" "$DRM_SPECS_FILE"
+    remember_custom_rate "$RATE" || return 1
+    echo "Success: DRM-KO 运行时规格已保存 ${ITEM}（不写入 DTBO）"
+}
+
+drm_remove_spec() {
+    NODE="$1"
+    RATE=$(printf '%s\n' "$NODE" | sed -n 's/[^0-9]*\([0-9][0-9]*\)[^0-9]*$/\1/p')
+    [ -n "$RATE" ] || { echo "错误：无法从节点名解析刷新率"; return 1; }
+    [ -s "$DRM_SPECS_FILE" ] || return 0
+    CURRENT_SPECS=$(sed -n '1p' "$DRM_SPECS_FILE" | tr -d '[:space:]')
+    NEW_SPECS=$(printf '%s' "$CURRENT_SPECS" | tr ';' '\n' |
+        awk -F '[@:]' -v rate="$RATE" 'NF < 2 || $2 != rate' | paste -sd ';' -)
+    printf '%s\n' "$NEW_SPECS" > "$DRM_SPECS_FILE"
+    forget_custom_rate "$RATE" || return 1
+    echo "Success: DRM-KO 运行时规格已移除 @${RATE}（不写入 DTBO）"
+}
+
+scan_drm_rates() {
+    ensure_drm_specs_file || {
+        echo '[]'
+        return 1
+    }
+    DRM_SCAN_SPECS=$(sed -n '1p' "$DRM_SPECS_FILE" 2>/dev/null | tr -d '[:space:]')
+    [ -n "$DRM_SCAN_SPECS" ] || {
+        echo '[]'
+        return 0
+    }
+    printf '['
+    DRM_SCAN_FIRST=1
+    for DRM_SCAN_ITEM in $(printf '%s' "$DRM_SCAN_SPECS" | tr ';' ' '); do
+        DRM_SCAN_RES=${DRM_SCAN_ITEM%@*}
+        DRM_SCAN_FIELDS=${DRM_SCAN_ITEM#*@}
+        DRM_SCAN_RATE=${DRM_SCAN_FIELDS%%:*}
+        DRM_SCAN_REST=${DRM_SCAN_FIELDS#*:}
+        DRM_SCAN_CLOCK=0
+        DRM_SCAN_TRANSFER=0
+        DRM_SCAN_SOURCE=0
+        if [ "$DRM_SCAN_REST" != "$DRM_SCAN_FIELDS" ]; then
+            DRM_SCAN_CLOCK=${DRM_SCAN_REST%%:*}
+            DRM_SCAN_REST_2=${DRM_SCAN_REST#*:}
+            if [ "$DRM_SCAN_REST_2" != "$DRM_SCAN_REST" ]; then
+                DRM_SCAN_TRANSFER=${DRM_SCAN_REST_2%%:*}
+                DRM_SCAN_REST_3=${DRM_SCAN_REST_2#*:}
+                [ "$DRM_SCAN_REST_3" = "$DRM_SCAN_REST_2" ] || DRM_SCAN_SOURCE=${DRM_SCAN_REST_3%%:*}
+            fi
+        fi
+        case "$DRM_SCAN_RATE" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        case "$DRM_SCAN_CLOCK" in
+            ''|*[!0-9]*) DRM_SCAN_CLOCK=0 ;;
+        esac
+        case "$DRM_SCAN_TRANSFER" in ''|*[!0-9]*) DRM_SCAN_TRANSFER=0 ;; esac
+        case "$DRM_SCAN_SOURCE" in ''|*[!0-9]*) DRM_SCAN_SOURCE=0 ;; esac
+        [ "$DRM_SCAN_FIRST" = 1 ] || printf ','
+        printf '{"fps":%s,"clock":%s,"transfer":%s,"base":%s,"node":"runtime@%s","file":"runtime/drm_modes.txt","width":%s,"height":%s}' \
+            "$DRM_SCAN_RATE" "$DRM_SCAN_CLOCK" "$DRM_SCAN_TRANSFER" "$DRM_SCAN_SOURCE" "$DRM_SCAN_RATE" \
+            "${DRM_SCAN_RES%x*}" "${DRM_SCAN_RES#*x}"
+        DRM_SCAN_FIRST=0
+    done
+    printf ']\n'
+}
 
 # ============================================================
 # 阶段化子流程（供 WebUI 日志弹窗分步调用）
@@ -81,9 +515,13 @@ do_merge_avb() {
         echo "错误：找不到原厂 DTBO 备份，无法复用官方 AVB 信息"
         return 1
     fi
+    if ! ensure_stock_backup; then
+        echo "错误：原厂 DTBO 备份的哈希或官方 AVB 完整性校验失败"
+        return 1
+    fi
 
     echo "正在提取官方 VBMeta 并重算偏移..."
-    if ! dtbo_apply_stock_avb "$STOCK_DTBO" "$NEW_DTBO" "$FINAL_DTBO" "$PARTITION_SIZE"; then
+    if ! dtbo_apply_stock_avb "$STOCK_DTBO" "$NEW_DTBO" "$FINAL_DTBO" "$PARTITION_SIZE" "$BIN_DIR"; then
         echo "错误：官方 AVB 信息复用失败，未执行刷入（请勿重启，DTBO 分区未被修改）"
         return 1
     fi
@@ -116,9 +554,83 @@ do_flash() {
     fi
 }
 
+do_ko_prepare() {
+    MODEL=$(getprop ro.product.vendor.model)
+    case "$MODEL" in
+        RMX5200)
+            KO_PROFILE=RMX5200
+            KO_MODULE="$BIN_DIR/rmx5200_drm_modes.ko"
+            KO_RATES="运行时 mode_specs（清单：$(mode_manifest_rates RMX5200 drm 2>/dev/null | tr ',' '/')；当前实测稳定到170，175有细线，180不可用）"
+            ;;
+        PLK110)
+            KO_PROFILE=PLK110
+            KO_MODULE="$BIN_DIR/plk110_drm_modes.ko"
+            KO_RATES="未完成真机 ABI 验证"
+            ;;
+        PJD110)
+            KO_PROFILE=PJD110
+            KO_MODULE="$BIN_DIR/pjd110_drm_modes.ko"
+            KO_RATES="1440x3168 运行时 mode_specs；删除原生 60/90Hz；配套 DTBO 保留 6000mAh 解容"
+            ;;
+        *)
+            echo "错误：未支持的设备型号 $MODEL"
+            return 1
+            ;;
+    esac
+    if [ ! -r "$KO_MODULE" ]; then
+        echo "错误：缺少 $KO_PROFILE Qualcomm DRM injector: $(basename "$KO_MODULE")"
+        return 1
+    fi
+    chmod 600 "$KO_MODULE" 2>/dev/null
+    echo "Qualcomm DRM injector 已就绪：$KO_PROFILE 档位 $KO_RATES"
+    echo "DRM-KO 通过 mode_specs 复制 Qualcomm timing，并在启动早期由 display_backend.sh 加载。高刷 timing 不写入 DTBO。"
+    echo "RMX5200/PJD110 的 WebUI 自定义档位保存到 runtime/drm_modes.txt，不会写入 DTBO。"
+    echo "免费独立 hmbird.ko 会在启动早期按 ColorOS/Realme UI 与 SoC gate 侧载，不依赖 DTBO/DRM-KO 后端；已有节点时只校验并复用。"
+    echo "DRM 后端不会把高刷 timing 写入 DTBO；PJD110 的 60/90Hz 去重由 6.1 DRM-KO 在内存中完成，解容由启动前配套 DTBO 生效。"
+    return 0
+}
+
+do_apply_selected_backend() {
+    SELECTED_BACKEND=$(read_dts_backend)
+    echo "当前 DTS 后端: $SELECTED_BACKEND"
+    case "$SELECTED_BACKEND" in
+        dtbo)
+            do_pack && do_merge_avb && do_flash
+            ;;
+        drm)
+            prepare_backend_transition drm || return 1
+            do_ko_prepare || return 1
+            echo "Success: DRM-KO 已准备；重启时按 runtime/drm_modes.txt 早期加载，DTBO 仅含免费风驰兼容节点。"
+            ;;
+    esac
+}
+
+plan_selected_backend() {
+    SELECTED_BACKEND=$(read_dts_backend)
+    printf 'configured_backend=%s\n' "$SELECTED_BACKEND"
+    case "$SELECTED_BACKEND" in
+        dtbo)
+            echo "planned_backend=dtbo"
+            ;;
+        drm)
+            do_ko_prepare || return 1
+            echo "planned_backend=drm"
+            ;;
+    esac
+}
+
 # 阶段 0（flash_dtbo 专用）：提取→解包→通用补丁→smart_add
 do_smart_add() {
     CUSTOM_RATE="$1"
+    if [ "$(read_dts_backend)" = drm ]; then
+        if [ -n "$CUSTOM_RATE" ]; then
+            drm_add_spec "$CUSTOM_RATE" || return $?
+        else
+            ensure_drm_specs_file || return 1
+        fi
+        do_ko_prepare
+        return $?
+    fi
     echo "开始执行超频流程 (Multi-Model Mode)..."
     if [ ! -z "$CUSTOM_RATE" ]; then
         echo "目标自定义刷新率: ${CUSTOM_RATE}Hz"
@@ -157,7 +669,7 @@ do_smart_add() {
     fi
 
     echo "3. 应用通用补丁..."
-    ./process_dts
+    run_process_dts
     RET=$?
     if [ $RET -ne 0 ]; then
         echo "提示：通用补丁未应用或发生错误 (代码 $RET)，但这可能不影响自定义刷新率。"
@@ -172,6 +684,7 @@ do_smart_add() {
         echo "    - Project ID: $PRJ_ID"
         ./dts_tool smart_add "$CUSTOM_RATE" "$TARGET_PANEL" "$PRJ_ID"
         if [ $? -eq 0 ]; then
+            remember_custom_rate "$CUSTOM_RATE" || return 1
             echo "Success: 自定义刷新率节点已生成。"
         else
             echo "错误：自定义刷新率添加失败！"
@@ -182,10 +695,168 @@ do_smart_add() {
     return 0
 }
 
+valid_video_package() {
+    VIDEO_PACKAGE="$1"
+    case "$VIDEO_PACKAGE" in ''|*[!A-Za-z0-9._]*) return 1 ;; esac
+    case "$VIDEO_PACKAGE" in *.*) return 0 ;; *) return 1 ;; esac
+}
+
+valid_video_activity() {
+    VIDEO_PACKAGE="$1"
+    VIDEO_ACTIVITY="$2"
+    case "$VIDEO_ACTIVITY" in "$VIDEO_PACKAGE/"*) ;; *) return 1 ;; esac
+    VIDEO_ACTIVITY_CLASS=${VIDEO_ACTIVITY#*/}
+    case "$VIDEO_ACTIVITY_CLASS" in ''|*[!A-Za-z0-9_.$]*) return 1 ;; esac
+    return 0
+}
+
+apply_video_memc_config() {
+    [ -f "$COLOROS_PREMIUM_HELPER" ] || return 1
+    VIDEO_MEMC_APPS_FILE="$VIDEO_MEMC_APPS_FILE" \
+        sh "$COLOROS_PREMIUM_HELPER" apply-premium
+}
+
 
 case "$1" in
+    "get_video_motion_config")
+        require_premium video_memc
+        VIDEO_TARGET=$(settings get secure "$VIDEO_MOTION_TARGET_KEY" 2>/dev/null)
+        case "$VIDEO_TARGET" in ''|null|*[!0-9]*) VIDEO_TARGET=0 ;; esac
+        echo "target=$VIDEO_TARGET"
+        case "$VIDEO_TARGET" in
+            60|90|120|144) echo "native_memc=1" ;;
+            *) echo "native_memc=0" ;;
+        esac
+        if [ -f "$COLOROS_PREMIUM_HELPER" ]; then
+            VIDEO_MEMC_APPS_FILE="$VIDEO_MEMC_APPS_FILE" \
+                sh "$COLOROS_PREMIUM_HELPER" status-premium 2>/dev/null | \
+                grep '^status=' | head -n 1
+        fi
+        ;;
+
+    "set_video_motion_target")
+        require_premium video_memc
+        VIDEO_TARGET="$2"
+        case "$VIDEO_TARGET" in
+            0) ;;
+            ''|*[!0-9]*) echo "Error: invalid video target"; exit 1 ;;
+            *)
+                [ "$VIDEO_TARGET" -ge 30 ] 2>/dev/null &&
+                    [ "$VIDEO_TARGET" -le 1000 ] 2>/dev/null || {
+                    echo "Error: video target must be 30-1000Hz"
+                    exit 1
+                }
+                ;;
+        esac
+        settings put secure "$VIDEO_MOTION_TARGET_KEY" "$VIDEO_TARGET" || exit 1
+        settings put secure osie_iris5_switch 1 >/dev/null 2>&1 || true
+        settings put secure osie_motion_fluency_switch 1 >/dev/null 2>&1 || true
+        if [ "$VIDEO_TARGET" = 60 ]; then
+            settings put secure osie_motion_value 0 >/dev/null 2>&1 || true
+        else
+            settings put secure osie_motion_value 1 >/dev/null 2>&1 || true
+        fi
+        echo "Success: video motion target saved"
+        ;;
+
+    "get_video_motion_apps")
+        [ -f "$VIDEO_MEMC_APPS_FILE" ] && cat "$VIDEO_MEMC_APPS_FILE"
+        ;;
+
+    "add_video_motion_app")
+        require_premium video_memc
+        VIDEO_PACKAGE="$2"
+        VIDEO_ACTIVITY="$3"
+        VIDEO_VENDOR_RATE="$4"
+        VIDEO_COMMAND="$5"
+        valid_video_package "$VIDEO_PACKAGE" || {
+            echo "Error: invalid package"
+            exit 1
+        }
+        valid_video_activity "$VIDEO_PACKAGE" "$VIDEO_ACTIVITY" || {
+            echo "Error: activity must be package/class"
+            exit 1
+        }
+        case "$VIDEO_VENDOR_RATE" in ''|*[!0-9]*)
+            echo "Error: MEMC refresh rate must be an integer"
+            exit 1
+        esac
+        [ "$VIDEO_VENDOR_RATE" -ge 30 ] 2>/dev/null &&
+            [ "$VIDEO_VENDOR_RATE" -le 1000 ] 2>/dev/null || {
+            echo "Error: MEMC refresh rate must be 30-1000Hz"
+            exit 1
+        }
+        case "$VIDEO_COMMAND" in 258-10-0-0|258-74-0-0) ;; *)
+            echo "Error: unsupported MEMC command"
+            exit 1
+        esac
+        mkdir -p "$(dirname "$VIDEO_MEMC_APPS_FILE")" || exit 1
+        [ -f "$VIDEO_MEMC_APPS_FILE" ] || : > "$VIDEO_MEMC_APPS_FILE"
+        VIDEO_TMP="$VIDEO_MEMC_APPS_FILE.tmp.$$"
+        awk -F '|' -v package="$VIDEO_PACKAGE" -v activity="$VIDEO_ACTIVITY" \
+            'NF != 4 || $1 != package || $3 != activity { print }' \
+            "$VIDEO_MEMC_APPS_FILE" > "$VIDEO_TMP" || exit 1
+        printf '%s|%s|%s|%s\n' "$VIDEO_PACKAGE" "$VIDEO_VENDOR_RATE" \
+            "$VIDEO_ACTIVITY" "$VIDEO_COMMAND" >> "$VIDEO_TMP" || exit 1
+        mv -f "$VIDEO_TMP" "$VIDEO_MEMC_APPS_FILE" || exit 1
+        chmod 0644 "$VIDEO_MEMC_APPS_FILE" 2>/dev/null
+        apply_video_memc_config || {
+            echo "Error: failed to apply MEMC overlay"
+            exit 1
+        }
+        echo "Success: video MEMC app saved; reboot required"
+        ;;
+
+    "remove_video_motion_app")
+        require_premium video_memc
+        VIDEO_PACKAGE="$2"
+        VIDEO_ACTIVITY="$3"
+        valid_video_package "$VIDEO_PACKAGE" || exit 1
+        valid_video_activity "$VIDEO_PACKAGE" "$VIDEO_ACTIVITY" || exit 1
+        [ -f "$VIDEO_MEMC_APPS_FILE" ] || exit 0
+        VIDEO_TMP="$VIDEO_MEMC_APPS_FILE.tmp.$$"
+        awk -F '|' -v package="$VIDEO_PACKAGE" -v activity="$VIDEO_ACTIVITY" \
+            'NF != 4 || $1 != package || $3 != activity { print }' \
+            "$VIDEO_MEMC_APPS_FILE" > "$VIDEO_TMP" || exit 1
+        mv -f "$VIDEO_TMP" "$VIDEO_MEMC_APPS_FILE" || exit 1
+        chmod 0644 "$VIDEO_MEMC_APPS_FILE" 2>/dev/null
+        apply_video_memc_config || {
+            echo "Error: failed to apply MEMC overlay"
+            exit 1
+        }
+        echo "Success: video MEMC app removed; reboot required"
+        ;;
+
+    "get_foreground_activity")
+        dumpsys activity activities 2>/dev/null | sed -n \
+            's/.*mResumedActivity.* u[0-9][0-9]* \([^ ]*\/[^ ]*\).*/\1/p' | head -n 1
+        ;;
+
+    "get_recent_activity")
+        VIDEO_PACKAGE="$2"
+        valid_video_package "$VIDEO_PACKAGE" || {
+            echo "Error: invalid package"
+            exit 1
+        }
+        VIDEO_ACTIVITY=$(dumpsys activity activities 2>/dev/null | awk -v prefix="$VIDEO_PACKAGE/" '
+            {
+                for (i = 1; i <= NF; i++) {
+                    value = $i
+                    gsub(/^[{[(]+|[})],;]+$/, "", value)
+                    if (index(value, prefix) == 1) { print value; exit }
+                }
+            }')
+        if [ -z "$VIDEO_ACTIVITY" ]; then
+            VIDEO_ACTIVITY=$(cmd package resolve-activity --brief \
+                -a android.intent.action.MAIN -c android.intent.category.LAUNCHER \
+                "$VIDEO_PACKAGE" 2>/dev/null | tail -n 1)
+        fi
+        case "$VIDEO_ACTIVITY" in "$VIDEO_PACKAGE/"*) printf '%s\n' "$VIDEO_ACTIVITY" ;; esac
+        ;;
+
     "init_workspace")
         echo "初始化工作区..."
+        stock_guard_begin || exit 1
         SLOT=$(getprop ro.boot.slot_suffix)
         DTBO_PARTITION="/dev/block/by-name/dtbo$SLOT"
         
@@ -211,10 +882,15 @@ case "$1" in
             echo "错误：解包失败"
             exit 1
         fi
+        stock_guard_end || exit 1
         echo "Success: 工作区准备就绪"
         ;;
 
     "scan_rates")
+        if [ "$(read_dts_backend)" = drm ]; then
+            scan_drm_rates
+            exit $?
+        fi
         cd "$BIN_DIR" || exit 1
         chmod +x dts_tool
         
@@ -244,10 +920,14 @@ case "$1" in
         ;;
 
     "auto_process")
+        if [ "$(read_dts_backend)" = drm ]; then
+            echo "DRM-KO 后端不处理 DTS；请使用运行时 mode_specs 添加或删除 mode"
+            exit 0
+        fi
         cd "$BIN_DIR" || exit 1
         chmod +x process_dts
         echo "Running Auto Process..."
-        ./process_dts
+        run_process_dts
         RET=$?
         if [ $RET -eq 0 ]; then
              echo "Success: Auto Process Completed"
@@ -261,6 +941,12 @@ case "$1" in
         TARGET_FPS="$3"
         CUSTOM_CLOCK="$4"      # 可选：自定义时钟 (Hz)，留空=自动计算
         CUSTOM_TRANSFER="$5"   # 可选：自定义传输时间 (µs)，留空=自动计算
+        if [ "$(read_dts_backend)" = drm ]; then
+            DRM_SOURCE_REFRESH=$(printf '%s' "$BASE_NODE" | sed -n 's/[^0-9]*\([0-9][0-9]*\)[^0-9]*$/\1/p')
+            drm_add_spec "$TARGET_FPS" "${CUSTOM_CLOCK:-0}" \
+                "${CUSTOM_TRANSFER:-0}" "${DRM_SOURCE_REFRESH:-0}"
+            exit $?
+        fi
         cd "$BIN_DIR" || exit 1
         chmod +x dts_tool
         
@@ -279,6 +965,7 @@ case "$1" in
         ./dts_tool add "$BASE_NODE" "$TARGET_FPS" "$TARGET_PANEL" "$PRJ_ID" "$CUSTOM_CLOCK" "$CUSTOM_TRANSFER"
         RET=$?
         if [ $RET -eq 0 ]; then
+             remember_custom_rate "$TARGET_FPS" || exit 1
              echo "Success: 已添加 ${TARGET_FPS}Hz 节点"
         else
              echo "Error: dts_tool failed with code $RET"
@@ -303,6 +990,10 @@ case "$1" in
 
     "remove_rate")
         TARGET_NODE="$2"
+        if [ "$(read_dts_backend)" = drm ]; then
+            drm_remove_spec "$TARGET_NODE"
+            exit $?
+        fi
         cd "$BIN_DIR" || exit 1
         chmod +x dts_tool
         
@@ -321,6 +1012,9 @@ case "$1" in
         ./dts_tool remove "$TARGET_NODE" "$TARGET_PANEL" "$PRJ_ID"
         RET=$?
         if [ $RET -eq 0 ]; then
+             REMOVED_FPS=$(printf '%s\n' "$TARGET_NODE" |
+                 sed -n 's/[^0-9]*\([0-9][0-9]*\)[^0-9]*$/\1/p')
+             [ -z "$REMOVED_FPS" ] || forget_custom_rate "$REMOVED_FPS" || exit 1
              echo "Success"
         else
              echo "Error: dts_tool failed with code $RET"
@@ -329,17 +1023,20 @@ case "$1" in
 
     "apply_changes")
         echo "开始应用更改..."
-        do_pack || exit 1
-        do_merge_avb || exit 1
-        do_flash || exit 1
+        stock_guard_begin || exit 1
+        APPLY_RESULT=0
+        do_apply_selected_backend || APPLY_RESULT=$?
+        stock_guard_end || APPLY_RESULT=1
+        [ "$APPLY_RESULT" -eq 0 ] || exit "$APPLY_RESULT"
         echo "操作完成！请重启设备。"
         ;;
 
     "flash_dtbo")
-        do_smart_add "$2" || exit 1
-        do_pack || exit 1
-        do_merge_avb || exit 1
-        do_flash || exit 1
+        stock_guard_begin || exit 1
+        FLASH_RESULT=0
+        do_smart_add "$2" && do_apply_selected_backend || FLASH_RESULT=$?
+        stock_guard_end || FLASH_RESULT=1
+        [ "$FLASH_RESULT" -eq 0 ] || exit "$FLASH_RESULT"
         echo "操作完成！请重启设备。"
         ;;
 
@@ -354,8 +1051,10 @@ case "$1" in
 
     "apply_changes_bg")
         rm -f "$MOD_PATH/apply.status"
-        do_pack && do_merge_avb && do_flash
-        if [ $? -eq 0 ]; then
+        APPLY_RESULT=0
+        stock_guard_begin && do_apply_selected_backend || APPLY_RESULT=$?
+        stock_guard_end || APPLY_RESULT=1
+        if [ "$APPLY_RESULT" -eq 0 ]; then
             echo "操作完成！请重启设备。"
             echo "SUCCESS" > "$MOD_PATH/apply.status"
         else
@@ -371,8 +1070,11 @@ case "$1" in
 
     "flash_dtbo_bg")
         rm -f "$MOD_PATH/apply.status"
-        do_smart_add "$2" && do_pack && do_merge_avb && do_flash
-        if [ $? -eq 0 ]; then
+        FLASH_RESULT=0
+        stock_guard_begin && do_smart_add "$2" && \
+            do_apply_selected_backend || FLASH_RESULT=$?
+        stock_guard_end || FLASH_RESULT=1
+        if [ "$FLASH_RESULT" -eq 0 ]; then
             echo "操作完成！请重启设备。"
             echo "SUCCESS" > "$MOD_PATH/apply.status"
         else
@@ -381,22 +1083,25 @@ case "$1" in
         ;;
 
     "restore_dtbo")
-        BACKUP_FILE=""
-        # Prioritize the original backup in module directory
-        if [ -f "$IMG_DIR/dtbo.img" ]; then
-            BACKUP_FILE="$IMG_DIR/dtbo.img"
-        fi
-
-        if [ -z "$BACKUP_FILE" ]; then
-            echo "错误：找不到备份文件"
+        if ! ensure_stock_backup; then
+            echo "错误：原厂 DTBO 备份完整性校验失败，拒绝恢复"
             exit 1
         fi
+        BACKUP_FILE="$STOCK_DTBO"
         
         SLOT=$(getprop ro.boot.slot_suffix)
         DTBO_PARTITION="/dev/block/by-name/dtbo$SLOT"
         
         echo "正在恢复原厂 DTBO..."
-        if dd if="$BACKUP_FILE" of="$DTBO_PARTITION" bs=4096 2>&1; then
+        if [ -f "$AVB_HELPER" ]; then
+            dtbo_write_partition "$BACKUP_FILE" "$DTBO_PARTITION"
+            RESTORE_RESULT=$?
+        else
+            dd if="$BACKUP_FILE" of="$DTBO_PARTITION" bs=4096 conv=fsync 2>&1
+            RESTORE_RESULT=$?
+        fi
+        if [ "$RESTORE_RESULT" -eq 0 ]; then
+            write_dts_backend dtbo
             echo "Success: 恢复成功！"
             # 不要删除备份文件，防止用户再次误操作需要恢复
             # rm -rf "$BIN_DIR/dtbo_dts"
@@ -407,53 +1112,267 @@ case "$1" in
         fi
         ;;
 
+    "get_display_policy")
+        MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
+        echo "model=${MODEL:-unknown}"
+        case "$MODEL" in
+            RMX5200) DISPLAY_PROFILE=rmx5200 ;;
+            PLK110|PJD110) DISPLAY_PROFILE=vendor_ltpo ;;
+            *) echo "supported=0"; exit 0 ;;
+        esac
+        echo "supported=1"
+        echo "profile=$DISPLAY_PROFILE"
+        echo "policy=$(display_policy_for_model "$MODEL")"
+        if [ "$MODEL" = RMX5200 ] && [ -d /sys/module/rmx5200_ltpo_modes ]; then
+            echo "active=custom_ltpo"
+        else
+            case "$MODEL" in
+                RMX5200|PLK110) ADFR_PARAM_DIR=/sys/module/rmx5200_adfr_lock/parameters ;;
+                PJD110) ADFR_PARAM_DIR=/sys/module/pjd110_adfr_lock/parameters ;;
+            esac
+            if [ "$(cat "$ADFR_PARAM_DIR/lock_active" 2>/dev/null)" = Y ]; then
+                echo "active=adfr_off"
+            elif [ "$MODEL" = RMX5200 ]; then
+                echo "active=stock_ltps"
+            elif [ -f "$MOD_PATH/runtime/generic_adfr/active" ] &&
+                 [ "$(cat "$MOD_PATH/runtime/generic_adfr/active" 2>/dev/null)" =
+                   "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" ]; then
+                echo "active=adfr_off"
+            else
+                echo "active=stock_ltpo"
+            fi
+        fi
+        ;;
+
+    "set_display_policy")
+        MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
+        case "$MODEL:$2" in
+            RMX5200:stock_ltps|RMX5200:custom_ltpo)
+                TARGET_DISPLAY_POLICY="$2"; TARGET_ADFR_POLICY=on ;;
+            RMX5200:adfr_off)
+                TARGET_DISPLAY_POLICY=adfr_off; TARGET_ADFR_POLICY=off ;;
+            PLK110:stock_ltpo|PJD110:stock_ltpo)
+                TARGET_DISPLAY_POLICY=stock_ltpo; TARGET_ADFR_POLICY=on ;;
+            PLK110:adfr_off|PJD110:adfr_off)
+                TARGET_DISPLAY_POLICY=adfr_off; TARGET_ADFR_POLICY=off ;;
+            RMX5200:*|PLK110:*|PJD110:*)
+                echo "Error: invalid display policy for $MODEL"; exit 1 ;;
+            *)
+                echo "Error: display policy is unsupported on $MODEL"; exit 1 ;;
+        esac
+        case "$TARGET_DISPLAY_POLICY" in
+            custom_ltpo) require_premium custom_ltpo || exit 1 ;;
+            adfr_off) require_premium adfr_disable || exit 1 ;;
+        esac
+        PREVIOUS_DISPLAY_POLICY=$(read_display_policy)
+        PREVIOUS_ADFR_POLICY=$(read_adfr_policy)
+        write_display_policy "$TARGET_DISPLAY_POLICY" || {
+            echo "Error: unable to persist display policy"
+            exit 1
+        }
+        if ! write_adfr_policy "$TARGET_ADFR_POLICY"; then
+            write_display_policy "$PREVIOUS_DISPLAY_POLICY" >/dev/null 2>&1 || true
+            write_adfr_policy "$PREVIOUS_ADFR_POLICY" >/dev/null 2>&1 || true
+            echo "Error: unable to persist ADFR policy"
+            exit 1
+        fi
+        rm -f "$ADFR_TEST_BYPASS_FILE" "$LTPO_BOOT_TOKEN_FILE" "$LTPO_RISE_TOKEN_FILE"
+        sync
+        echo "Success: display policy saved; reboot required"
+        echo "policy=$TARGET_DISPLAY_POLICY"
+        ;;
+
+    "get_adfr_policy")
+        MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
+        echo "model=${MODEL:-unknown}"
+        if [ "$MODEL" != RMX5200 ]; then
+            echo "supported=0"
+            exit 0
+        fi
+        echo "supported=1"
+        echo "policy=$(read_adfr_policy)"
+        if [ -f "$ADFR_LOCK_HELPER" ]; then
+            sh "$ADFR_LOCK_HELPER" status 2>/dev/null
+        else
+            echo "state=helper_missing"
+        fi
+        ;;
+
+    "toggle_adfr")
+        MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
+        if [ "$MODEL" != RMX5200 ]; then
+            echo "Error: ADFR policy is only supported on RMX5200"
+            exit 1
+        fi
+        case "$2" in
+            enable) TARGET_ADFR_POLICY=on; TARGET_DISPLAY_POLICY=stock_ltps ;;
+            disable) TARGET_ADFR_POLICY=off; TARGET_DISPLAY_POLICY=adfr_off ;;
+            *)
+                echo "Error: action must be enable or disable"
+                exit 1
+                ;;
+        esac
+        # Disabling ADFR is the premium action; restoring the stock policy is free.
+        [ "$TARGET_ADFR_POLICY" = off ] && require_premium adfr_disable
+        [ -f "$ADFR_LOCK_HELPER" ] || {
+            echo "Error: ADFR lock helper is missing"
+            exit 1
+        }
+
+        PREVIOUS_ADFR_POLICY=$(read_adfr_policy)
+        PREVIOUS_DISPLAY_POLICY=$(read_display_policy)
+        write_adfr_policy "$TARGET_ADFR_POLICY" || {
+            echo "Error: unable to persist ADFR policy"
+            exit 1
+        }
+        write_display_policy "$TARGET_DISPLAY_POLICY" || {
+            write_adfr_policy "$PREVIOUS_ADFR_POLICY" >/dev/null 2>&1 || true
+            echo "Error: unable to persist display policy"
+            exit 1
+        }
+        rm -f "$ADFR_TEST_BYPASS_FILE"
+        if ! sh "$ADFR_LOCK_HELPER" apply >/dev/null 2>&1; then
+            write_adfr_policy "$PREVIOUS_ADFR_POLICY" >/dev/null 2>&1 || true
+            write_display_policy "$PREVIOUS_DISPLAY_POLICY" >/dev/null 2>&1 || true
+            sh "$ADFR_LOCK_HELPER" apply >/dev/null 2>&1 || true
+            echo "Error: unable to apply ADFR policy"
+            exit 1
+        fi
+
+        if [ "$TARGET_ADFR_POLICY" = off ]; then
+            [ "$(cat /sys/module/rmx5200_adfr_lock/parameters/lock_active 2>/dev/null)" = Y ] || {
+                write_adfr_policy "$PREVIOUS_ADFR_POLICY" >/dev/null 2>&1 || true
+                write_display_policy "$PREVIOUS_DISPLAY_POLICY" >/dev/null 2>&1 || true
+                sh "$ADFR_LOCK_HELPER" apply >/dev/null 2>&1 || true
+                echo "Error: ADFR lock did not become active"
+                exit 1
+            }
+            echo "Success: ADFR disabled"
+        else
+            [ "$(cat /sys/module/rmx5200_adfr_lock/parameters/lock_active 2>/dev/null)" != Y ] || {
+                write_adfr_policy "$PREVIOUS_ADFR_POLICY" >/dev/null 2>&1 || true
+                write_display_policy "$PREVIOUS_DISPLAY_POLICY" >/dev/null 2>&1 || true
+                sh "$ADFR_LOCK_HELPER" apply >/dev/null 2>&1 || true
+                echo "Error: ADFR lock remained active"
+                exit 1
+            }
+            echo "Success: ADFR enabled"
+        fi
+        sh "$ADFR_LOCK_HELPER" status 2>/dev/null
+        ;;
+
+    "get_dts_backend")
+        CURRENT_BACKEND=$(read_dts_backend)
+        echo "backend=$CURRENT_BACKEND"
+        if [ "$CURRENT_BACKEND" = dtbo ]; then
+            echo "status=skipped:dtbo"
+            if [ -f "$DISPLAY_HELPER" ]; then
+                sh "$DISPLAY_HELPER" status 2>/dev/null | \
+                grep -E '^(result|display_driver|surfaceflinger|uptime_seconds|dsi_display_get_modes|sde_connector_get_modes|drm_hotplug)='
+            fi
+        elif [ -f "$DISPLAY_HELPER" ]; then
+                sh "$DISPLAY_HELPER" status 2>/dev/null | grep -E '^(status|result|display_driver|surfaceflinger|uptime_seconds|get_main_display|dsi_display_get_modes|sde_connector_get_modes|drm_hotplug|ko_profile|ko_module)='
+        else
+            echo "status=helper_missing"
+        fi
+        ;;
+
+    "set_dts_backend")
+        case "$2" in
+            drm) ;;
+            dtbo) ;;
+            *) echo "Error: backend must be dtbo or drm"; exit 1 ;;
+        esac
+        if write_dts_backend "$2"; then
+            if [ "$2" = dtbo ] && [ -f "$DISPLAY_HELPER" ]; then
+                sh "$DISPLAY_HELPER" mark-dtbo >/dev/null 2>&1
+            fi
+            echo "Success: DTS backend selected as $2; apply and reboot to activate"
+        else
+            echo "Error: backend must be dtbo or drm"
+            exit 1
+        fi
+        ;;
+
+    "probe_display_backend")
+        if [ ! -f "$DISPLAY_HELPER" ]; then
+            echo "Error: display backend helper missing"
+            exit 1
+        fi
+        sh "$DISPLAY_HELPER" probe
+        ;;
+
+    "plan_dts_backend")
+        plan_selected_backend
+        ;;
+
     "set_config")
-        # $2 is global mode id
+        # $2 is a runtime HWC mode id selected by WebUI. Persist its semantic
+        # resolution/rate pair; the daemon resolves it back to an exact ID.
         NEW_MODE="$2"
         if [ -z "$NEW_MODE" ]; then
             echo "Error: Missing mode ID"
             exit 1
         fi
         
-        # 替换第一行，保持后续行不变
-        # sed -i '1s/.*/NEW_MODE/' doesn't work well on android sed sometimes
-        # 使用临时文件
+        NEW_SPEC=$(mode_semantic_for_id "$NEW_MODE") || {
+            echo "Error: Unknown display mode $NEW_MODE"
+            exit 1
+        }
         TMP_FILE="${CONFIG_FILE}.tmp"
-        echo "$NEW_MODE" > "$TMP_FILE"
+        echo "$NEW_SPEC" > "$TMP_FILE"
         # 从第二行开始追加原始内容
         tail -n +2 "$CONFIG_FILE" >> "$TMP_FILE" 2>/dev/null
         mv "$TMP_FILE" "$CONFIG_FILE"
         chmod 666 "$CONFIG_FILE"
-        
+
+        # The daemon owns the display transaction and synchronizes Settings
+        # only after the physical mode is stable. An eager sync-global here
+        # races ColorOS, Framework and SurfaceFlinger during resolution changes.
         echo "Success: Global mode set to $NEW_MODE"
         ;;
 
     "set_app_config")
-        # $2 is package, $3 is mode id (-1 to delete)
+        # $2 is package, $3 is runtime HWC mode id (-1 to delete), $4 is
+        # optional explicit FHD+/QHD+; omitted/default inherits global width.
         PKG="$2"
         MODE="$3"
+        APP_RESOLUTION="$4"
         
         if [ -z "$PKG" ] || [ -z "$MODE" ]; then
             echo "Error: Missing arguments"
             exit 1
         fi
 
-        # 读取第一行作为全局配置
+        # 读取第一行作为全局语义配置
         GLOBAL_MODE=$(head -n 1 "$CONFIG_FILE")
         
         TMP_FILE="${CONFIG_FILE}.tmp"
         echo "$GLOBAL_MODE" > "$TMP_FILE"
         
-        # 处理现有配置，排除当前包
-        grep -v "^$PKG=" "$CONFIG_FILE" | grep "=" >> "$TMP_FILE"
+        # 处理现有配置，按第一列排除当前包；同时保留旧格式行。
+        awk -v package="$PKG" 'NR > 1 && $1 != package { print }' "$CONFIG_FILE" >> "$TMP_FILE"
         
         # 如果不是删除模式，追加新配置
         if [ "$MODE" != "-1" ]; then
-            echo "$PKG=$MODE" >> "$TMP_FILE"
+            APP_SPEC=$(mode_semantic_for_id "$MODE") || {
+                echo "Error: Unknown display mode $MODE"
+                rm -f "$TMP_FILE"
+                exit 1
+            }
+            APP_FPS=$(printf '%s\n' "$APP_SPEC" | awk '{print $2}')
+            case "$APP_RESOLUTION" in
+                FHD+|QHD+) echo "$PKG $APP_RESOLUTION $APP_FPS" >> "$TMP_FILE" ;;
+                *) echo "$PKG $APP_FPS" >> "$TMP_FILE" ;;
+            esac
         fi
         
         mv "$TMP_FILE" "$CONFIG_FILE"
         chmod 666 "$CONFIG_FILE"
+
+        if [ "$MODE" != "-1" ] && { [ -x "$SETTINGS_BRIDGE_HELPER" ] || [ -f "$SETTINGS_BRIDGE_HELPER" ]; }; then
+            sh "$SETTINGS_BRIDGE_HELPER" sync-app "$PKG" "$MODE" >/dev/null 2>&1 || true
+        fi
         
         echo "Success: App config saved"
         ;;
@@ -487,26 +1406,29 @@ case "$1" in
         ;;
 
     "check_backup")
-        if [ -f "$IMG_DIR/dtbo.img" ] || [ -f "$MOD_PATH/backup_dtbo.img" ]; then
-            echo "EXIST"
-        else
+        if [ ! -f "$STOCK_DTBO" ] && \
+           { [ ! -f "$STOCK_MANIFEST" ] || [ ! -f "$STOCK_RECOVERY" ]; }; then
             echo "NONE"
+        elif ensure_stock_backup >/dev/null 2>&1; then
+            if [ "$STOCK_BACKUP_RECOVERED" = 1 ]; then
+                echo "VALID $(dtbo_hash_file "$STOCK_DTBO") RECOVERED"
+            else
+                echo "VALID $(dtbo_hash_file "$STOCK_DTBO")"
+            fi
+        else
+            echo "INVALID $(dtbo_hash_file "$STOCK_DTBO")"
         fi
         ;;
 
     "uninstall_module")
-        # Reuse restore_dtbo logic if possible, or just create remove file
-        # Magisk/KSU uninstall way: create remove file
-        
-        # 1. Try to restore DTBO first if backup exists
-        BACKUP_FILE=""
-        if [ -f "$IMG_DIR/dtbo.img" ]; then
-            BACKUP_FILE="$IMG_DIR/dtbo.img"
-        elif [ -f "$MOD_PATH/backup_dtbo.img" ]; then
-            BACKUP_FILE="$MOD_PATH/backup_dtbo.img"
+        # Restore the stock partition before mutating the live userspace. A
+        # failed integrity check or write leaves the installed module intact.
+        if ! ensure_stock_backup; then
+            echo "Error: 原厂 DTBO 备份完整性校验失败，拒绝卸载和恢复"
+            exit 1
         fi
-
-        if [ ! -z "$BACKUP_FILE" ]; then
+        BACKUP_FILE="$STOCK_DTBO"
+        if [ -f "$BACKUP_FILE" ]; then
             SLOT=$(getprop ro.boot.slot_suffix)
             DTBO_PARTITION="/dev/block/by-name/dtbo$SLOT"
             if [ -f "$AVB_HELPER" ]; then
@@ -515,127 +1437,105 @@ case "$1" in
                 dd if="$BACKUP_FILE" of="$DTBO_PARTITION" bs=4096 conv=fsync || exit 1
             fi
         fi
-        
-        # 2. Create remove file for Magisk/KSU to handle cleanup on next boot
+
+        # Stop background observers before removing their bind mounts.
+        pkill -f "$MEMC_GATE_HELPER watch-final-view" >/dev/null 2>&1 || true
+        pkill -f "$SETTINGS_BRIDGE_HELPER watch" >/dev/null 2>&1 || true
+
+        [ -f "$COLOROS_CONFIG_HELPER" ] &&
+            sh "$COLOROS_CONFIG_HELPER" remove >/dev/null 2>&1 || true
+        [ -f "$COLOROS_PREMIUM_HELPER" ] &&
+            VIDEO_MEMC_APPS_FILE="$VIDEO_MEMC_APPS_FILE" \
+                sh "$COLOROS_PREMIUM_HELPER" remove-premium >/dev/null 2>&1 || true
+        [ -f "$PREMIUM_SYSTEM_OVERLAY_HELPER" ] &&
+            sh "$PREMIUM_SYSTEM_OVERLAY_HELPER" remove >/dev/null 2>&1 || true
+        [ -f "$MEMC_GATE_HELPER" ] &&
+            sh "$MEMC_GATE_HELPER" restore >/dev/null 2>&1 || true
+        [ -f "$SF_RISE_HELPER" ] &&
+            sh "$SF_RISE_HELPER" restore >/dev/null 2>&1 || true
+        [ -f "$SF_VOTE_HELPER" ] &&
+            sh "$SF_VOTE_HELPER" restore >/dev/null 2>&1 || true
+        [ -f "$ADFR_LOCK_HELPER" ] &&
+            sh "$ADFR_LOCK_HELPER" restore >/dev/null 2>&1 || true
+        [ -f "$GENERIC_ADFR_HELPER" ] &&
+            sh "$GENERIC_ADFR_HELPER" restore >/dev/null 2>&1 || true
+
+        # The Hook APK is removed only after every destructive prerequisite
+        # has succeeded; a refused uninstall remains side-effect free.
+        pm uninstall --user 0 com.murongchaopin.displayhook >/dev/null 2>&1 || true
+        pm uninstall --user 0 com.murongchaopin.displayhook.premium >/dev/null 2>&1 || true
         touch "$MOD_PATH/remove"
-        
-        # 3. Stop daemon
-        pkill -f "rate_daemon"
+        for daemon_pid in $(pidof rate_daemon 2>/dev/null); do
+            kill "$daemon_pid" >/dev/null 2>&1 || true
+        done
         
         echo "Success"
         ;;
 
-    "toggle_adfr")
-        # $2 = "disable" or "enable"
-        ACTION="$2"
-        PROP_BACKUP="$MOD_PATH/config/prop_backup.txt"
-        ADFR_STATE="$MOD_PATH/config/adfr_state.txt"
-        ADFR_CONFIG="/sys/kernel/oplus_display/adfr_config"
-        ADFR_MIN_FPS="/sys/kernel/oplus_display/min_fps"
-        
-        # 解析目标模式规格: 优先取 mode.txt 默认档位 (HWC ID) 对应的 W H FPS
-        # 输出: "W H FPS" 或空
-        get_target_mode_spec() {
-            DEFAULT_ID=$(head -n 1 "$MOD_PATH/config/mode.txt" 2>/dev/null | tr -d '[:space:]')
-            if [ -n "$DEFAULT_ID" ] && [ "$DEFAULT_ID" -eq "$DEFAULT_ID" ] 2>/dev/null; then
-                MODE_LINE=$(dumpsys SurfaceFlinger 2>/dev/null | \
-                    grep -oE "id=${DEFAULT_ID}, hwcId=[0-9]+, resolution=[0-9]+x[0-9]+, vsyncRate=[0-9.]+" | \
-                    head -n 1)
-                if [ -n "$MODE_LINE" ]; then
-                    RES=$(echo "$MODE_LINE" | sed -n 's/.*resolution=\([0-9]*\)x\([0-9]*\).*/\1 \2/p')
-                    FPS=$(echo "$MODE_LINE" | sed -n 's/.*vsyncRate=\([0-9.]*\).*/\1/p')
-                    W=$(echo "$RES" | cut -d' ' -f1)
-                    H=$(echo "$RES" | cut -d' ' -f2)
-                    if [ -n "$W" ] && [ -n "$H" ] && [ -n "$FPS" ]; then
-                        echo "$W $H $FPS"
-                        return 0
-                    fi
-                fi
-            fi
-            return 1
-        }
-        
-        if [ "$ACTION" == "disable" ]; then
-            # Backup current values if not exists
-            if [ ! -f "$PROP_BACKUP" ]; then
-                touch "$PROP_BACKUP"
-                # GT8 Pro 使用 pdfr，旧机型使用 adfr，两个都备份
-                echo "persist.oplus.display.vrr=$(getprop persist.oplus.display.vrr)" >> "$PROP_BACKUP"
-                echo "persist.oplus.display.vrr.adfr=$(getprop persist.oplus.display.vrr.adfr)" >> "$PROP_BACKUP"
-                echo "persist.oplus.display.vrr.pdfr=$(getprop persist.oplus.display.vrr.pdfr)" >> "$PROP_BACKUP"
-                echo "sys.display.vrr.vote.support=$(getprop sys.display.vrr.vote.support)" >> "$PROP_BACKUP"
-                echo "vendor.display.enable_dpps_dynamic_fps=$(getprop vendor.display.enable_dpps_dynamic_fps)" >> "$PROP_BACKUP"
-                echo "vendor.display.enable_optimal_refresh_rate=$(getprop vendor.display.enable_optimal_refresh_rate)" >> "$PROP_BACKUP"
-                echo "vendor.display.enable_idle_content_fps_hint=$(getprop vendor.display.enable_idle_content_fps_hint)" >> "$PROP_BACKUP"
-                echo "persist.sys.oplus.display.brightness.mode=$(getprop persist.sys.oplus.display.brightness.mode)" >> "$PROP_BACKUP"
-                echo "debug.egl.swapinterval=$(getprop debug.egl.swapinterval)" >> "$PROP_BACKUP"
-            fi
-            
-            # Apply disable values
-            # persist.* 使用持久化写入，重启后 HAL 仍能读到 0
-            resetprop persist.oplus.display.vrr 0
-            resetprop persist.oplus.display.vrr.adfr 0
-            resetprop persist.oplus.display.vrr.pdfr 0
-            resetprop -n sys.display.vrr.vote.support 0
-            resetprop -n vendor.display.enable_dpps_dynamic_fps 0
-            resetprop -n vendor.display.enable_optimal_refresh_rate 0
-            resetprop -n vendor.display.enable_idle_content_fps_hint 0
-            resetprop persist.sys.oplus.display.brightness.mode 1
-            setprop debug.egl.swapinterval 1
-            
-            # 固定框架层显示模式（用户首选模式 = 目标档位），并启用内核 ADFR 下限
-            SPEC=$(get_target_mode_spec)
-            if [ -n "$SPEC" ]; then
-                set -- $SPEC
-                W="$1"; H="$2"; FPS="$3"
-                echo "$W $H $FPS" > "$ADFR_STATE"
-                cmd display set-user-preferred-display-mode "$W" "$H" "$FPS" > /dev/null 2>&1
-                if [ -w "$ADFR_CONFIG" ]; then
-                    echo 1 > "$ADFR_CONFIG" 2>/dev/null
-                    echo "$FPS" > "$ADFR_MIN_FPS" 2>/dev/null
-                fi
-                echo "Success: ADFR Disabled (fixed ${FPS}Hz)"
-            else
-                echo "Success: ADFR Disabled (props only)"
-            fi
-            
-        elif [ "$ACTION" == "enable" ]; then
-            if [ -f "$PROP_BACKUP" ]; then
-                # Restore from backup
-                while IFS='=' read -r key value; do
-                    if [ ! -z "$key" ]; then
-                        # Use resetprop for persist props to ensure they stick/revert correctly
-                        # or just setprop for normal ones. resetprop is safer for "restoring" system state.
-                        if [ -z "$value" ]; then
-                             # If value was empty, maybe we should unset it? or set to empty.
-                             case "$key" in
-                                 persist.*) resetprop "$key" "" ;;
-                                 *) resetprop -n "$key" "" ;;
-                             esac
-                        else
-                             case "$key" in
-                                 persist.*) resetprop "$key" "$value" ;;
-                                 *) resetprop -n "$key" "$value" ;;
-                             esac
-                        fi
-                    fi
-                done < "$PROP_BACKUP"
-                
-                # Clean up backup
-                rm "$PROP_BACKUP"
-            else
-                echo "Error: No backup found, cannot restore."
-                exit 1
-            fi
-            rm -f "$ADFR_STATE"
-            cmd display clear-user-preferred-display-mode > /dev/null 2>&1
-            if [ -w "$ADFR_CONFIG" ]; then
-                echo 0 > "$ADFR_CONFIG" 2>/dev/null
-            fi
-            echo "Success: ADFR Restored"
+    # ---- 显示授权门禁（display license gate）----
+    "auth_state")
+        if [ -f "$GATE_HELPER" ]; then
+            gate_state_print
         else
-            echo "Error: Invalid action"
+            echo "account=none"
+            echo "entitlement=unknown"
+            echo "premium_available=0"
+            echo "package_installed=0"
         fi
+        ;;
+
+    "auth_device_info")
+        if [ -f "$GATE_HELPER" ]; then
+            gate_device_info_print
+        else
+            echo "Error: authorization gate is missing"
+            exit 1
+        fi
+        ;;
+
+    "auth_save_account")
+        [ -f "$GATE_HELPER" ] || { echo "Error: authorization gate is missing"; exit 1; }
+        gate_account_save "$2" "$3" "$4"
+        ;;
+
+    "auth_clear_account")
+        [ -f "$GATE_HELPER" ] || { echo "Error: authorization gate is missing"; exit 1; }
+        gate_account_clear
+        ;;
+
+    "auth_save_lease")
+        [ -f "$GATE_HELPER" ] || { echo "Error: authorization gate is missing"; exit 1; }
+        gate_lease_save "$2"
+        ;;
+
+    "auth_entitlement_cache")
+        [ -f "$GATE_HELPER" ] || { echo "Error: authorization gate is missing"; exit 1; }
+        gate_entitlement_cache "$2" "$3" "$4"
+        ;;
+
+    "auth_package_write")
+        [ -f "$GATE_HELPER" ] || { echo "Error: authorization gate is missing"; exit 1; }
+        gate_package_write "$2" "$3"
+        ;;
+
+    "auth_package_abort")
+        [ -f "$GATE_HELPER" ] || { echo "Error: authorization gate is missing"; exit 1; }
+        gate_package_abort
+        ;;
+
+    "auth_package_state")
+        [ -f "$GATE_HELPER" ] || { echo "Error: authorization gate is missing"; exit 1; }
+        gate_package_state_print
+        ;;
+
+    "auth_package_commit")
+        [ -f "$GATE_HELPER" ] || { echo "Error: authorization gate is missing"; exit 1; }
+        gate_package_commit "$2" "$3" "$4"
+        ;;
+
+    "auth_package_remove")
+        [ -f "$GATE_HELPER" ] || { echo "Error: authorization gate is missing"; exit 1; }
+        gate_package_remove
         ;;
 
     *)

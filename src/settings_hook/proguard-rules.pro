@@ -1,0 +1,3 @@
+-keep public class com.murongchaopin.displayhook.DisplaySettingsHook extends io.github.libxposed.api.XposedModule { *; }
+-keep public class com.murongchaopin.displayhook.PremiumDisplayHook { *; }
+-keepattributes RuntimeVisibleAnnotations,RuntimeInvisibleAnnotations,AnnotationDefault

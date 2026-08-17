@@ -1,0 +1,55 @@
+/dts-v1/;
+
+/ {
+	oplus,project-id = <0x1234>;
+
+	fragment@0 {
+		__overlay__ {
+			qcom,mdss_dsi_panel_AD296_P_3_A0020_dsc_cmd {
+				qcom,mdss-dsi-display-timings {
+					timing@sdc_fhd_120 {
+						cell-index = <0x44>;
+						qcom,mdss-dsi-panel-framerate = <120>;
+						qcom,mdss-dsi-panel-clockrate = <1000000000>;
+						qcom,mdss-mdp-transfer-time-us = <7000>;
+					};
+
+					timing@sdc_fhd_90 {
+						cell-index = <0x45>;
+						qcom,mdss-dsi-panel-framerate = <90>;
+						qcom,mdss-dsi-panel-clockrate = <1000000000>;
+						qcom,mdss-mdp-transfer-time-us = <8000>;
+					};
+
+					timing@sdc_fhd_165 {
+						cell-index = <0x44>;
+						qcom,mdss-dsi-panel-framerate = <165>;
+						qcom,mdss-dsi-panel-clockrate = <1200000000>;
+						qcom,mdss-mdp-transfer-time-us = <6000>;
+					};
+
+					timing@sdc_fhd_60 {
+						cell-index = <0x45>;
+						qcom,mdss-dsi-panel-framerate = <60>;
+						qcom,mdss-dsi-panel-clockrate = <1000000000>;
+						qcom,mdss-mdp-transfer-time-us = <9000>;
+					};
+
+					timing@oplus_fhd_120 {
+						cell-index = <0x46>;
+						qcom,mdss-dsi-panel-framerate = <120>;
+						qcom,mdss-dsi-panel-clockrate = <1000000000>;
+						qcom,mdss-mdp-transfer-time-us = <7000>;
+					};
+
+					timing@sdc_fhd_48 {
+						cell-index = <0x99>;
+						qcom,mdss-dsi-panel-framerate = <48>;
+						qcom,mdss-dsi-panel-clockrate = <900000000>;
+						qcom,mdss-mdp-transfer-time-us = <10000>;
+					};
+				};
+			};
+		};
+	};
+};

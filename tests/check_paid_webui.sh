@@ -1,0 +1,72 @@
+#!/system/bin/sh
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+HTML="$ROOT/webroot/index.html"
+CSS="$ROOT/webroot/css/style.css"
+JS="$ROOT/webroot/js/main.js"
+
+require_text() {
+    file="$1"
+    text="$2"
+    if ! grep -Fq "$text" "$file"; then
+        echo "missing WebUI contract: $text" >&2
+        exit 1
+    fi
+}
+
+require_text "$HTML" 'id="payment-overlay"'
+require_text "$HTML" 'id="payment-body"'
+require_text "$HTML" 'id="payment-actions"'
+require_text "$HTML" 'class="bottom-nav"'
+require_text "$HTML" 'class="device-actions"'
+require_text "$HTML" 'id="btn-save-global" class="fab-save"'
+require_text "$HTML" '<img src="1000003559.png" alt=""'
+
+require_text "$CSS" '.payment-sheet'
+require_text "$CSS" '.app-mode-picker'
+require_text "$CSS" '.app-mode-grid'
+require_text "$CSS" 'backdrop-filter: blur(22px) saturate(175%)'
+require_text "$CSS" '.tab-btn.active::before'
+require_text "$CSS" '.fab-save {'
+
+require_text "$JS" "product_code === 'display_oc_permanent'"
+require_text "$JS" "order_kind: 'display_cardkey_new'"
+require_text "$JS" "payment.php?action=create_order"
+require_text "$JS" "payment.php?action=order_status"
+require_text "$JS" 'function startPaymentPolling()'
+require_text "$JS" 'function resumePendingPayment()'
+require_text "$JS" "body.className = 'app-mode-picker'"
+require_text "$JS" 'data-resolution="default"'
+require_text "$JS" 'data-fps="-1"'
+
+if grep -Eq '购买说明|无内嵌支付|请前往.*App.*购买' "$JS"; then
+    echo 'legacy external-purchase guide leaked into WebUI' >&2
+    exit 1
+fi
+
+picker_body="$(sed -n '/async function openAppConfigDialog/,/^async function saveAppConfig/p' "$JS")"
+if printf '%s\n' "$picker_body" | grep -q "type: 'select'"; then
+    echo 'app refresh-rate picker regressed to native select' >&2
+    exit 1
+fi
+
+app_list_css="$(sed -n '/^\.app-list {/,/^}/p' "$CSS")"
+if ! printf '%s\n' "$app_list_css" | grep -Fq 'max-height: none;' ||
+        ! printf '%s\n' "$app_list_css" | grep -Fq 'overflow: visible;'; then
+    echo 'app list regressed to card-internal scrolling' >&2
+    exit 1
+fi
+
+device_actions_line="$(grep -n 'class="device-actions"' "$HTML" | head -n 1 | cut -d: -f1)"
+policy_line="$(grep -n 'id="policy-card"' "$HTML" | head -n 1 | cut -d: -f1)"
+if [ -z "$device_actions_line" ] || [ -z "$policy_line" ] || [ "$device_actions_line" -ge "$policy_line" ]; then
+    echo 'restore and uninstall actions must stay before the display policy' >&2
+    exit 1
+fi
+
+if command -v node >/dev/null 2>&1; then
+    node --check "$JS"
+fi
+
+echo 'paid WebUI contract checks passed'

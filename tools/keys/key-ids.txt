@@ -1,0 +1,4 @@
+dev-lease-key-id=dev-lease-2026-08
+dev-package-key-id=dev-package-2026-08
+dev-lease-public-hex=6e7654c9384720f09883c2275352ee8126280e59418904029db38be6a8806629
+dev-package-public-hex=6f3f610878c5de76571cb59ef05b28a3e3d73eae17723b691351f2197e2d75a7

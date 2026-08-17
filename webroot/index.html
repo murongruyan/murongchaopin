@@ -2,280 +2,395 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Realme/OnePlus 超频管理</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>慕容显示增强</title>
     <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-    <div class="container">
-        <!-- DTBO Control Tab -->
-        <div id="tab-dtbo" class="tab-content active">
-            <div class="card">
-                <h3>系统状态</h3>
-                <p>设备型号: <span id="model-info" class="status-badge">Detecting...</span></p>
-                <p>当前分区槽位: <span id="slot-info" class="status-badge">Loading...</span></p>
-                <p>当前刷新率: <span id="fps-info" class="status-badge">Loading...</span></p>
-                <p>原厂备份: <span id="backup-info" class="status-badge">Checking...</span></p>
-                <div style="margin-top: 10px; display: flex; gap: 10px; flex-wrap: wrap;">
-                     <button id="btn-restore" class="btn btn-sm btn-danger" onclick="restoreDtbo()">恢复原厂 DTBO</button>
-                     <button id="btn-uninstall-module" class="btn btn-sm btn-secondary" onclick="uninstallModule()">卸载此模块</button>
+    <div class="app">
+        <main class="page-container">
+
+            <header class="app-header">
+                <div class="brand-mark" aria-hidden="true">
+                    <img src="1000003559.png" alt=""
+                         onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48Y2lyY2xlIGN4PSI1MCIgY3k9IjUwIiByPSI1MCIgZmlsbD0iI2ZmYjZWMSIvPjwvc3ZnPg=='">
                 </div>
-            </div>
-
-            <div class="card">
-                <h3>ADFR 控制 (实验性)</h3>
-                <p class="text-secondary">禁用可变刷新率，强制锁定帧率。</p>
-                <div style="display: flex; gap: 10px; margin-top: 10px;">
-                    <button id="btn-disable-adfr" class="btn btn-sm btn-primary" onclick="toggleAdfr(false)">禁用 ADFR</button>
-                    <button id="btn-enable-adfr" class="btn btn-sm btn-success" onclick="toggleAdfr(true)">还原默认</button>
+                <div class="brand-copy">
+                    <h1>慕容显示增强</h1>
+                    <p>OnePlus / Realme 显示控制</p>
                 </div>
-            </div>
+                <span id="header-auth" class="status-badge">未授权</span>
+            </header>
 
-            <div class="card">
-                <h3>自定义超频管理</h3>
-                <p class="text-secondary">高级功能：管理 DTBO 内的刷新率节点。</p>
-                
-                <div style="margin-bottom: 15px;">
-                    <div style="display: flex; gap: 10px; margin-bottom: 5px;">
-                        <button id="btn-scan-dts" class="btn btn-primary" onclick="scanWorkspace()" style="flex: 1;">1. 扫描当前存在的 DTS</button>
-                        <button id="btn-reextract" class="btn btn-secondary" onclick="reextractWorkspace()" style="flex: 1;">重新提取当前 DTBO</button>
-                    </div>
-                    <div style="margin-bottom: 5px;">
-                         <button id="btn-auto-process" class="btn btn-warning" onclick="autoProcess()" style="width: 100%;">⚡ 执行自动超频处理 (Auto Patch)</button>
-                    </div>
-                    <p class="text-hint">"扫描"仅读取现有工作区；"重新提取"会覆盖现有工作区 (慎用)。</p>
-                </div>
-
-                <div id="dts-manager" style="display: none;">
-                    <h4>当前刷新率节点</h4>
-                    <div class="table-container">
-                        <table id="rates-table" class="rates-table">
-                            <thead>
-                                <tr>
-                                    <th>FPS</th>
-                                    <th>时钟 (Hz)</th>
-                                    <th>文件</th>
-                                    <th>操作</th>
-                                </tr>
-                            </thead>
-                            <tbody id="rates-list">
-                                <!-- Dynamic Content -->
-                            </tbody>
-                        </table>
-                    </div>
-
-                    <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid var(--border);">
-                        <h4>添加新刷新率</h4>
-                        <div class="form-group">
-                            <label>基准节点 (Base):</label>
-                            <select id="base-node-select" class="form-input"></select>
+            <!-- ============ 超频 ============ -->
+            <section id="tab-oc" class="page active">
+                <div class="group">
+                    <div class="device-overview">
+                        <div class="overview-primary">
+                            <span class="overview-label">当前设备</span>
+                            <strong id="sys-model">检测中…</strong>
+                            <span id="sys-slot" class="overview-meta">槽位读取中…</span>
                         </div>
-                        <div class="form-group">
-                            <label>目标刷新率 (Target FPS):</label>
-                            <input type="number" id="target-fps" class="form-input" placeholder="例如: 150">
+                        <div class="overview-rate">
+                            <strong id="sys-fps">--</strong>
+                            <span>Hz</span>
                         </div>
-                        <details class="adv-options">
-                            <summary>⚙️ 高级选项 (自定义参数，可选)</summary>
-                            <p class="text-hint">留空则使用自动计算预设（基于基准节点按目标 FPS 等比换算）。自定义值将覆盖自动计算。</p>
-                            <div class="form-group">
-                                <label>时钟频率 (clockrate, Hz):</label>
-                                <input type="number" id="custom-clock" class="form-input" placeholder="自动计算值将自动填入，可修改或清空">
+                    </div>
+                    <div class="device-actions">
+                        <div class="device-backup">
+                            <span>原厂镜像</span>
+                            <span id="sys-backup" class="status-badge">检查备份</span>
+                        </div>
+                        <div class="btn-row btn-row-2">
+                            <button id="btn-restore" class="btn btn-danger">恢复原厂 DTBO</button>
+                            <button id="btn-uninstall" class="btn btn-secondary">卸载此模块</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="group">
+                    <h2 class="group-title">显示策略</h2>
+                    <div id="policy-card" class="card" hidden>
+                        <div class="card-head">
+                            <span class="card-title">刷新率策略</span>
+                            <span id="policy-status" class="status-badge">读取中</span>
+                        </div>
+                        <p class="text-hint">原厂 LTPS/LTPO 为免费能力；“自制 LTPO”“完美禁用 ADFR”为永久授权功能。</p>
+                        <div class="seg" role="group" aria-label="刷新率策略">
+                            <button id="btn-policy-stock" class="seg-btn" type="button">原厂 LTPS</button>
+                            <button id="btn-policy-custom" class="seg-btn seg-btn-paid" type="button"><span class="lock"></span>自制 LTPO</button>
+                            <button id="btn-policy-adfr" class="seg-btn seg-btn-paid" type="button"><span class="lock"></span>完美禁用 ADFR</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="group">
+                    <h2 class="group-title">自定义超频</h2>
+                    <div class="card">
+                        <div class="card-head">
+                            <span class="card-title">显示应用后端</span>
+                            <span id="dts-backend-status" class="status-badge">读取中</span>
+                        </div>
+                        <div class="seg seg-2" role="group" aria-label="显示应用后端">
+                            <button id="btn-backend-dtbo" class="seg-btn" type="button">DTBO</button>
+                            <button id="btn-backend-drm" class="seg-btn" type="button">DRM-KO</button>
+                        </div>
+
+                        <div class="oc-actions">
+                            <div class="btn-row btn-row-2">
+                                <button id="btn-oc-scan" class="btn btn-primary">扫描工作区</button>
+                                <button id="btn-oc-reextract" class="btn btn-secondary">重新提取 DTBO</button>
                             </div>
-                            <div class="form-group">
-                                <label>传输时间 (transfer-time-us, µs):</label>
-                                <input type="number" id="custom-transfer" class="form-input" placeholder="自动计算值将自动填入，可修改或清空">
+                            <button id="btn-oc-auto" class="btn btn-warning btn-block">自动修改 DTBO</button>
+                            <p id="oc-hint" class="text-hint">“扫描”仅读取现有工作区；“重新提取”会覆盖现有工作区（慎用）。</p>
+                        </div>
+
+                        <div id="oc-manager" class="oc-manager" hidden>
+                            <div class="card-head">
+                                <span class="card-title">刷新率节点</span>
+                                <button id="btn-add-rate" class="btn btn-sm btn-secondary">＋ 添加</button>
                             </div>
-                        </details>
-                        <button id="btn-add-rate" class="btn btn-secondary" onclick="addRate()">添加 / 修改</button>
-                    </div>
-
-                    <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid var(--border);">
-                        <button id="btn-apply-changes" class="btn btn-danger" onclick="applyChanges()">2. 应用更改 & 刷入</button>
-                        <p class="text-hint">完成所有修改后点击此按钮生效。</p>
-                    </div>
-                </div>
-            </div>
-            
-            <!-- Debug Console -->
-            <!-- Moved to Log Tab -->
-        </div>
-
-        <!-- Refresh Rate Control Tab -->
-        <div id="tab-rates" class="tab-content">
-            <div class="card">
-                <h3>全局设置</h3>
-                
-                <!-- Resolution Switcher -->
-                <div class="res-switcher">
-                    <button class="res-btn active" onclick="switchRes('1080p')" id="btn-res-1080p">1080P (FHD+)</button>
-                    <button class="res-btn" onclick="switchRes('2k')" id="btn-res-2k">2K (QHD+)</button>
-                </div>
-
-                <div id="mode-list" class="mode-list">
-                    <div class="loading">正在加载显示模式...</div>
-                </div>
-            </div>
-
-            <div class="card">
-                <h3>应用独立设置</h3>
-                <div class="search-box">
-                    <input type="text" id="app-search" placeholder="搜索应用名 / 包名 / 刷新率..." oninput="filterAppList()">
-                </div>
-                <div id="app-list" class="app-list">
-                    <div class="loading">正在加载应用列表...</div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Log Tab -->
-        <div id="tab-logs" class="tab-content">
-            <div class="card">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                    <h3>运行日志</h3>
-                    <div>
-                        <button class="btn btn-sm btn-secondary" onclick="toggleDebug()" style="margin-right: 5px;">显示/隐藏 调试</button>
-                        <button class="btn btn-sm btn-primary" onclick="refreshLogs()">刷新</button>
+                            <div class="node-table">
+                                <div class="node-head">
+                                    <span>分辨率</span><span>刷新率</span><span>来源 / 基准</span><span>时钟 / 传输</span><span>稳定性</span><span></span>
+                                </div>
+                                <div id="rates-list" class="node-list"></div>
+                            </div>
+                            <p id="oc-custom-hint" class="text-hint">添加自定义档位可选基准节点，并可覆盖时钟与传输时间；留空时由模块按基准等比计算。</p>
+                            <button id="btn-oc-smart" class="btn btn-warning btn-block">按机型预设添加并应用</button>
+                            <p id="oc-smart-hint" class="text-hint">按推荐档位补齐节点后立即执行“应用”，不适合手动调试参数时使用。</p>
+                            <button id="btn-oc-apply" class="btn btn-danger btn-block">应用并写入 DTBO</button>
+                            <p class="text-hint">完成所有修改后点击上方按钮生效；写入后需要整机重启。</p>
+                        </div>
                     </div>
                 </div>
-                <textarea id="log-viewer" readonly class="log-viewer" placeholder="正在读取日志..."></textarea>
-                <div style="margin-top: 10px; text-align: right;">
-                    <button class="btn btn-sm btn-danger" onclick="clearLogs()">清空日志</button>
-                </div>
-            </div>
-            
-            <!-- Debug Console Moved Here -->
-            <div id="debug-container" class="card" style="margin-top: 20px; background: #000; color: #0f0; font-family: monospace; font-size: 10px; display: none;">
-                <h4 onclick="toggleDebug()" style="cursor: pointer;">调试日志 (点击折叠/展开)</h4>
-                <div id="debug-console" style="height: 150px; overflow-y: auto; white-space: pre-wrap;"></div>
-            </div>
-        </div>
 
-        <!-- About Tab -->
-        <div id="tab-about" class="tab-content">
-            <div class="card about-card">
-                <div class="about-header">
-                    <img src="1000003559.png" alt="Avatar" class="avatar" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48Y2lyY2xlIGN4PSI1MCIgY3k9IjUwIiByPSI1MCIgZmlsbD0iI2ZmYjZWMSIvPjwvc3ZnPg=='">
-                    <h3 style="justify-content: center;">慕容茹艳</h3>
-                    <p>酷安慕容雪绒</p>
-                </div>
-                
-                <div class="link-grid">
-                    <a href="#" onclick="openUrl('https://github.com/murongruyan')" class="link-btn github">
-                        <span>GitHub (作者)</span>
-                    </a>
-                    <a href="#" onclick="openUrl('https://github.com/murongruyan/murongchaopin')" class="link-btn github-project">
-                        <span>GitHub (项目)</span>
-                    </a>
-                    <a href="#" onclick="openUrl('http://www.coolapk.com/u/5037694')" class="link-btn coolapk">
-                        <span>酷安主页</span>
-                    </a>
-                    <a href="#" onclick="openUrl('https://qun.qq.com/universal-share/share?ac=1&authKey=wkmt3V3miIjV2A9jFwCNbQifYQSi7GlmWeO3ifQCdK4d9M6AglmSEsCKDxUIIisv&busi_data=eyJncm91cENvZGUiOiI5NzQ4MzUzNzkiLCJ0b2tlbiI6IlRTNW5KUzRMRDFQVzlsYVozaGtWYjRNYllZV2JOMEpsNStCNUpkK2dqZjkvNFZzM1B5OFhjZ2t6UDZOUGF2ZnoiLCJ1aW4iOiIzMDUxODU1ODU4In0%3D&data=0bLebAEUSS1iI1ktOig1mJooBLFMv8N2eGnG9Zy7r8Hx2rh4mn7BGHSvfAdMNTooNBrC3GR5OdjOlnQT1qkvlg&svctype=4&tempid=h5_group_info')" class="link-btn qq">
-                        <span>加入粉丝群</span>
-                    </a>
-                </div>
+            </section>
 
-                <div style="margin-top: 20px; border-top: 1px solid var(--border); padding-top: 15px;">
-                    <h4 style="margin-bottom: 10px;">支持作者</h4>
-                    <div class="link-grid">
-                        <a href="#" onclick="donateWechat()" class="link-btn wechat-pay" style="background: #09bb07; color: white;">
-                            <span>微信打赏</span>
-                        </a>
-                        <a href="#" onclick="openUrl('https://render.alipay.com/p/s/i?scheme=%61%6C%69%70%61%79%73%3A%2F%2F%70%6C%61%74%66%6F%72%6D%61%70%69%2F%73%74%61%72%74%61%70%70%3F%73%61%49%64%3D%31%30%30%30%30%30%30%37%26%71%72%63%6F%64%65%3D%25%36%38%25%37%34%25%37%34%25%37%30%25%37%33%25%33%41%25%32%46%25%32%46%25%37%31%25%37%32%25%32%45%25%36%31%25%36%43%25%36%39%25%37%30%25%36%31%25%37%39%25%32%45%25%36%33%25%36%46%25%36%44%25%32%46%25%36%36%25%36%42%25%37%38%25%33%31%25%33%30%25%33%39%25%33%36%25%33%38%25%36%34%25%36%46%25%37%37%25%33%37%25%36%45%25%37%41%25%36%31%25%36%42%25%36%39%25%37%32%25%36%41%25%36%43%25%36%34%25%33%34%25%36%33%25%33%46%25%35%46%25%37%33%25%33%44%25%37%37%25%36%35%25%36%32%25%32%44%25%36%46%25%37%34%25%36%38%25%36%35%25%37%32')" class="link-btn alipay" style="background: #1677ff; color: white;">
-                            <span>支付宝打赏</span>
-                        </a>
+            <!-- ============ 刷新率 ============ -->
+            <section id="tab-rates" class="page">
+                <div class="group">
+                    <h2 class="group-title">全局设置</h2>
+                    <div class="card">
+                        <div class="card-head">
+                            <span class="card-title">分辨率</span>
+                        </div>
+                        <div class="seg seg-2" role="group" aria-label="分辨率">
+                            <button id="btn-res-1080" class="seg-btn" type="button">1080P (FHD+)</button>
+                            <button id="btn-res-1440" class="seg-btn" type="button">2K (QHD+)</button>
+                        </div>
+
+                        <div id="refresh-risk-notice" class="notice notice-warning">
+                            高于屏幕体质的刷新率可能花屏。开机第一段和第二段动画交界处的短暂花屏属于已知现象；不稳定档位可在超频页节点列表中删除。
+                        </div>
+
+                        <div class="card-head">
+                            <span class="card-title">刷新率</span>
+                            <span id="global-status" class="status-badge">读取中</span>
+                        </div>
+                        <div id="mode-list" class="mode-grid">
+                            <div class="loading">正在加载显示模式…</div>
+                        </div>
                     </div>
                 </div>
-            </div>
 
-            <div class="card">
-                <h3 style="justify-content: center;">致谢名单</h3>
-                <ul class="credit-list">
-                    <li>
-                        <span class="credit-name">酷安穆远星</span>
-                        <a href="#" onclick="openUrl('http://www.coolapk.com/u/28719807')" class="credit-link">访问主页</a>
-                    </li>
-                    <li>
-                        <span class="credit-name">酷安大肥鱼</span>
-                        <a href="#" onclick="openUrl('http://www.coolapk.com/u/951790')" class="credit-link">访问主页</a>
-                    </li>
-                    <li>
-                        <span class="credit-name">bybycode</span>
-                        <a href="#" onclick="openUrl('http://www.coolapk.com/u/716079')" class="credit-link">访问主页</a>
-                    </li>
-                    <li>
-                        <span class="credit-name">破星</span>
-                        <a href="#" onclick="openUrl('http://www.coolapk.com/u/21669766')" class="credit-link">访问主页</a>
-                    </li>
-                    <li>
-                        <span class="credit-name">酷安望月古川</span>
-                        <a href="#" onclick="openUrl('http://www.coolapk.com/u/843974')" class="credit-link">访问主页</a>
-                    </li>
-                    <li>
-                        <span class="credit-name">傻瓜我爱你呀</span>
-                        <a href="#" onclick="openUrl('https://www.coolapk.com/u/33802586')" class="credit-link">访问主页</a>
-                    </li>
-                    <li>
-                        <span class="credit-name">小宇同学</span>
-                        <a href="#" onclick="openUrl('https://www.coolapk.com/u/12778615')" class="credit-link">访问主页</a>
-                    </li>
-                    <li>
-                        <span class="credit-name">TS插件开源项目</span>
-                        <a href="#" onclick="openUrl('https://github.com/KOWX712/Tricky-Addon-Update-Target-List')" class="credit-link">查看仓库</a>
-                    </li>
-                    <li>
-                        <span class="credit-name">COPG开源项目</span>
-                        <a href="#" onclick="openUrl('https://github.com/AlirezaParsi/COPG')" class="credit-link">查看仓库</a>
-                    </li>
-                </ul>
-            </div>
-        </div>
+                <div class="group">
+                    <h2 class="group-title">应用独立设置</h2>
+                    <div class="card">
+                        <div class="card-head app-list-head">
+                            <span class="card-title">应用列表</span>
+                            <label class="switch-control" for="show-system-apps">
+                                <span>显示系统应用</span>
+                                <input id="show-system-apps" type="checkbox">
+                                <span class="switch-track" aria-hidden="true"><span></span></span>
+                            </label>
+                        </div>
+                        <div class="search-box">
+                            <input type="text" id="app-search" placeholder="搜索应用名 / 包名 / 刷新率…" autocomplete="off">
+                        </div>
+                        <div id="app-list" class="app-list">
+                            <div class="loading">正在加载应用列表…</div>
+                        </div>
+                    </div>
+                </div>
+                <button id="btn-save-global" class="fab-save" type="button" aria-label="保存全局模式" title="保存全局模式">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
+                </button>
+            </section>
+
+            <!-- ============ 插帧 ============ -->
+            <section id="tab-video" class="page">
+                <div id="video-auth-panel" class="group" hidden></div>
+                <div id="video-content" class="group" hidden>
+                    <div class="group">
+                        <h2 class="group-title">付费组件</h2>
+                        <div id="video-package-info" class="card" hidden>
+                            <div class="card-head">
+                                <span class="card-title">显示增强资源</span>
+                                <span class="badge-paid">永久授权</span>
+                            </div>
+                            <div id="video-package-meta" class="kv-list"></div>
+                            <div id="video-package-notes" class="text-hint"></div>
+                            <button id="btn-download-package" class="btn btn-primary btn-block">下载付费组件</button>
+                        </div>
+                    </div>
+
+                    <div id="video-installed" class="group" hidden>
+                        <div class="group">
+                            <h2 class="group-title">视频动态插帧</h2>
+                            <div class="card">
+                                <div class="card-head">
+                                    <span class="card-title">插帧输出</span>
+                                    <span id="video-motion-status" class="status-badge">读取中</span>
+                                </div>
+                                <div class="memc-capability-row">
+                                    <span class="origin-badge origin-native">R1 原生</span>
+                                    <span class="text-hint">60 / 90 / 120 / 144 帧</span>
+                                </div>
+                                <div class="form-group">
+                                    <label for="video-motion-target">目标刷新率</label>
+                                    <select id="video-motion-target" class="form-input"></select>
+                                </div>
+                                <div id="video-motion-target-detail" class="text-hint video-detail"></div>
+                                <button id="btn-save-video-target" class="btn btn-primary btn-block">保存目标</button>
+                            </div>
+                        </div>
+
+                        <div class="group">
+                            <h2 class="group-title">自定义插帧应用</h2>
+                            <div class="card">
+                                <div class="card-head">
+                                    <span class="card-title">应用配置</span>
+                                    <button id="btn-read-video-activity" class="btn btn-sm btn-secondary" type="button">识别播放页</button>
+                                </div>
+                                <div class="form-group">
+                                    <label for="video-app-picker">已安装应用</label>
+                                    <button id="video-app-picker" class="form-input selection-trigger" type="button" aria-haspopup="dialog">
+                                        <span id="video-app-picker-label" class="selection-text">选择应用</span>
+                                        <span class="selection-chevron" aria-hidden="true"></span>
+                                    </button>
+                                </div>
+                                <div class="form-group">
+                                    <label for="video-app-package">包名</label>
+                                    <input id="video-app-package" class="form-input" type="text" autocomplete="off" placeholder="例如 com.ss.android.ugc.aweme">
+                                </div>
+                                <div class="form-group">
+                                    <label for="video-app-activity">播放 Activity</label>
+                                    <input id="video-app-activity" class="form-input" type="text" autocomplete="off" placeholder="例如 com.example.player/.PlayerActivity">
+                                </div>
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label for="video-app-rate">插帧刷新率</label>
+                                        <button id="video-app-rate" class="form-input selection-trigger" type="button" aria-haspopup="dialog" data-value="120">
+                                            <span id="video-app-rate-label" class="selection-text">120 Hz</span>
+                                            <span class="selection-chevron" aria-hidden="true"></span>
+                                        </button>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="video-app-command">R1 命令</label>
+                                        <select id="video-app-command" class="form-input">
+                                            <option value="258-10-0-0">通用 MEMC</option>
+                                            <option value="258-74-0-0">Netflix HDR</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="btn-row">
+                                    <button id="btn-save-video-app" class="btn btn-primary" type="button">保存应用</button>
+                                    <button id="btn-reboot-video-config" class="btn btn-secondary" type="button">重启加载配置</button>
+                                </div>
+                                <div id="video-motion-app-list" class="video-app-list">
+                                    <div class="loading">正在加载自定义应用…</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============ 日志 ============ -->
+            <section id="tab-logs" class="page">
+                <div class="group">
+                    <h2 class="group-title">运行日志</h2>
+                    <div class="card">
+                        <div class="card-head">
+                            <span class="card-title">模块日志</span>
+                            <div class="btn-row">
+                                <button id="btn-toggle-debug" class="btn btn-sm btn-secondary">调试</button>
+                                <button id="btn-refresh-logs" class="btn btn-sm btn-primary">刷新</button>
+                            </div>
+                        </div>
+                        <textarea id="log-viewer" readonly class="log-viewer" placeholder="正在读取日志…"></textarea>
+                        <button id="btn-clear-logs" class="btn btn-danger btn-block">清空日志</button>
+                    </div>
+                </div>
+                <div id="debug-container" class="card debug-card" hidden>
+                    <div class="card-head">
+                        <span class="card-title">调试日志</span>
+                        <span class="text-hint">点击标题折叠</span>
+                    </div>
+                    <div id="debug-console" class="debug-console"></div>
+                </div>
+            </section>
+
+            <!-- ============ 我的 ============ -->
+            <section id="tab-mine" class="page">
+                <div class="group">
+                    <h2 class="group-title">账号与授权</h2>
+                    <div id="auth-section" class="account-stack"></div>
+                </div>
+
+                <div class="group">
+                    <h2 class="group-title">主题</h2>
+                    <div class="card">
+                        <div class="seg seg-3" role="group" aria-label="主题">
+                            <button id="theme-system" class="seg-btn" type="button">跟随系统</button>
+                            <button id="theme-light" class="seg-btn" type="button">浅色</button>
+                            <button id="theme-dark" class="seg-btn" type="button">深色</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="group">
+                    <h2 class="group-title">关于</h2>
+                    <div class="card about-card">
+                        <div class="about-header">
+                            <img src="1000003559.png" alt="Avatar" class="avatar"
+                                 onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48Y2lyY2xlIGN4PSI1MCIgY3k9IjUwIiByPSI1MCIgZmlsbD0iI2ZmYjZWMSIvPjwvc3ZnPg=='">
+                            <h3>慕容茹艳</h3>
+                            <p class="text-hint">酷安慕容雪绒</p>
+                        </div>
+                        <div class="link-grid">
+                            <a href="#" class="link-btn github" data-url="https://github.com/murongruyan"><span>GitHub（作者）</span></a>
+                            <a href="#" class="link-btn github-project" data-url="https://github.com/murongruyan/murongchaopin"><span>GitHub（项目）</span></a>
+                            <a href="#" class="link-btn coolapk" data-url="http://www.coolapk.com/u/5037694"><span>酷安主页</span></a>
+                            <a href="#" class="link-btn qq" data-url="https://qun.qq.com/universal-share/share?ac=1&amp;authKey=wkmt3V3miIjV2A9jFwCNbQifYQSi7GlmWeO3ifQCdK4d9M6AglmSEsCKDxUIIisv&amp;busi_data=eyJncm91cENvZGUiOiI5NzQ4MzUzNzkiLCJ0b2tlbiI6IlRTNW5KUzRMRDFQVzlsYVozaGtWYjRNYllZV2JOMEpsNStCNUpkK2dqZjkvNFZzM1B5OFhjZ2t6UDZOUGF2ZnoiLCJ1aW4iOiIzMDUxODU1ODU4In0%3D&amp;data=0bLebAEUSS1iI1ktOig1mJooBLFMv8N2eGnG9Zy7r8Hx2rh4mn7BGHSvfAdMNTooNBrC3GR5OdjOlnQT1qkvlg&amp;svctype=4&amp;tempid=h5_group_info"><span>加入粉丝群</span></a>
+                        </div>
+                        <div class="about-divider"></div>
+                        <h4>支持作者</h4>
+                        <div class="link-grid">
+                            <a href="#" class="link-btn wechat-pay" id="btn-donate-wechat"><span>微信打赏</span></a>
+                            <a href="#" class="link-btn alipay" data-url="https://render.alipay.com/p/s/i?scheme=%61%6C%69%70%61%79%73%3A%2F%2F%70%6C%61%74%66%6F%72%6D%61%70%69%2F%73%74%61%72%74%61%70%70%3F%73%61%49%64%3D%31%30%30%30%30%30%30%37%26%71%72%63%6F%64%65%3D%25%36%38%25%37%34%25%37%34%25%37%30%25%37%33%25%33%41%25%32%46%25%32%46%25%37%31%25%37%32%25%32%45%25%36%31%25%36%43%25%36%39%25%37%30%25%36%31%25%37%39%25%32%45%25%36%33%25%36%46%25%36%44%25%32%46%25%36%36%25%36%42%25%37%38%25%33%31%25%33%30%25%33%39%25%33%36%25%33%38%25%36%34%25%36%46%25%37%37%25%33%37%25%36%45%25%37%41%25%36%42%25%36%39%25%37%32%25%36%41%25%36%43%25%36%34%25%33%34%25%33%33%25%33%46%25%35%46%25%37%33%25%33%44%25%37%37%25%36%35%25%36%32%25%32%44%25%36%46%25%37%34%25%36%38%25%36%35%25%37%32"><span>支付宝打赏</span></a>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="group">
+                    <h2 class="group-title">致谢名单</h2>
+                    <div class="card">
+                        <ul class="credit-list">
+                            <li><span class="credit-name">酷安穆远星</span><a href="#" class="credit-link" data-url="http://www.coolapk.com/u/28719807">访问主页</a></li>
+                            <li><span class="credit-name">酷安大肥鱼</span><a href="#" class="credit-link" data-url="http://www.coolapk.com/u/951790">访问主页</a></li>
+                            <li><span class="credit-name">bybycode</span><a href="#" class="credit-link" data-url="http://www.coolapk.com/u/716079">访问主页</a></li>
+                            <li><span class="credit-name">破星</span><a href="#" class="credit-link" data-url="http://www.coolapk.com/u/21669766">访问主页</a></li>
+                            <li><span class="credit-name">酷安望月古川</span><a href="#" class="credit-link" data-url="http://www.coolapk.com/u/843974">访问主页</a></li>
+                            <li><span class="credit-name">傻瓜我爱你呀</span><a href="#" class="credit-link" data-url="https://www.coolapk.com/u/33802586">访问主页</a></li>
+                            <li><span class="credit-name">小宇同学</span><a href="#" class="credit-link" data-url="https://www.coolapk.com/u/12778615">访问主页</a></li>
+                            <li><span class="credit-name">TS插件开源项目</span><a href="#" class="credit-link" data-url="https://github.com/KOWX712/Tricky-Addon-Update-Target-List">查看仓库</a></li>
+                            <li><span class="credit-name">COPG开源项目</span><a href="#" class="credit-link" data-url="https://github.com/AlirezaParsi/COPG">查看仓库</a></li>
+                            <li><span class="credit-name">梦</span><a href="#" class="credit-link" data-url="https://www.coolapk.com/u/1404550">访问主页</a></li>
+                            <li><span class="credit-name">MTK-Display-Overclock-LKM 开源项目</span><a href="#" class="credit-link" data-url="https://github.com/Yunnijian/MTK-Display-Overclock-LKM">查看仓库</a></li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- 悬浮玻璃底栏 -->
+        <nav class="bottom-nav">
+            <button class="tab-btn active" data-tab="tab-oc">
+                <svg viewBox="0 0 24 24" class="tab-icon"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+                <span class="tab-label">超频</span>
+            </button>
+            <button class="tab-btn" data-tab="tab-rates">
+                <svg viewBox="0 0 24 24" class="tab-icon"><rect x="2" y="3" width="20" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><line x1="8" y1="21" x2="16" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="17" x2="12" y2="21" stroke="currentColor" stroke-width="2"/></svg>
+                <span class="tab-label">刷新率</span>
+            </button>
+            <button class="tab-btn" data-tab="tab-video">
+                <svg viewBox="0 0 24 24" class="tab-icon"><rect x="2" y="2" width="20" height="20" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><line x1="7" y1="2" x2="7" y2="22" stroke="currentColor" stroke-width="2"/><line x1="17" y1="2" x2="17" y2="22" stroke="currentColor" stroke-width="2"/><line x1="2" y1="12" x2="22" y2="12" stroke="currentColor" stroke-width="2"/></svg>
+                <span class="tab-label">插帧</span>
+            </button>
+            <button class="tab-btn" data-tab="tab-logs">
+                <svg viewBox="0 0 24 24" class="tab-icon"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><polyline points="14 2 14 8 20 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><line x1="16" y1="13" x2="8" y2="13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="16" y1="17" x2="8" y2="17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                <span class="tab-label">日志</span>
+            </button>
+            <button class="tab-btn" data-tab="tab-mine">
+                <svg viewBox="0 0 24 24" class="tab-icon"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="7" r="4" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+                <span class="tab-label">我的</span>
+            </button>
+        </nav>
     </div>
 
-    <!-- Floating Action Button -->
-    <button id="btn-save-mode" class="fab-save" style="display: none;">💾</button>
-
-    <!-- Bottom Navigation -->
-    <div class="tabs">
-        <div class="tab-btn active" data-tab="tab-dtbo">
-            <span class="tab-icon">⚡</span>
-            <span class="tab-label">超频</span>
-        </div>
-        <div class="tab-btn" data-tab="tab-rates">
-            <span class="tab-icon">📱</span>
-            <span class="tab-label">刷新率</span>
-        </div>
-        <div class="tab-btn" data-tab="tab-logs">
-            <span class="tab-icon">📝</span>
-            <span class="tab-label">日志</span>
-        </div>
-        <div class="tab-btn" data-tab="tab-about">
-            <span class="tab-icon">ℹ️</span>
-            <span class="tab-label">关于</span>
-        </div>
-    </div>
-
+    <!-- Toast -->
     <div id="toast" class="ui-toast"></div>
 
-    <!-- Custom Modal -->
-    <div id="custom-modal" class="modal-overlay" style="display: none;">
+    <!-- 统一弹窗 -->
+    <div id="modal-overlay" class="modal-overlay" hidden>
         <div class="modal-content">
-            <h3 id="modal-title">标题</h3>
-            <p id="modal-message">内容</p>
-            <pre id="modal-log" class="modal-log" style="display: none;"></pre>
-            <div id="modal-input-container" style="display: none; margin-top: 15px;">
-                <input type="number" id="modal-input" class="form-input" placeholder="">
-            </div>
-            <div id="modal-fields" style="display: none; margin-top: 15px;"></div>
-            <div class="modal-actions">
-                <button class="btn btn-secondary" onclick="closeModal()">取消</button>
-                <button id="modal-confirm-btn" class="btn btn-primary">确定</button>
-            </div>
+            <h3 id="modal-title"></h3>
+            <div id="modal-body" class="modal-body"></div>
+            <pre id="modal-log" class="modal-log" hidden></pre>
+            <div id="modal-actions" class="modal-actions"></div>
         </div>
     </div>
 
-    <div style="text-align: center; color: #666; font-size: 12px; padding: 10px;">
-        WebUI v1.1
+    <!-- 内置购买与订单状态 -->
+    <div id="payment-overlay" class="payment-overlay" hidden>
+        <section class="payment-sheet" role="dialog" aria-modal="true" aria-labelledby="payment-title">
+            <header class="payment-sheet-head">
+                <div>
+                    <span class="payment-kicker">显示增强永久授权</span>
+                    <h3 id="payment-title">购买授权</h3>
+                </div>
+                <button id="btn-payment-close" class="icon-btn" type="button" aria-label="关闭">
+                    <svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg>
+                </button>
+            </header>
+            <div id="payment-body" class="payment-body"></div>
+            <footer id="payment-actions" class="payment-actions"></footer>
+        </section>
     </div>
+
+    <div class="app-footer">慕容显示增强 · WebUI 2.1</div>
     <script src="js/main.js"></script>
 </body>
 </html>

@@ -1,7 +1,6 @@
-0
-# 格式说明：
-# 第一行：全局默认模式ID
-# 后续行：包名 模式ID
+QHD+ 120
+# 第一行：全局分辨率与刷新率；可选 FHD+ 或 QHD+。
+# 后续行：包名 刷新率（继承全局分辨率），或包名 分辨率 刷新率。
 # 示例：
-# com.tencent.mm 3
-# com.miHoYo.Yuanshen 8
+# com.tencent.mm 120
+# com.miHoYo.Yuanshen FHD+ 160

@@ -9,14 +9,14 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "module.prop 中的新版本号，例如 2.8"
+        description: "module.prop 中的新版本号，例如 2.9"
         required: false
-        default: "2.8"
+        default: "2.9"
         type: string
       version_code:
-        description: "module.prop 中的新 versionCode，例如 28"
+        description: "module.prop 中的新 versionCode，例如 29"
         required: false
-        default: "28"
+        default: "29"
         type: string
 
 env:
@@ -29,11 +29,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      RELEASE_TAG: OnePlus&Realme修改dtbo模块
-      RELEASE_NAME: OnePlus & Realme修改dtbo模块
+      RELEASE_TAG: murong-display-enhancement
+      RELEASE_NAME: 慕容显示增强
       NDK_PACKAGE: "30.0.14904198"
       API_LEVEL: "29"
-      ZIP_NAME: OnePlus.Realme.dtbo.zip
+      ZIP_NAME: Murong.Display.Enhancement.zip
 
     steps:
       - name: Checkout
@@ -160,7 +160,7 @@ jobs:
 
           mkdir -p "$OUT_DIR"
 
-          for source in process_dts dts_tool pack_dtbo unpack_dtbo rate_daemon; do
+          for source in process_dts dts_tool pack_dtbo unpack_dtbo; do
             echo "Building $source"
             "$CLANG" \
               --sysroot="$SYSROOT" \
@@ -173,6 +173,42 @@ jobs:
               -o "$OUT_DIR/$source" \
               "src/$source.c"
           done
+
+      - name: Validate scripts and Web backup isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          for script in \
+            customize.sh \
+            uninstall.sh \
+            post-fs-data.sh \
+            post-mount.sh \
+            late-load.sh \
+            scripts/dtbo_avb.sh \
+            scripts/display_backend.sh \
+            scripts/hmbird_backend.sh \
+            scripts/coloros_config.sh \
+            scripts/display_license_gate.sh \
+            scripts/web_handler.sh \
+            tests/device_stock_backup_guard.sh \
+            tests/device_invalid_backup_refusal.sh \
+            tests/check_web_stock_isolation.sh \
+            tests/check_backend_dispatch.sh; do
+            sh -n "$script"
+          done
+          sh tests/check_drm_ko_profiles.sh
+          sh tests/check_pjd110_drm_ko.sh
+          sh tests/check_pjd110_ko_support_dtbo.sh
+          sh tests/check_hmbird_backend.sh
+          sh tests/check_low_refresh_preservation.sh
+          sh tests/check_rmx5200_adfr_dry_run.sh
+          sh tests/check_refresh_rate_warning.sh
+          sh tests/check_paid_webui.sh
+          sh tests/check_webui_performance.sh
+          sh tests/check_ksu_predictive_back.sh
+          node --check webroot/js/main.js
+          sh tests/check_web_stock_isolation.sh
+          sh tests/check_backend_dispatch.sh
 
       - name: Read module metadata
         id: meta
@@ -214,6 +250,9 @@ jobs:
             "module.prop"
             "KsuWebUI.apk"
             "service.sh"
+            "post-fs-data.sh"
+            "post-mount.sh"
+            "late-load.sh"
             "uninstall.sh"
           )
 
@@ -230,21 +269,113 @@ jobs:
             cp -a img/. "$STAGE_DIR/img/"
           fi
 
+          # 这是唯一的公开模块安装包。授权增强组件只能由模块在设备上
+          # 经签名校验后下载，严禁进入 GitHub Release。
+          premium_bin_patterns=(
+            "rmx5200_ltpo_modes.ko"
+            "rmx5200_ltpo_activity.ko"
+            "surfaceflinger.rmx5200.ltpo-oti"
+            "surfaceflinger.rmx5200.ltpo-rise"
+            "rmx5200_adfr_lock.ko"
+            "pjd110_adfr_lock.ko"
+            "libpwirisservicei7p.rmx5200.memc-gate.so"
+            "libsdmclient.rmx5200.ltpo-timeline.so"
+            "ltpo.ko"
+            "*_probe.ko"
+            "*qhd144*"
+            "*_test"
+            "*.new"
+            "*.drop-fhd-test"
+            "*.pjd-index-test"
+            "*.plk-index-test"
+          )
+          premium_script_names=(
+            "adfr_lock.sh"
+            "generic_adfr_policy.sh"
+            "surfaceflinger_vote_patch.sh"
+            "surfaceflinger_ltpo_rise_patch.sh"
+            "libsdmclient_timeline_patch.sh"
+            "rmx5200_ltpo_experiment.sh"
+            "rmx5200_ltpo_activity.sh"
+            "libpwiris_memc_gate_patch.sh"
+            "rmx5200_native_adfr.sh"
+          )
+          premium_config_names=(
+            "rmx5200_adfr_profile.txt"
+            "rmx5200_adfr_commands.dtsi"
+            "iris_page_i7p.stock.sha256"
+            "rmx5200_ltpo_modes.sha256"
+            "rmx5200_ltpo_activity.sha256"
+            "ltpo.ko.sha256"
+            "multimedia_pixelworks_apps.xml"
+          )
+
+          for pattern in "${premium_bin_patterns[@]}"; do
+            find "$STAGE_DIR/bin" -name "$pattern" -delete 2>/dev/null || true
+          done
+          for name in "${premium_script_names[@]}"; do
+            rm -f "$STAGE_DIR/scripts/$name" "$STAGE_DIR/$name"
+          done
+          for name in "${premium_config_names[@]}"; do
+            rm -f "$STAGE_DIR/config/$name" "$STAGE_DIR/config/coloros/$name"
+          done
+          # 系统目录中的 Pixelworks overlay 属付费 MEMC（本工作流本就不打包
+          # system/，此处防御性断言）。
+          rm -rf "$STAGE_DIR/system"
+
+          # 付费组件泄漏断言：任何遗漏都直接失败
+          leak_failures=0
+          for probe in \
+            rmx5200_ltpo_modes.ko rmx5200_adfr_lock.ko ltpo.ko \
+            libpwirisservicei7p.rmx5200.memc-gate.so surfaceflinger.rmx5200.ltpo-rise \
+            libpwiris_memc_gate_patch.sh rmx5200_ltpo_experiment.sh adfr_lock.sh \
+            surfaceflinger_vote_patch.sh iris_page_i7p.json multimedia_pixelworks_apps.xml; do
+            if find "$STAGE_DIR" -name "$probe" -print -quit 2>/dev/null | grep -q .; then
+              echo "Private runtime component leaked into public module: $probe" >&2
+              leak_failures=$((leak_failures + 1))
+            fi
+          done
+          if [ "$leak_failures" -gt 0 ]; then
+            echo "Public module leak check failed: $leak_failures private components found" >&2
+            exit 1
+          fi
+          echo "Public module leak check passed"
+
+          # Hook 类级泄漏检查：免费 Hook APK 的 dex 中不得出现付费/研究类名
+          HOOK_APK="$STAGE_DIR/bin/display_settings_hook.apk"
+          if [ -f "$HOOK_APK" ]; then
+            for probe in NotificationLtpoHooks VideoMotion ColorosVideoPlayback BilibiliStory; do
+              if unzip -p "$HOOK_APK" 'classes*.dex' 2>/dev/null | strings | grep -q "$probe"; then
+                echo "Licensed hook class leaked into public Hook APK: $probe" >&2
+                exit 1
+              fi
+            done
+            echo "Public Hook APK class leak check passed"
+          fi
+
           install -m 0755 build/bin/process_dts "$STAGE_DIR/bin/process_dts"
           install -m 0755 build/bin/dts_tool "$STAGE_DIR/bin/dts_tool"
           install -m 0755 build/bin/pack_dtbo "$STAGE_DIR/bin/pack_dtbo"
           install -m 0755 build/bin/unpack_dtbo "$STAGE_DIR/bin/unpack_dtbo"
-          install -m 0755 build/bin/rate_daemon "$STAGE_DIR/bin/rate_daemon"
+          test -x "$STAGE_DIR/bin/rate_daemon"
 
           chmod 0755 \
             "$STAGE_DIR/action.sh" \
             "$STAGE_DIR/customize.sh" \
             "$STAGE_DIR/service.sh" \
+            "$STAGE_DIR/post-fs-data.sh" \
+            "$STAGE_DIR/post-mount.sh" \
+            "$STAGE_DIR/late-load.sh" \
             "$STAGE_DIR/uninstall.sh" \
             "$STAGE_DIR/scripts/web_handler.sh" \
-            "$STAGE_DIR/scripts/dtbo_avb.sh"
+            "$STAGE_DIR/scripts/dtbo_avb.sh" \
+            "$STAGE_DIR/scripts/display_backend.sh" \
+            "$STAGE_DIR/scripts/hmbird_backend.sh" \
+            "$STAGE_DIR/scripts/mode_manifest.sh" \
+            "$STAGE_DIR/scripts/coloros_config.sh" \
+            "$STAGE_DIR/scripts/display_license_gate.sh"
 
-          for path in bin config img META-INF scripts webroot action.sh customize.sh module.prop KsuWebUI.apk service.sh uninstall.sh; do
+          for path in bin config img META-INF scripts webroot action.sh customize.sh module.prop KsuWebUI.apk service.sh post-fs-data.sh post-mount.sh late-load.sh uninstall.sh; do
             if [ ! -e "$STAGE_DIR/$path" ]; then
               echo "Packaged path missing: $path" >&2
               exit 1
@@ -309,7 +440,8 @@ jobs:
           artifactErrorsFailBuild: true
           artifacts: ${{ steps.package.outputs.zip_path }},${{ steps.package.outputs.checksum_path }}
           commit: ${{ env.RELEASE_COMMIT_SHA }}
-          generateReleaseNotes: true
+          bodyFile: docs/RELEASE_NOTES_v2.9.md
+          generateReleaseNotes: false
           makeLatest: true
           name: ${{ steps.release_meta.outputs.release_name }}
           replacesArtifacts: true

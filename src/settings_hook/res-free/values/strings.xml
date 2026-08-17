@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">慕容显示增强（基础组件）</string>
+    <string name="module_description">原厂 LTPS 修复、底层显示策略与 KernelSU WebUI 返回桥接</string>
+</resources>

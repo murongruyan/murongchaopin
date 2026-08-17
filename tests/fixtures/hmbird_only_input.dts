@@ -1,0 +1,25 @@
+/dts-v1/;
+
+/ {
+	oplus,project-id = <0x1234>;
+	oplus,batt_capacity_mah = <0x1388>;
+	test-display-rate = <0x78>;
+
+	qcom,mdss_dsi_panel_AE084_P_3_A0033_dsc_cmd_dvt02 {
+		test-panel-data = <0x5200>;
+	};
+
+	qcom,mdss_dsi_panel_AD296_P_3_A0020_dsc_cmd {
+		test-panel-data = <0x110>;
+	};
+
+	qcom,mdss_dsi_panel_AA545_P_3_A0005_dsc_cmd {
+		test-panel-data = <0x12>;
+	};
+
+	soc {
+		oplus_sim_detect {
+			status = "okay";
+		};
+	};
+};

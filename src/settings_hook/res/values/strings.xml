@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Murong Display Hook</string>
+    <string name="module_description">API 102 exact refresh-rate controls for Settings, Game Assistant and Scene</string>
+</resources>

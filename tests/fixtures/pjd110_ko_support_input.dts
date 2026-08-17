@@ -1,0 +1,44 @@
+/dts-v1/;
+
+/ {
+	oplus,project-id = <0x595d>;
+	oplus,batt_capacity_mah = <0x1388>;
+	oplus_spec,vbat_uv_thr_mv = <0xbb8>;
+	oplus,reserve_chg_soc = <0x0>;
+
+	fragment@0 {
+		__overlay__ {
+			oplus_sim_detect {
+				status = "okay";
+			};
+		};
+	};
+
+	fragment@1 {
+		__overlay__ {
+			qcom,mdss_dsi_panel_AA545_P_3_A0005_dsc_cmd {
+				qcom,mdss-dsi-display-timings {
+					timing@sdc_60 {
+						cell-index = <0x20>;
+						qcom,mdss-dsi-panel-framerate = <60>;
+					};
+
+					timing@sdc_90 {
+						cell-index = <0x30>;
+						qcom,mdss-dsi-panel-framerate = <90>;
+					};
+
+					timing@sdc_120 {
+						cell-index = <0x40>;
+						qcom,mdss-dsi-panel-framerate = <120>;
+					};
+
+					timing@sdc_144 {
+						cell-index = <0x50>;
+						qcom,mdss-dsi-panel-framerate = <144>;
+					};
+				};
+			};
+		};
+	};
+};

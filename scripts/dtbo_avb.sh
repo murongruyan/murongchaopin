@@ -81,6 +81,152 @@ dtbo_hash_device_prefix() {
     fi
 }
 
+dtbo_write_stock_manifest() {
+    dtbo_manifest_image="$1"
+    dtbo_manifest_file="$2"
+    dtbo_manifest_tmp="$dtbo_manifest_file.tmp.$$"
+    command -v sha256sum >/dev/null 2>&1 || return 1
+    dtbo_manifest_hash=$(sha256sum "$dtbo_manifest_image" 2>/dev/null | awk '{print $1}')
+    [ "${#dtbo_manifest_hash}" -eq 64 ] || return 1
+    printf '%s  dtbo.img\n' "$dtbo_manifest_hash" > "$dtbo_manifest_tmp" || return 1
+    mv -f "$dtbo_manifest_tmp" "$dtbo_manifest_file" || return 1
+    chmod 0444 "$dtbo_manifest_file" 2>/dev/null
+}
+
+dtbo_read_stock_manifest_hash() {
+    dtbo_read_manifest_file="$1"
+    dtbo_read_manifest_hash=$(awk 'NR == 1 {print $1}' "$dtbo_read_manifest_file" 2>/dev/null)
+    case "$dtbo_read_manifest_hash" in
+        ""|*[!0-9a-fA-F]*) return 1 ;;
+    esac
+    [ "${#dtbo_read_manifest_hash}" -eq 64 ] || return 1
+    printf '%s\n' "$dtbo_read_manifest_hash" | tr 'A-F' 'a-f'
+}
+
+dtbo_validate_stock_hash() {
+    dtbo_hash_image="$1"
+    dtbo_hash_manifest="$2"
+    [ -f "$dtbo_hash_image" ] && [ -f "$dtbo_hash_manifest" ] || return 1
+    dtbo_hash_expected=$(dtbo_read_stock_manifest_hash "$dtbo_hash_manifest") || return 1
+    dtbo_hash_actual=$(sha256sum "$dtbo_hash_image" 2>/dev/null | awk '{print $1}')
+    [ "$dtbo_hash_expected" = "$dtbo_hash_actual" ]
+}
+
+dtbo_validate_stock_recovery() {
+    dtbo_recovery_check_manifest="$1"
+    dtbo_recovery_check_archive="$2"
+    [ -f "$dtbo_recovery_check_manifest" ] && \
+        [ -f "$dtbo_recovery_check_archive" ] || return 1
+    command -v gzip >/dev/null 2>&1 || return 1
+    dtbo_recovery_check_expected=$(dtbo_read_stock_manifest_hash \
+        "$dtbo_recovery_check_manifest") || return 1
+    gzip -t "$dtbo_recovery_check_archive" >/dev/null 2>&1 || return 1
+    dtbo_recovery_check_actual=$(gzip -dc "$dtbo_recovery_check_archive" 2>/dev/null |
+        sha256sum 2>/dev/null | awk '{print $1}')
+    [ "$dtbo_recovery_check_actual" = "$dtbo_recovery_check_expected" ]
+}
+
+dtbo_write_stock_recovery() {
+    dtbo_recovery_image="$1"
+    dtbo_recovery_manifest="$2"
+    dtbo_recovery_archive="$3"
+    dtbo_recovery_tmp="$dtbo_recovery_archive.tmp.$$"
+
+    command -v gzip >/dev/null 2>&1 || return 1
+    dtbo_recovery_expected=$(dtbo_read_stock_manifest_hash "$dtbo_recovery_manifest") || return 1
+    gzip -9 -c "$dtbo_recovery_image" > "$dtbo_recovery_tmp" 2>/dev/null || {
+        rm -f "$dtbo_recovery_tmp"
+        return 1
+    }
+    dtbo_validate_stock_recovery "$dtbo_recovery_manifest" \
+        "$dtbo_recovery_tmp" || {
+        rm -f "$dtbo_recovery_tmp"
+        return 1
+    }
+    mv -f "$dtbo_recovery_tmp" "$dtbo_recovery_archive" || return 1
+    chmod 0444 "$dtbo_recovery_archive" 2>/dev/null
+}
+
+dtbo_recover_stock_backup() {
+    dtbo_recover_image="$1"
+    dtbo_recover_manifest="$2"
+    dtbo_recover_archive="$3"
+    dtbo_recover_partition_size="$4"
+    dtbo_recover_tool_dir="$5"
+    dtbo_recover_tmp="$dtbo_recover_image.recover.$$"
+
+    [ -f "$dtbo_recover_manifest" ] && [ -f "$dtbo_recover_archive" ] || return 1
+    dtbo_validate_stock_recovery "$dtbo_recover_manifest" \
+        "$dtbo_recover_archive" || return 1
+    gzip -dc "$dtbo_recover_archive" > "$dtbo_recover_tmp" 2>/dev/null || {
+        rm -f "$dtbo_recover_tmp"
+        return 1
+    }
+    if ! dtbo_validate_stock_hash "$dtbo_recover_tmp" "$dtbo_recover_manifest" ||
+       ! dtbo_verify_official_image "$dtbo_recover_tmp" "$dtbo_recover_partition_size" \
+           "$dtbo_recover_tool_dir"; then
+        rm -f "$dtbo_recover_tmp"
+        return 1
+    fi
+    mv -f "$dtbo_recover_tmp" "$dtbo_recover_image" || {
+        rm -f "$dtbo_recover_tmp"
+        return 1
+    }
+    chmod 0444 "$dtbo_recover_image" "$dtbo_recover_manifest" \
+        "$dtbo_recover_archive" 2>/dev/null
+    dtbo_msg "- 已从只读压缩副本恢复原厂 DTBO 备份"
+}
+
+dtbo_verify_official_image() {
+    dtbo_verify_image="$1"
+    dtbo_verify_partition_size="$2"
+    dtbo_verify_tool_dir="$3"
+    dtbo_verify_avbtool="$dtbo_verify_tool_dir/avbtool/avbtool"
+    dtbo_verify_openssl="$dtbo_verify_tool_dir/openssl"
+    dtbo_verify_dir="${TMPDIR:-/data/local/tmp}/murongchaopin-stock-verify.$$"
+
+    [ -f "$dtbo_verify_image" ] || return 1
+    dtbo_validate_stock_avb "$dtbo_verify_image" "$dtbo_verify_partition_size" || return 1
+    [ -x "$dtbo_verify_avbtool" ] && [ -x "$dtbo_verify_openssl" ] || {
+        dtbo_msg "! 缺少 AVB 完整性校验工具"
+        return 1
+    }
+    mkdir -p "$dtbo_verify_dir" 2>/dev/null || return 1
+    cp "$dtbo_verify_image" "$dtbo_verify_dir/dtbo.img" 2>/dev/null || {
+        rm -rf "$dtbo_verify_dir"
+        return 1
+    }
+    PATH="$dtbo_verify_tool_dir:$PATH" \
+    LD_LIBRARY_PATH="$dtbo_verify_tool_dir/avbtool:${LD_LIBRARY_PATH:-}" \
+        "$dtbo_verify_avbtool" verify_image --image "$dtbo_verify_dir/dtbo.img" \
+        >/dev/null 2>&1
+    dtbo_verify_result=$?
+    rm -rf "$dtbo_verify_dir"
+    [ "$dtbo_verify_result" -eq 0 ] || {
+        dtbo_msg "! DTBO 未通过 AVB 签名和 hash descriptor 一致性校验"
+        return 1
+    }
+    return 0
+}
+
+dtbo_validate_stock_backup() {
+    dtbo_backup_image="$1"
+    dtbo_backup_manifest="$2"
+    dtbo_backup_partition_size="$3"
+    dtbo_backup_tool_dir="$4"
+
+    [ -f "$dtbo_backup_image" ] && [ -f "$dtbo_backup_manifest" ] || {
+        dtbo_msg "! 缺少原厂 DTBO 备份或哈希清单"
+        return 1
+    }
+    dtbo_validate_stock_hash "$dtbo_backup_image" "$dtbo_backup_manifest" || {
+        dtbo_msg "! 原厂 DTBO 备份哈希与清单不一致"
+        return 1
+    }
+    dtbo_verify_official_image "$dtbo_backup_image" "$dtbo_backup_partition_size" \
+        "$dtbo_backup_tool_dir"
+}
+
 dtbo_extract_stock_vbmeta() {
     dtbo_stock_image="$1"
     dtbo_stock_vbmeta="$2"
@@ -312,6 +458,7 @@ dtbo_apply_stock_avb() {
         rm -rf "$dtbo_work"
         return 1
     }
+
     mv -f "$dtbo_output" "$dtbo_output_image" || {
         rm -rf "$dtbo_work"
         return 1
