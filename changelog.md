@@ -1,13 +1,15 @@
 # 更新日志
 ## v2.9
-1. 产品与发布方式统一为“慕容显示增强”：GitHub 只发布一个模块 ZIP。未授权用户直接使用免费能力；永久授权用户在同一 WebUI 内下载签名增强组件，不存在需要另行安装的 Premium 模块。
-2. WebUI 重构为与慕容调度一致的明亮玻璃主题和悬浮底栏，恢复整页应用列表、悬浮保存按钮和清晰的 DTBO / DRM-KO 流程；修复后端切换卡住、按钮辨识度、页面进入/返回透明停顿等问题。
-3. 内置慕容调度账号、20 元显示增强永久授权、支付/卡密绑定、设备授权、离线宽限、组件下载与更新状态；未授权基础功能不依赖服务器。
-4. Settings 刷新率、分辨率、应用独立刷新率，游戏助手、Scene 和视频动态插帧改为授权后按需下发；免费 Hook 只保留原厂 LTPS 修复、Oplus 服务模式解析和 KernelSU WebUI 桥接。
-5. 增加 RMX5200、PLK110、PJD110 的 DRM-KO 后端与自动分派；补齐 OnePlus 12 的节点删除、超频注入和原有电池解容参数。自定义时序、传输延迟和刷新率仍可由 WebUI 管理。
-6. 风驰调速器改为独立免费 KO，自动识别 ColorOS / Realme UI、SoC 与现有 DTBO 节点，兼容 HMBIRD_EXT 与 HMBIRD_OGKI 设备。
-7. 付费资源使用 Ed25519 manifest 签名、逐文件 SHA-256、设备/SoC/内核/后端门禁和原子更新；完整重启后生效，失败保留当前可用版本。
-8. 本次发布不调整已验收的 RMX5200 显示参数、LTPO 状态机、DTBO 节点、DPI、`mode.txt` 或 ADFR 当前状态。
+以下内容只统计相对 v2.8（提交 `ae7fc32`）的公开源码差异，不把测试结论或后续规划当作更新项。
+
+1. 模块元数据和发布物更名为“慕容显示增强”v2.9；更新地址改为唯一资产 `Murong.Display.Enhancement.zip`。免费与授权增强改为同一模块的两种状态，公开仓库不再发布第二个安装包。
+2. 新增显示后端抽象：安装阶段可选择 DTBO 或 DRM-KO；加入 `display_mode_manifest.txt`、后端探测/切换脚本，以及 RMX5200、PLK110、PJD110 的 DRM-KO 产物和对应运行时分派。PJD110 的 KO 配套 DTBO 路径在代码中保留容量与充电阈值处理。
+3. `process_dts` 改为由机型清单驱动，新增 RMX5200 原生 FHD/WQHD 节点保留或隔离、扩展节点去重和重排、HMBIRD-only、PJD110 KO-support 等受互斥条件约束的处理分支；RMX5200 的 ADFR dry-run 路径明确标记为不发送物理 DSI 命令。
+4. 新增独立免费 `hmbird.ko` 与加载脚本：只在 ColorOS/Realme UI 及受支持 SoC 上尝试使用动态 OF changeset，SM8850/SM8845 使用 `HMBIRD_EXT`，SM8750/SM8650/MT6991/MT6993 使用 `HMBIRD_OGKI`；不满足条件时保持 fail-closed。
+5. 新增开机生命周期脚本、ColorOS 配置挂载与 Settings bridge。公开 Hook 工程增加 API 102 入口、显示模式解析、分辨率投票/物理范围桥接、Oplus 服务与 KernelSU WebUI 交互代码；授权功能代码不进入公开 APK。
+6. 新增授权基础设施：公开包仅携带 Ed25519 公钥与验证器；WebUI 支持账号、卡密激活、租约刷新、可用内部组件查询和分块下载；模块端对组件执行签名、Manifest、设备/SoC/内核/后端、路径、大小和 SHA-256 校验，并以 staging/previous 目录原子切换。
+7. WebUI 重构为明亮玻璃主题与悬浮底栏，增加 DTBO/DRM-KO 状态、显示策略/ADFR 控制、刷新率风险提示、全局与应用独立分辨率/刷新率选择、视频插帧配置及授权状态页面；操作由对应后端命令处理。
+8. 公开打包和 CI 改为只组装一个模块 ZIP：重编译公开 DTS 工具，保留已审计的免费守护进程，显式剔除私有 LTPO/ADFR/MEMC 文件，并加入 DRM-KO、HMBIRD、低刷新率、WebUI、Web 工作区隔离和预测性返回等回归检查。
 
 ## v2.8
 1. WebUI 点击"应用更改"后新增**流程日志弹窗**：不再是一次性等待整条命令（原实现 10~30 秒无反馈，易误判卡死）。后端 `web_handler.sh` 拆分为 `pack_only`（打包）→ `merge_avb`（复用官方 VBMeta 合成签名）→ `flash_final`（写入分区+回读校验）三个阶段子命令。**后台执行 + 前端流式轮询**：点击立即弹出弹窗，打包/签名/刷入全流程在后台运行（setsid），前端每 500ms 增量读取日志逐行追加（不再阻塞 UI 线程、日志像 customize.sh 一样逐行滚动），任一步失败立即中止并标红，DTBO 分区不会被修改。"刷写 DTBO"同样拆分为 提取→解包→补丁→smart_add → 打包 → 签名 → 刷入 分步日志。

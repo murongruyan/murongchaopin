@@ -357,6 +357,7 @@ jobs:
           install -m 0755 build/bin/dts_tool "$STAGE_DIR/bin/dts_tool"
           install -m 0755 build/bin/pack_dtbo "$STAGE_DIR/bin/pack_dtbo"
           install -m 0755 build/bin/unpack_dtbo "$STAGE_DIR/bin/unpack_dtbo"
+          chmod 0755 "$STAGE_DIR/bin/rate_daemon"
           test -x "$STAGE_DIR/bin/rate_daemon"
 
           chmod 0755 \
