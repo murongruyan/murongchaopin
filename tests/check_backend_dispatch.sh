@@ -20,13 +20,11 @@ grep -q 'if \[ "\$INSTALL_BACKEND" = "dtbo" \]; then' "$CUSTOMIZE"
 grep -q '已选择 DRM-KO：高刷 timing 仅由 KO 注入' "$CUSTOMIZE"
 grep -q 'ui_print "第二次确认：请选择首次应用后端:" >&2' "$CUSTOMIZE"
 grep -q 'dtbo|drm) ;;' "$CUSTOMIZE"
-grep -q 'Read_volume_key_press' "$CUSTOMIZE"
-grep -q 'pressed=$(getevent -ql' "$CUSTOMIZE"
-grep -q 'value == "DOWN".*value == "00000001"' "$CUSTOMIZE"
-grep -q 'value == "UP".*value == "00000000"' "$CUSTOMIZE"
-grep -q 'sleep 0.35' "$CUSTOMIZE"
+grep -q 'Read_volume_key' "$CUSTOMIZE"
+grep -q 'getevent -qlc 1' "$CUSTOMIZE"
+grep -q 'sleep 1' "$CUSTOMIZE"
 grep -q '\*) echo cancel' "$CUSTOMIZE"
-if grep -q 'getevent -qlc 1\|timeout=10\|timeout 1 getevent\|未检测到选择，默认使用 DTBO\|未检测到后端选择，已取消安装' "$CUSTOMIZE"; then
+if grep -q 'Read_volume_key_press\|pressed=$(getevent -ql\|timeout=10\|timeout 1 getevent\|未检测到选择，默认使用 DTBO\|未检测到后端选择，已取消安装' "$CUSTOMIZE"; then
     echo "FAIL: install backend flow still has timeout/default behavior" >&2
     exit 1
 fi
@@ -39,7 +37,7 @@ if grep -q 'ui_print "第二次确认：请选择首次应用后端:"$' "$CUSTOM
 fi
 
 # The backend prompt must block on an explicit volume-key event rather than
-# using a one-shot timeout that can silently choose a write path.
+# using a timeout that can silently choose a write path.
 if grep -q 'timeout 1 getevent' "$CUSTOMIZE"; then
     echo "FAIL: backend prompt still uses a timed getevent poll" >&2
     exit 1

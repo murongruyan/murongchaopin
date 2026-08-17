@@ -7,41 +7,23 @@ Outputs() {
   sleep 0.07
 }
 
-# 音量键检测：只把 DOWN 当作选择，并等待同一按键的 UP 后再返回。
-# 这样一次完整的按下/抬起不会被后一个提示重复消费。
-Read_volume_key_press() {
-  local pressed
-  # Keep one getevent fd open for the full press/release pair. Reopening it
-  # after DOWN can miss the UP event and leave the installer waiting forever.
-  pressed=$(getevent -ql 2>/dev/null | awk '
-    /EV_KEY/ {
-      key = ""
-      if (index($0, "KEY_VOLUMEUP")) {
-        key = "KEY_VOLUMEUP"
-      } else if (index($0, "KEY_VOLUMEDOWN")) {
-        key = "KEY_VOLUMEDOWN"
-      }
-      if (key == "") next
-
-      value = $NF
-      if (pressed == "" && (value == "DOWN" || value == "00000001")) {
-        pressed = key
-        next
-      }
-      if (pressed == key && (value == "UP" || value == "00000000")) {
-        print pressed
-        exit
-      }
-    }
-  ')
-
-  # 给下一次独立选择留出防抖间隔，但不设置整体选择超时。
-  sleep 0.35
-  echo "$pressed"
+# 音量键检测：沿用原来的单事件读取，不设超时或默认值。
+Read_volume_key() {
+  local choose
+  while :; do
+    choose=$(getevent -qlc 1 2>/dev/null | awk -F' ' \
+      '/KEY_VOLUME(UP|DOWN)/ {print $3; exit}')
+    case "$choose" in
+      KEY_VOLUMEUP|KEY_VOLUMEDOWN)
+        echo "$choose"
+        return 0
+        ;;
+    esac
+  done
 }
 
 Volume_key_monitoring() {
-  case "$(Read_volume_key_press)" in
+  case "$(Read_volume_key)" in
     KEY_VOLUMEUP) echo 0 ;;
     KEY_VOLUMEDOWN) echo 1 ;;
     *) echo 1 ;;
@@ -64,7 +46,7 @@ Install_backend_selection() {
   ui_print "第二次确认：请选择首次应用后端:" >&2
   ui_print "- 按 音量+ 选择 DTBO（本次安装会生成、合成并写入修改后的 DTBO）" >&2
   ui_print "- 按 音量- 选择 DRM-KO（高刷由 KO 注入；PJD110 仅写入配套解容 DTBO）" >&2
-  case "$(Read_volume_key_press)" in
+  case "$(Read_volume_key)" in
     KEY_VOLUMEUP) echo dtbo ;;
     KEY_VOLUMEDOWN) echo drm ;;
     *) echo cancel ;;
@@ -126,6 +108,8 @@ if [ "$choose_key" = "1" ]; then
 fi
 
 ui_print "确认继续安装..."
+# 第一次按键只负责确认原厂基线。等待抬起事件结束后，再进入第二次选择。
+sleep 1
 
 # 2. 检测当前 Slot
 SLOT=$(getprop ro.boot.slot_suffix)
