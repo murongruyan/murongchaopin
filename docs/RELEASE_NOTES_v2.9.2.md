@@ -7,7 +7,8 @@
 - 回退复杂的按下/抬起状态机，恢复原有单事件音量键读取方式。
 - 第一次音量+只确认官方原厂 DTBO；确认后固定等待 1 秒，再显示第二次 DTBO/DRM-KO 后端选择。
 - 两次选择都不设置超时，也不存在默认 DTBO 分支；只有第二次明确按音量+才会修改和写入 DTBO。
+- 安装包使用版本化文件名，防止浏览器把同一 Release URL 的旧缓存与新资产续传分段混合。
 
 ## 安装说明
 
-在 KernelSU、Magisk 或 APatch 中刷入 Release 附带的 `Murong.Display.Enhancement.zip`，按屏幕提示完成两次音量键操作，然后完整重启设备。
+在 KernelSU、Magisk 或 APatch 中刷入 Release 附带的 `Murong.Display.Enhancement-v2.9.2.zip`，按屏幕提示完成两次音量键操作，然后完整重启设备。

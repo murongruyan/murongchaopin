@@ -33,7 +33,7 @@ jobs:
       RELEASE_NAME: 慕容显示增强
       NDK_PACKAGE: "30.0.14904198"
       API_LEVEL: "29"
-      ZIP_NAME: Murong.Display.Enhancement.zip
+      ZIP_NAME: Murong.Display.Enhancement-v2.9.2.zip
 
     steps:
       - name: Checkout
