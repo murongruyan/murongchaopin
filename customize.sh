@@ -7,6 +7,18 @@ Outputs() {
   sleep 0.07
 }
 
+# KernelSU extracts ordinary files as 0644 before sourcing customize.sh.
+# Restore only the tools required by both install backends before either one
+# performs DTBO work.
+Prepare_install_tools() {
+  for relative_path in \
+    avbtool/avbtool openssl dtc mkdtimg unpack_dtbo process_dts pack_dtbo; do
+    install_tool="$BIN_DIR/$relative_path"
+    [ -f "$install_tool" ] || return 1
+    chmod 0755 "$install_tool" || return 1
+  done
+}
+
 # 音量键检测：沿用原来的单事件读取，不设超时或默认值。
 Read_volume_key() {
   local choose
@@ -182,7 +194,7 @@ esac
 mkdir -p "$IMG_DIR"
 mkdir -p "$WORK_DIR"
 mkdir -p "$BIN_DIR/dtbo_dts"
-chmod +x "$BIN_DIR/avbtool/avbtool" "$BIN_DIR/openssl" 2>/dev/null
+Prepare_install_tools || abort "显示后端工具缺失或无法设置执行权限"
 
 # 4. 原厂备份只创建一次；更新安装时必须保留已验证的原厂基线。
 # 当前分区可能已经被测试修改，不能无条件写回 img/dtbo.img。
@@ -258,9 +270,6 @@ ui_print "安装应用后端: $INSTALL_BACKEND"
 if [ "$INSTALL_BACKEND" = "dtbo" ]; then
   # 切换到 bin 目录以确保工具能找到相对路径资源
   cd "$BIN_DIR" || abort "无法进入 bin 目录"
-
-# 赋予执行权限
-chmod +x *
 
 # (1) 解包
 ui_print "正在解包 DTBO..."
