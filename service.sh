@@ -6,6 +6,7 @@ COLOROS_CONFIG_HELPER="$MODDIR/scripts/coloros_config.sh"
 SETTINGS_BRIDGE_HELPER="$MODDIR/scripts/display_settings_bridge.sh"
 GATE_HELPER="$MODDIR/scripts/display_license_gate.sh"
 PREMIUM_SERVICE="$MODDIR/premium/scripts/premium_service.sh"
+LTPS_VOTE_HELPER="$MODDIR/scripts/surfaceflinger_ltps_vote_patch.sh"
 DISPLAY_HOOK_PACKAGE="com.murongchaopin.displayhook"
 
 # The free and premium daemons share OTI pause ownership through this private
@@ -25,6 +26,13 @@ fi
 until [ "$(getprop sys.boot_completed)" = "1" ]; do
     sleep 1
 done
+
+# Clearing the pending marker only after Android and the patched
+# SurfaceFlinger both survived this boot gives the next boot an automatic
+# fallback if the native hook ever becomes incompatible.
+if [ -f "$LTPS_VOTE_HELPER" ]; then
+    sh "$LTPS_VOTE_HELPER" mark-boot-success >/dev/null 2>&1 || true
+fi
 
 # Paid package runtime (ADFR lock, LTPO activity observer, MEMC/SF boot
 # success markers, Pixelworks overlay and the premium Hook). Dispatched only

@@ -65,6 +65,9 @@ restore_runtime_state() {
   # Free VRR + refresh-rate overlay (MEMC overlay now lives in the paid package).
   [ ! -f "$MODPATH/scripts/coloros_config.sh" ] ||
     sh "$MODPATH/scripts/coloros_config.sh" remove >/dev/null 2>&1 || true
+  [ ! -f "$MODPATH/scripts/surfaceflinger_ltps_vote_patch.sh" ] ||
+    sh "$MODPATH/scripts/surfaceflinger_ltps_vote_patch.sh" restore \
+      >/dev/null 2>&1 || true
 
   # Paid helpers live under premium/. Restore each only while the paid package
   # is still present; a removed premium/ is a no-op.

@@ -6,6 +6,7 @@ HMBIRD_HELPER="$MODDIR/scripts/hmbird_backend.sh"
 COLOROS_CONFIG_HELPER="$MODDIR/scripts/coloros_config.sh"
 GATE_HELPER="$MODDIR/scripts/display_license_gate.sh"
 PREMIUM_POST_FS="$MODDIR/premium/scripts/premium_post_fs_data.sh"
+LTPS_VOTE_HELPER="$MODDIR/scripts/surfaceflinger_ltps_vote_patch.sh"
 
 # Write the premium authorization bridge (frozen contract 16.4). Root writes
 # this after lease verification; the paid Hook and paid daemon read it as their
@@ -41,6 +42,20 @@ if [ -f "$PREMIUM_POST_FS" ]; then
     if [ "$REMOVE_PREMIUM" != "1" ]; then
         sh "$PREMIUM_POST_FS" >/dev/null 2>&1 || true
     fi
+fi
+
+# RMX5200's stock LTPS framework can resolve QHD60 correctly, but a stale
+# object-animation entry in SurfaceFlinger's vendor vote map can keep the
+# overclocked 170Hz mode selected. For the free stock_ltps policy only, filter
+# insertion of that exact internal vote name before SurfaceFlinger starts. It
+# also bypasses the stale AP-scale table that otherwise remaps OTI's correct
+# QHD60 pointer to 170Hz. This preserves each vote's selected mode instead of
+# locking 60, so touch can still select the user ceiling. Vote removal and
+# every other FRTC/OTI request retain the vendor path. The helper builds from
+# this OTA's binary and fails closed on a complete instruction/context
+# mismatch; other display policies never enter this path.
+if [ -f "$LTPS_VOTE_HELPER" ]; then
+    sh "$LTPS_VOTE_HELPER" apply >/dev/null 2>&1 || true
 fi
 
 # /my_product is EROFS and is not replaced by a normal module directory.

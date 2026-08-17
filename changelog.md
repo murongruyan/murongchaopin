@@ -1,4 +1,9 @@
 # 更新日志
+## v2.9.5
+1. 修复 RMX5200 原厂 LTPS 静止时错误停在 QHD170：SurfaceFlinger 现在精确过滤内部 `object-animation` 新增票，并跳过 AP-scale 旧配对表对已选 modePtr 的二次改写。
+2. 修复方案不锁定 60Hz，也不硬编码刷新率或 mode ID。`QHD+ 120` 真机验证为静止 QHD60、触摸后 0.25 秒内回到 QHD120、持续滑动期间保持 120、停止后自动回到 60。
+3. 补丁仅对 RMX5200 的免费 `stock_ltps` 策略生效；其他机型、付费自制 LTPO 和完美禁用 ADFR 策略均不进入该路径。当前 OTA 指令或上下文不匹配时拒绝挂载。
+
 ## v2.9.4
 1. 修复 KernelSU 安装 DRM-KO 后端时报 `HMBIRD DTBO tooling is incomplete`：KernelSU 解压阶段把 native 工具设为 `0644`，现在会在任何后端执行前显式恢复必需工具的 `0755` 权限。
 2. 移除只在 DTBO 分支内执行的宽泛 `chmod +x *`，DTBO 与 DRM-KO 统一使用同一份明确工具清单和失败检查。
