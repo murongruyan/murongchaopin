@@ -16,6 +16,7 @@ import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.Map;
 import java.util.WeakHashMap;
+import java.util.function.Consumer;
 
 /** Bridges Android predictive-back progress into KernelSU module WebUIs. */
 final class KernelSuWebUiHooks {
@@ -86,11 +87,26 @@ final class KernelSuWebUiHooks {
         try {
             OnBackAnimationCallback callback = new OnBackAnimationCallback() {
                 private WebView webView;
+                private float lastProgress;
+                private boolean rootExit;
+                private long gestureSequence;
 
                 @Override
                 public void onBackStarted(BackEvent event) {
+                    gestureSequence++;
                     webView = findWebView(activity.getWindow().getDecorView());
+                    lastProgress = event.getProgress();
+                    rootExit = webView == null;
                     dispatch(webView, "start", event.getProgress(), event.getSwipeEdge());
+                    queryCanPop(webView, canPop -> {
+                        if (webView != this.webView || activity.isFinishing()) {
+                            return;
+                        }
+                        rootExit = !canPop;
+                        if (rootExit) {
+                            setActivityTranslucent(module, activity, true);
+                        }
+                    });
                 }
 
                 @Override
@@ -98,27 +114,54 @@ final class KernelSuWebUiHooks {
                     if (webView == null) {
                         webView = findWebView(activity.getWindow().getDecorView());
                     }
+                    lastProgress = event.getProgress();
                     dispatch(webView, "progress", event.getProgress(), event.getSwipeEdge());
                 }
 
                 @Override
                 public void onBackCancelled() {
+                    gestureSequence++;
+                    long sequence = gestureSequence;
                     dispatch(webView, "cancel", 0f, BackEvent.EDGE_NONE);
+                    if (rootExit) {
+                        activity.getWindow().getDecorView().postDelayed(() -> {
+                            if (gestureSequence == sequence && !activity.isFinishing()) {
+                                setActivityTranslucent(module, activity, false);
+                            }
+                        }, 260L);
+                    }
                     webView = null;
+                    lastProgress = 0f;
+                    rootExit = false;
                 }
 
                 @Override
                 public void onBackInvoked() {
                     WebView target = webView != null
                             ? webView : findWebView(activity.getWindow().getDecorView());
-                    dispatch(target, "invoke", 1f, BackEvent.EDGE_NONE);
+                    float committedProgress = lastProgress;
+                    long sequence = ++gestureSequence;
+                    dispatch(target, "commit", committedProgress, BackEvent.EDGE_NONE);
                     webView = null;
-                    if (target != null && target.canGoBack()) {
-                        target.goBack();
-                    } else {
-                        activity.finish();
-                        activity.overridePendingTransition(0, 0);
-                    }
+                    lastProgress = 0f;
+                    rootExit = false;
+                    queryCanPop(target, canPop -> {
+                        boolean finishingRoot = !canPop;
+                        if (finishingRoot) {
+                            setActivityTranslucent(module, activity, true);
+                        }
+                        long delayMillis = resolveCommitDurationMillis(committedProgress);
+                        activity.getWindow().getDecorView().postDelayed(() -> {
+                            if (gestureSequence != sequence || activity.isFinishing()) {
+                                return;
+                            }
+                            if (!finishingRoot && target != null) {
+                                target.goBack();
+                            } else {
+                                activity.finish();
+                            }
+                        }, delayMillis);
+                    });
                 }
             };
             activity.getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
@@ -144,33 +187,64 @@ final class KernelSuWebUiHooks {
     }
 
     private static void configureWindow(DisplaySettingsHook module, Activity activity) {
+        applyOpaqueBackground(activity);
+        if (!Boolean.TRUE.equals(OPAQUE_ACTIVITIES.get(activity))) {
+            setActivityTranslucent(module, activity, false);
+        }
+    }
+
+    private static void applyOpaqueBackground(Activity activity) {
         boolean dark = (activity.getResources().getConfiguration().uiMode
                 & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
         int background = Color.parseColor(dark ? "#171218" : "#FFF8FC");
         activity.getWindow().setBackgroundDrawable(new ColorDrawable(background));
-        activity.getWindow().setWindowAnimations(0);
         activity.getWindow().getDecorView().setBackgroundColor(background);
-        activity.overridePendingTransition(0, 0);
         WebView webView = findWebView(activity.getWindow().getDecorView());
         if (webView != null) {
             webView.setBackgroundColor(background);
         }
-        if (!OPAQUE_ACTIVITIES.containsKey(activity)) {
-            try {
-                Method setTranslucent = Activity.class.getMethod("setTranslucent", boolean.class);
-                Object result = setTranslucent.invoke(activity, false);
-                if (Boolean.FALSE.equals(result)) {
+    }
+
+    private static void setActivityTranslucent(
+            DisplaySettingsHook module, Activity activity, boolean translucent) {
+        try {
+            Method setTranslucent = Activity.class.getMethod("setTranslucent", boolean.class);
+            Object result = setTranslucent.invoke(activity, translucent);
+            if (!translucent && Boolean.FALSE.equals(result)) {
+                try {
                     Method convert = Activity.class.getDeclaredMethod("convertFromTranslucent");
                     convert.setAccessible(true);
                     convert.invoke(activity);
+                } catch (Throwable fallbackError) {
+                    module.error("KernelSU WebUI opaque fallback conversion failed", fallbackError);
                 }
-                OPAQUE_ACTIVITIES.put(activity, Boolean.TRUE);
-                module.info("KernelSU WebUI activity converted to opaque");
-            } catch (Throwable error) {
-                OPAQUE_ACTIVITIES.put(activity, Boolean.FALSE);
-                module.error("KernelSU WebUI opaque conversion failed", error);
             }
+            OPAQUE_ACTIVITIES.put(activity, !translucent);
+            if (translucent) {
+                activity.getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+                activity.getWindow().getDecorView().setBackgroundColor(Color.TRANSPARENT);
+                WebView webView = findWebView(activity.getWindow().getDecorView());
+                if (webView != null) {
+                    webView.setBackgroundColor(Color.TRANSPARENT);
+                }
+            } else {
+                applyOpaqueBackground(activity);
+            }
+            module.info("KernelSU WebUI activity translucent=" + translucent
+                    + " result=" + String.valueOf(result));
+        } catch (Throwable error) {
+            OPAQUE_ACTIVITIES.put(activity, !translucent);
+            module.error("KernelSU WebUI translucency conversion failed", error);
         }
+    }
+
+    private static long resolveCommitDurationMillis(float progress) {
+        float bounded = Math.max(0f, Math.min(1f, progress));
+        if (bounded >= 1f) {
+            return 0L;
+        }
+        long scaled = Math.round(180f * (1f - bounded));
+        return Math.max(72L, Math.min(180L, scaled));
     }
 
     private static WebView findWebView(View view) {
@@ -198,5 +272,15 @@ final class KernelSuWebUiHooks {
         String script = "window.__murongPredictiveBack&&window.__murongPredictiveBack('"
                 + type + "'," + Float.toString(bounded) + "," + edge + ")";
         webView.evaluateJavascript(script, null);
+    }
+
+    private static void queryCanPop(WebView webView, Consumer<Boolean> result) {
+        if (webView == null) {
+            result.accept(false);
+            return;
+        }
+        webView.evaluateJavascript(
+                "(window.__murongPredictiveBackCanPop&&window.__murongPredictiveBackCanPop())===true",
+                value -> result.accept("true".equals(value)));
     }
 }

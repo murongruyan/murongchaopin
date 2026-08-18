@@ -37,14 +37,29 @@ if not defined FOUND_NDK_ROOT (
 set "NDK_ROOT=%FOUND_NDK_ROOT%"
 set "CLANG=%NDK_ROOT%\toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe"
 
-echo Compiling rate_daemon...
+echo Compiling rate_daemon (free core build)...
+
+"%CLANG%" ^
+    --target=aarch64-linux-android30 ^
+    -O3 ^
+    -static ^
+    -DMURONG_FREE_BUILD ^
+    src\rate_daemon.c ^
+    -o bin\rate_daemon
+if errorlevel 1 goto build_failed
+
+if not exist "packaging\paid-payload\bin" mkdir "packaging\paid-payload\bin"
+if errorlevel 1 goto build_failed
+
+echo Compiling rate_daemon_premium (full build)...
 
 "%CLANG%" ^
     --target=aarch64-linux-android30 ^
     -O3 ^
     -static ^
     src\rate_daemon.c ^
-    -o bin\rate_daemon
+    -o packaging\paid-payload\bin\rate_daemon_premium
+if errorlevel 1 goto build_failed
 
 echo Compiling dts_tool...
 
@@ -54,9 +69,11 @@ echo Compiling dts_tool...
     -static ^
     src\dts_tool.c ^
     -o bin\dts_tool
+if errorlevel 1 goto build_failed
 
-if %ERRORLEVEL% EQU 0 (
-    echo Build successful! Output: bin\rate_daemon, bin\dts_tool
-) else (
-    echo Build failed!
-)
+echo Build successful! Output: bin\rate_daemon, packaging\paid-payload\bin\rate_daemon_premium, bin\dts_tool
+exit /b 0
+
+:build_failed
+echo Build failed!
+exit /b 1

@@ -279,18 +279,67 @@ body {
 
 html.predictive-back-active,
 html.predictive-back-active body {
-    overflow-x: hidden;
+    overflow: hidden;
+    overscroll-behavior: none;
+}
+
+html.predictive-back-root-active,
+html.predictive-back-root-active body {
+    background: transparent !important;
+}
+
+.page.predictive-back-layer {
+    position: fixed;
+    top: var(--predictive-header-bottom, 76px);
+    right: max(14px, calc((100vw - 720px) / 2 + 14px));
+    left: max(14px, calc((100vw - 720px) / 2 + 14px));
+    display: block !important;
+    margin: 0;
+    opacity: var(--predictive-back-alpha, 1);
+    transform: translate3d(
+            var(--predictive-back-x, 0),
+            calc(-1 * var(--predictive-scroll-y, 0px)),
+            0
+        ) scale(var(--predictive-back-scale, 1));
+    transform-origin: center top;
+    pointer-events: none;
+    will-change: transform, opacity;
+    transition: none;
+}
+
+.page.predictive-back-to {
+    z-index: 870;
+}
+
+.page.predictive-back-from {
+    z-index: 880;
 }
 
 .predictive-back-surface {
-    transform: translate3d(var(--predictive-back-x, 0), 0, 0) !important;
+    opacity: var(--predictive-back-alpha, 1);
+    transform: translate3d(var(--predictive-back-x, 0), 0, 0)
+        scale(var(--predictive-back-scale, 1)) !important;
     transform-origin: center center;
-    will-change: transform;
+    border-radius: calc(28px * var(--predictive-back-progress, 0));
+    box-shadow: 0 12px 44px rgba(55, 27, 45, calc(0.24 * var(--predictive-back-progress, 0)));
+    overflow: hidden;
+    will-change: transform, opacity, border-radius, box-shadow;
     transition: none !important;
 }
 
-.predictive-back-surface.predictive-back-cancel {
-    transition: transform 0.12s ease-out !important;
+.predictive-back-root {
+    position: relative;
+    z-index: 1;
+    min-height: 100vh;
+}
+
+.page.predictive-back-layer.predictive-back-settle,
+.predictive-back-surface.predictive-back-settle {
+    transition:
+        transform var(--predictive-settle-duration, 180ms) var(--predictive-settle-easing, linear),
+        opacity var(--predictive-settle-duration, 180ms) var(--predictive-settle-easing, linear),
+        border-radius var(--predictive-settle-duration, 180ms) var(--predictive-settle-easing, linear),
+        box-shadow var(--predictive-settle-duration, 180ms) var(--predictive-settle-easing, linear) !important;
 }
 
 .group {
@@ -1646,6 +1695,7 @@ textarea.form-input {
 
 /* ---------- 悬浮玻璃底栏 ---------- */
 .bottom-nav {
+    --tab-indicator-index: 0;
     position: fixed;
     left: 50%;
     bottom: calc(10px + env(safe-area-inset-bottom));
@@ -1662,6 +1712,33 @@ textarea.form-input {
     backdrop-filter: blur(22px) saturate(175%);
     z-index: 1000;
     overflow: hidden;
+}
+
+.bottom-nav::before {
+    content: "";
+    position: absolute;
+    top: 6px;
+    bottom: 6px;
+    left: 6px;
+    width: calc((100% - 12px) / 5);
+    border: 1px solid rgba(255, 255, 255, 0.46);
+    border-radius: 34px;
+    background: rgba(231, 71, 145, 0.28);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.34);
+    transform: translate3d(calc(var(--tab-indicator-index) * 100%), 0, 0);
+    transition: transform 320ms cubic-bezier(0.2, 0.8, 0.2, 1);
+    will-change: transform;
+    pointer-events: none;
+}
+
+.bottom-nav.indicator-immediate::before,
+.bottom-nav.predictive-back-nav::before {
+    transition: none;
+}
+
+.bottom-nav.predictive-back-settle::before {
+    transition: transform var(--predictive-settle-duration, 180ms)
+        var(--predictive-settle-easing, linear);
 }
 
 .tab-btn {
@@ -1683,6 +1760,7 @@ textarea.form-input {
     transition: color 0.2s, transform 0.2s;
     outline: none;
     -webkit-tap-highlight-color: transparent;
+    z-index: 1;
 }
 
 .tab-btn:focus-visible {
@@ -1704,19 +1782,21 @@ textarea.form-input {
     transform: scale(1.025);
 }
 
-.tab-btn.active::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    z-index: -1;
-    background: rgba(231, 71, 145, 0.28);
-    border: 1px solid rgba(255, 255, 255, 0.46);
-    border-radius: 34px;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.34);
-}
-
 .tab-btn {
     position: relative;
+}
+
+.bottom-nav.predictive-back-nav .tab-btn.predictive-back-tab {
+    color: var(--text);
+    opacity: calc(0.62 + 0.38 * var(--predictive-tab-weight, 0));
+    transform: scale(calc(1 + 0.025 * var(--predictive-tab-weight, 0)));
+    transition: none;
+}
+
+.bottom-nav.predictive-back-settle .tab-btn.predictive-back-tab {
+    transition:
+        opacity var(--predictive-settle-duration, 180ms) var(--predictive-settle-easing, linear),
+        transform var(--predictive-settle-duration, 180ms) var(--predictive-settle-easing, linear);
 }
 
 .tab-btn.active .tab-label {

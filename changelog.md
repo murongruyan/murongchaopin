@@ -1,4 +1,13 @@
 # 更新日志
+
+## 2026-08-18
+
+- 风驰改为持久 DTBO-only：安装阶段写入 HMBIRD 节点，开机不再加载
+  `hmbird.ko` 或执行 live-OF changeset。
+- 删除 `bin/hmbird.ko`，并移除 `post-fs-data.sh` 的风驰 KO 调用；旧的
+  `hmbird_backend.sh apply` 入口现在只记录 `disabled:dtbo_only`。
+- 风驰节点改由独立 DTS 结构补丁器写入，不再依赖 RMX5200 识别、
+  `ro.boot.prjname`、DTBO `project-id` 或显示刷新率清单；显示超频逻辑保持独立。
 ## v2.9.6
 1. 免费底座更新安装时会迁移既有账号、签名租约和已安装付费组件；检测到有效付费授权后，自动查询并续装服务器上 `version_code` 最高的兼容付费组件，无需重新登录或输入卡密。
 2. 自动续装沿用完整的整包 SHA-256、Ed25519 Manifest 签名、设备/SoC/内核/后端、目标路径和逐文件哈希校验。网络、查询、下载或校验失败只跳过续装，免费模块安装与现有付费组件均不受影响。

@@ -11,8 +11,8 @@ android {
         applicationId = "com.murongchaopin.displayhook"
         minSdk = 29
         targetSdk = 37
-        versionCode = 29
-        versionName = "2.9-api102"
+        versionCode = 68
+        versionName = "68.0-api102-predictive-back-history"
     }
 
     buildFeatures {

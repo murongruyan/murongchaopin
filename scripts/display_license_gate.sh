@@ -37,6 +37,7 @@ GATE_PACKAGE_FILE="$GATE_AUTH_DIR/package.json"
 GATE_STATE_FILE="$GATE_AUTH_DIR/state.json"
 GATE_DOWNLOAD_FILE="$GATE_AUTH_DIR/package.download"
 GATE_DOWNLOAD_META="$GATE_AUTH_DIR/package.download.meta"
+GATE_BACKEND_OVERRIDE_FILE="$GATE_AUTH_DIR/backend-compat.override"
 GATE_VERIFY_BIN="$GATE_MOD_PATH/bin/verify_lease_sig"
 GATE_PREMIUM_DIR="$GATE_MOD_PATH/premium"
 GATE_MAX_PACKAGE_BYTES=536870912
@@ -75,10 +76,50 @@ gate_pkg_soc_supported() {
 gate_list_contains() {
     # $1 = manifest.json, $2 = field name, $3 = value -> 0 when value is an
     # exact entry of the JSON string array
-    for _entry in $(grep -o "\"$2\"[^]]*]" "$1" 2>/dev/null | tr -d '"[],'); do
+    # Keep commas as separators. Removing them before word-splitting turns
+    # ["drm","dtbo"] into one token and incorrectly rejects the second item.
+    for _entry in $(grep -o "\"$2\"[^]]*]" "$1" 2>/dev/null | sed 's/,/ /g' | tr -d '"[]'); do
         [ "$_entry" = "$3" ] && return 0
     done
     return 1
+}
+
+# During the 1.0.3 rollout the signed manifest still says drm-only while the
+# server release matrix is being corrected to include dtbo. Keep this bridge
+# narrow: it is written only after the authenticated download-token response,
+# and it is consumed only when release id and package SHA match exactly.
+gate_backend_override_clear() {
+    rm -f "$GATE_BACKEND_OVERRIDE_FILE"
+}
+
+gate_backend_override_write() {
+    _override_release="$1"
+    _override_sha=$(printf '%s' "$2" | tr 'A-F' 'a-f')
+    _override_backend="$3"
+    case "$_override_release" in ''|*[!0-9]*) return 1 ;; esac
+    case "$_override_sha" in ''|*[!0-9a-f]*) return 1 ;; esac
+    [ "${#_override_sha}" -eq 64 ] || return 1
+    [ "$_override_backend" = dtbo ] || return 1
+    _override_tmp="$GATE_BACKEND_OVERRIDE_FILE.tmp.$$"
+    printf 'release_id=%s\nsha256=%s\nbackend=%s\n' \
+        "$_override_release" "$_override_sha" "$_override_backend" > "$_override_tmp" || {
+        rm -f "$_override_tmp"
+        return 1
+    }
+    chmod 600 "$_override_tmp" 2>/dev/null
+    mv -f "$_override_tmp" "$GATE_BACKEND_OVERRIDE_FILE" || {
+        rm -f "$_override_tmp"
+        return 1
+    }
+    return 0
+}
+
+gate_backend_override_matches() {
+    _override_release=$(sed -n 's/^release_id=//p' "$GATE_BACKEND_OVERRIDE_FILE" 2>/dev/null | head -n 1)
+    _override_sha=$(sed -n 's/^sha256=//p' "$GATE_BACKEND_OVERRIDE_FILE" 2>/dev/null | head -n 1 | tr 'A-F' 'a-f')
+    _override_backend=$(sed -n 's/^backend=//p' "$GATE_BACKEND_OVERRIDE_FILE" 2>/dev/null | head -n 1)
+    [ "$_override_release" = "$1" ] && [ "$_override_sha" = "$(printf '%s' "$2" | tr 'A-F' 'a-f')" ] && \
+        [ "$_override_backend" = "$3" ]
 }
 
 gate_b64url_pad() {
@@ -166,6 +207,44 @@ gate_usb_prop() {
         _id=$(sed -n '1{s/\r$//;p;q;}' "$GATE_DEVICE_FILE" 2>/dev/null)
     fi
     printf '%s' "$_id" | tr -d '[:space:]'
+}
+
+# Keep the display authorization identity compatible with the normal card-key
+# client: device_id and sn are the same stable hardware identifier, while
+# imei1/imei2 are additional fields shown to the administrator.
+gate_device_sn() {
+    _sn=""
+    for _p in ro.serialno ro.boot.serialno; do
+        _v=$(getprop "$_p" 2>/dev/null)
+        case "$_v" in ''|unknown|Unknown|UNKNOWN|null|0|0x00000000) ;; *) _sn="$_v"; break ;; esac
+    done
+    if [ -z "$_sn" ] && [ -r /sys/devices/soc0/serial_number ]; then
+        _v=$(sed -n '1{s/\r$//;p;q;}' /sys/devices/soc0/serial_number 2>/dev/null)
+        case "$_v" in ''|unknown|Unknown|UNKNOWN|null|0|0x00000000) ;; *) _sn="$_v" ;; esac
+    fi
+    if [ -z "$_sn" ] && [ -r /proc/cpuinfo ]; then
+        _sn=$(grep -i '^Serial' /proc/cpuinfo 2>/dev/null | head -n 1 | sed 's/^[Ss]erial[[:space:]]*:[[:space:]]*//' | tr -d '[:space:]')
+    fi
+    printf '%s\n' "$_sn" | tr -d '[:space:]'
+}
+
+gate_device_imei_values() {
+    _raw=""
+    for _p in persist.radio.imei persist.vendor.radio.imei gsm.imei vendor.gsm.imei persist.radio.imei1 persist.vendor.radio.imei1; do
+        _v=$(getprop "$_p" 2>/dev/null)
+        _v=$(printf '%s' "$_v" | tr ';' ',' | sed 's/[^0-9,]//g')
+        case "$_v" in *[0-9]*) _raw="$_v"; break ;; esac
+    done
+    printf '%s\n' "$_raw"
+}
+
+gate_device_imei1() {
+    gate_device_imei_values | cut -d, -f1 | tr -cd '0-9'
+}
+
+gate_device_imei2() {
+    _value=$(gate_device_imei_values | cut -d, -f2 | tr -cd '0-9')
+    printf '%s\n' "$_value"
 }
 
 gate_device_id() {
@@ -408,7 +487,16 @@ gate_state_print() {
 
 gate_device_info_print() {
     gate_init
+    _device_id=$(gate_device_id)
+    _sn=$(gate_device_sn)
+    [ -n "$_sn" ] || _sn="$_device_id"
+    _imei1=$(gate_device_imei1)
+    _imei2=$(gate_device_imei2)
     _hash=$(gate_device_id_hash)
+    echo "device_id=${_device_id:-}"
+    echo "sn=${_sn:-}"
+    echo "imei1=${_imei1:-}"
+    echo "imei2=${_imei2:-}"
     echo "device_id_hash=${_hash:-}"
     echo "device_model=$(getprop ro.product.vendor.model 2>/dev/null)"
     echo "soc_model=$(getprop ro.soc.model 2>/dev/null)"
@@ -427,8 +515,17 @@ gate_state_write() {
     else
         _body=""
     fi
+    # Older builds could leave a leading comma after updating an empty or
+    # partially-written state object. Normalize separators before and after
+    # replacing a key so auth_state always receives valid JSON.
+    _body=$(printf '%s' "$_body" | sed 's/^,*//; s/,*$//')
     _body=$(printf '%s' "$_body" | sed "s/,\{0,1\}\"$1\":[^,]*//")
-    _body="${_body:+$_body,}\"$1\":\"$2\""
+    _body=$(printf '%s' "$_body" | sed 's/^,*//; s/,*$//')
+    if [ -n "$_body" ]; then
+        _body="$_body,\"$1\":\"$2\""
+    else
+        _body="\"$1\":\"$2\""
+    fi
     printf '{%s}\n' "$_body" > "$_tmp" || return 1
     mv -f "$_tmp" "$GATE_STATE_FILE" || return 1
     chmod 600 "$GATE_STATE_FILE" 2>/dev/null
@@ -581,6 +678,7 @@ gate_package_write() {
 gate_package_abort() {
     gate_init
     rm -f "$GATE_DOWNLOAD_FILE" "$GATE_DOWNLOAD_META"
+    gate_backend_override_clear
     echo "Success: download staging cleared"
     return 0
 }
@@ -695,9 +793,13 @@ gate_package_commit() {
         rm -rf "$_staging"; echo "Error: kernel not supported"; return 1
     }
     [ -n "$_backend" ] || _backend=dtbo
-    gate_list_contains "$_staging/manifest.json" supported_backends "$_backend" || {
-        rm -rf "$_staging"; echo "Error: display backend not supported"; return 1
-    }
+    if ! gate_list_contains "$_staging/manifest.json" supported_backends "$_backend"; then
+        if [ "$_backend" = dtbo ] && gate_backend_override_matches "$_release" "$_sha" "$_backend"; then
+            echo "Notice: accepting server-authorized DTBO compatibility bridge for signed 1.0.3 manifest"
+        else
+            rm -rf "$_staging"; echo "Error: display backend not supported"; return 1
+        fi
+    fi
 
     # per-file validation (manifest files array: one object per line)
     _declared=0
@@ -823,6 +925,7 @@ gate_package_commit() {
     chmod 600 "$GATE_PACKAGE_FILE" 2>/dev/null
 
     rm -f "$GATE_DOWNLOAD_FILE" "$GATE_DOWNLOAD_META"
+    gate_backend_override_clear
     gate_state_write remove_premium "0" || true
     gate_state_write reboot_required "1" || true
     echo "Success: paid package installed; a full reboot is required"

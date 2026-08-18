@@ -50,6 +50,8 @@ $exactExcludes = @(
     "bin/display_settings_hook.apk.idsig",
     # research_only
     "bin/ltpo.ko",
+    # HMBIRD is DTBO-only in the current release; never ship the retired sidecar.
+    "bin/hmbird.ko",
     "bin/libsdmclient.rmx5200.ltpo-timeline.so",
     "scripts/rmx5200_native_adfr.sh",
     "scripts/libsdmclient_timeline_patch.sh",

@@ -18,11 +18,6 @@ set -eu
     echo "FAIL: PJD110 DRM-KO binary is missing" >&2
     exit 1
 }
-[ -f bin/hmbird.ko ] || {
-    echo "FAIL: standalone HMBIRD KO binary is missing" >&2
-    exit 1
-}
-
 grep -q 'OC_PANEL_NODE "qcom,mdss_dsi_panel_AE084_P_3_A0033_dsc_cmd_dvt02"' src/ko/rmx5200_display_modes.c
 grep -q 'oc_apply_dynamic_modes' src/ko/rmx5200_display_modes.c
 grep -q 'oc_publish_drm_modes' src/ko/rmx5200_display_modes.c
@@ -36,9 +31,6 @@ grep -q 'oc_prepare_runtime_base' src/ko/rmx5200_display_modes.c
 grep -q 'oc_hide_stock_fhd_drm_modes' src/ko/rmx5200_display_modes.c
 grep -q 'removed_stock_fhd_count' src/ko/rmx5200_display_modes.c
 grep -q 'removed_stock_fhd_drm_count' src/ko/rmx5200_display_modes.c
-grep -q 'of_changeset_create_node' src/ko/hmbird.c
-grep -q 'dynamic_of' src/ko/hmbird.c
-grep -q 'consumer_reinit_supported' src/ko/hmbird.c
 grep -q 'v72_vendor_delta' src/ko/rmx5200_display_modes.c
 grep -q '0x00, 0x38, 0x0f, 0x0e' src/ko/rmx5200_display_modes.c
 grep -q '0x00, 0x3a, 0x0f, 0x0e' src/ko/rmx5200_display_modes.c
@@ -96,4 +88,6 @@ if grep -Rqi 'dts_overlay\|CONFIG_OF_OVERLAY' src/ko scripts/display_backend.sh;
     exit 1
 fi
 
-echo "PASS: RMX5200, PLK110 and PJD110 DRM-KO profiles are present"
+! grep -Rqi 'hmbird\.ko' scripts post-fs-data.sh customize.sh config/display_mode_manifest.txt
+
+echo "PASS: RMX5200, PLK110 and PJD110 DRM-KO profiles are present; HMBIRD is DTBO-only"

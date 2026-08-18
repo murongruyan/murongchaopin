@@ -287,6 +287,8 @@ jobs:
             "libpwirisservicei7p.rmx5200.memc-gate.so"
             "libsdmclient.rmx5200.ltpo-timeline.so"
             "ltpo.ko"
+            "hmbird.ko"
+            "display_settings_hook.apk.idsig"
             "*_probe.ko"
             "*qhd144*"
             "*_test"

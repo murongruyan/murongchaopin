@@ -296,6 +296,11 @@ if [ $? -ne 0 ]; then
   abort
 fi
 
+# The display process already writes and validates HMBIRD for the DTBO
+# backend. Do not run the standalone structural patcher over the same DTS a
+# second time: it is reserved for the DRM-KO companion-DTBO path below.
+ui_print "HMBIRD 已由 DTBO 显示流程写入"
+
 # (3) 打包
 ui_print "正在重新打包 DTBO..."
 $BIN_DIR/pack_dtbo

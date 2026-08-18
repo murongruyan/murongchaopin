@@ -84,8 +84,8 @@ mode_manifest_validate() {
     [ -z "$(mode_manifest_value pjd110_dtbo_rates)" ] || return 1
     [ -z "$(mode_manifest_value pjd110_drm_rates)" ] || return 1
     [ "$(mode_manifest_value rmx5200_hmbird_dtbo)" = 1 ] || return 1
-    [ "$(mode_manifest_value hmbird_ko_free)" = 1 ] || return 1
-    [ "$(mode_manifest_value hmbird_ko_backends)" = dtbo,drm ] || return 1
+    [ "$(mode_manifest_value hmbird_ko_free)" = 0 ] || return 1
+    [ "$(mode_manifest_value hmbird_ko_backends)" = dtbo ] || return 1
     [ "$(mode_manifest_value hmbird_ko_supported_socs)" = \
       SM8850,SM8850P,SM8845,SM8750,SM8750P,SM8650,SM8650P,MT6991,MT6993 ] || return 1
     [ "$(mode_manifest_value hmbird_ko_consumer_reinit)" = 0 ] || return 1

@@ -76,15 +76,9 @@ extern int dsi_panel_tx_cmd_set(void *panel, unsigned int type,
 #define OC_NATIVE_WIDTH 1440U
 #define OC_NATIVE_HEIGHT 3136U
 #define OC_SOURCE_FPS 60U
-/*
- * The upgraded RMX5200 stock DTBO exposes four QHD timings (60/90/120/144)
- * plus their companion records, i.e. eight parsed records in the live tree.
- * The old experimental build assumed the pre-OTA 12-record tree and refused
- * to probe before it could add 30/10/1 Hz.  This is a lower-bound guard, not a
- * mode count used for indexing, so keep it at the current minimum and let the
- * runtime discovery validate the actual count.
- */
-#define OC_MODE_COUNT 8U
+/* The Web backend may add or remove timing nodes.  Low-refresh discovery must
+ * therefore validate the live DT multiset and semantic anchors, never a fixed
+ * stock/OTA mode count. */
 #define OC_MIN_REFRESH 1U
 #define OC_HIGHEST_FPS 60U
 #define OC_DEFAULT_MODE_SPECS \
@@ -2175,8 +2169,10 @@ static noinline int oc_find_dt_state(void)
 		 * discover and validate every timing exposed by the active DTBO so
 		 * the KO can add only modes that are not already present. */
 		dt_mode_count = oc_dt.count;
+#ifndef RMX5200_LOW_REFRESH_EXPERIMENT
 		if (oc_dt.count < OC_MODE_COUNT)
 			return -ENODEV;
+#endif
 #ifndef RMX5200_LOW_REFRESH_EXPERIMENT
 		for (child = oc_dt.timings_parent->child; child;
 		     child = child->sibling) {
@@ -3043,7 +3039,7 @@ static unsigned int oc_connector_mode_count(struct drm_connector *connector)
 	if (!connector || !connector->dev || !connector->funcs)
 		return 0;
 	list_for_each_entry(mode, &connector->modes, head) {
-		if (++count > OC_MAX_RUNTIME_MODES + OC_MODE_COUNT)
+		if (++count > OC_MAX_RUNTIME_MODES + OC_MAX_DT_MODES)
 			return 0;
 	}
 	return count;

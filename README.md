@@ -41,12 +41,13 @@ WebUI 只有两种应用后端：
   使用官方 6.1 ABI 编译的 `pjd110_drm_modes.ko` 删除原生 60/90Hz 并注入 WebUI 档位，
   但目前同样只有静态验证，没有 PJD110 真机加载证据。
 
-免费风驰节点由独立 `bin/hmbird.ko` 处理，且不依赖 DTBO/DRM-KO 后端选择。它只接受 ColorOS/Realme UI，
-并按 `ro.soc.model` 将 `SM8850/SM8850P/SM8845` 映射为 `HMBIRD_EXT`，将
-`SM8750/SM8750P/SM8650/SM8650P/MT6991/MT6993` 映射为 `HMBIRD_OGKI`。DTBO 已有
-风驰节点时独立 KO 只校验并复用，避免重复创建。DRM 后端会从原厂基线生成不含显示改动的
-最小 DTBO；PJD110 的配套镜像还保留完整 DTBO 路径已有的 6000mAh 解容、2800mV 阈值和
-`reserve_chg_soc=1`，所有面板 timing 仍保持原厂值。
+风驰节点现在由 DTBO 后端持久写入，不再使用独立 `bin/hmbird.ko`，也不在
+`post-fs-data` 阶段修改 live device tree。OGKI 使用 `fragment@15` 内的
+`oplus,hmbird/version_type`，EXT 使用对应的 `config_type`。DRM 后端如果被选择，
+仍只生成配套 DTBO（PJD110 还保留 6000mAh 解容、2800mV 阈值和
+`reserve_chg_soc=1`），但不再加载风驰 KO；所有面板 timing 仍保持原厂值。
+风驰节点本身由独立结构补丁器处理，不识别 RMX5200，不读取 `ro.boot.prjname` 或
+DTBO `project-id`；显示超频仍保留它自己的机型和面板选择逻辑，两条路径互不作为前置条件。
 
 两种后端共用 WebUI，但路径不同。DTBO 后端保留完整 DTS 节点增删和刷入流程；RMX5200
 DRM-KO 将自定义刷新率转换为 `宽x高@刷新率[:clock_hz]` 规格，不向 DTBO 写高刷 timing，也不会修改
@@ -70,8 +71,8 @@ DRM-KO 将自定义刷新率转换为 `宽x高@刷新率[:clock_hz]` 规格，�
 
 ## 构建说明
 - 本地重新编译 `process_dts`、`dts_tool`、`pack_dtbo`、`unpack_dtbo`、`rate_daemon` 时，建议优先使用 `NDK 30.0.14904198` 或兼容的 `r30` 系版本。
-- 独立风驰 KO 使用目标设备内核树和已准备的 Kbuild 输出编译：`bash src/ko/build.sh hmbird`；
-  产物为 `bin/hmbird.ko`，其 vermagic 必须与目标内核完全匹配。
+- 风驰节点不再编译或打包独立 KO；DTBO 后端直接写入持久设备树，因此没有
+  vermagic、符号 CRC 或 `SMP preempt mod_unload modversions aarch64` 兼容性要求。
 - `src/build.bat` 与 `build_daemon.bat` 现在会优先检测 `%ANDROID_NDK_ROOT%`、`%NDK_ROOT%`，再检测本机常见的 `r30-beta1 / r30` 路径，最后才回退旧路径。
 - GitHub Actions 工作流也已经统一到 `NDK 30.0.14904198`，会在 Ubuntu Runner 上重新编译这些原生二进制并组装最终模块包。
 

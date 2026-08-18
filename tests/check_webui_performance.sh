@@ -19,8 +19,10 @@ require_text "$CSS" 'background-image: none;'
 require_text "$CSS" 'Page-level transforms force every glass/backdrop-filter surface'
 require_text "$JS" 'function runAfterFirstPaint(task)'
 require_text "$JS" 'runAfterFirstPaint(initializeModuleData);'
-require_text "$HOOK" 'setWindowAnimations(0);'
+require_text "$JS" '})().finally(() => {'
 require_text "$HOOK" 'getMethod("setTranslucent", boolean.class)'
+require_text "$HOOK" 'resolveCommitDurationMillis'
+require_text "$HOOK" 'postDelayed'
 require_text "$HOOK" 'activity.finish();'
 
 card_css="$(sed -n '/^\.card {/,/^}/p' "$CSS")"
@@ -31,6 +33,11 @@ fi
 
 if grep -Fq 'finishAfterTransition()' "$HOOK"; then
     echo 'KernelSU WebUI must not wait for the host activity transition' >&2
+    exit 1
+fi
+
+if grep -Eq 'setWindowAnimations\(0\)|overridePendingTransition\(0, 0\)' "$HOOK"; then
+    echo 'KernelSU WebUI must not erase its predictive-back settle animation' >&2
     exit 1
 fi
 

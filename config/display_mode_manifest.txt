@@ -7,10 +7,10 @@ rmx5200_height=3136
 rmx5200_dtbo_rates=123,150,155,160,165,170,175,180
 rmx5200_drm_rates=123,150,155,160,165,170,175,180
 rmx5200_hmbird_dtbo=1
-# The standalone free HMBIRD KO is backend-independent. It validates and
-# reuses a DTBO-provided node or creates one through dynamic OF when possible.
-hmbird_ko_free=1
-hmbird_ko_backends=dtbo,drm
+# HMBIRD is persistent DTBO-only. The retired live-OF sidecar path is
+# intentionally disabled because it can block boot before vendor init.
+hmbird_ko_free=0
+hmbird_ko_backends=dtbo
 hmbird_ko_supported_socs=SM8850,SM8850P,SM8845,SM8750,SM8750P,SM8650,SM8650P,MT6991,MT6993
 hmbird_ko_consumer_reinit=0
 plk110_width=1272

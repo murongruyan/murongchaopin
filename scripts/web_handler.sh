@@ -15,6 +15,7 @@ DAEMON_BIN="$BIN_DIR/rate_daemon"
 AVB_HELPER="$MOD_PATH/scripts/dtbo_avb.sh"
 DISPLAY_HELPER="$MOD_PATH/scripts/display_backend.sh"
 HMBIRD_HELPER="$MOD_PATH/scripts/hmbird_backend.sh"
+HMBIRD_PATCHER="$MOD_PATH/scripts/patch_hmbird_dtbo.awk"
 GATE_HELPER="$MOD_PATH/scripts/display_license_gate.sh"
 PREMIUM_PATH="$MOD_PATH/premium"
 ADFR_LOCK_HELPER="$PREMIUM_PATH/scripts/adfr_lock.sh"
@@ -39,7 +40,7 @@ COLOROS_CONFIG_HELPER="$MOD_PATH/scripts/coloros_config.sh"
 VIDEO_MEMC_APPS_FILE="$MOD_PATH/config/video_memc_apps.txt"
 VIDEO_MOTION_TARGET_KEY="murong_video_motion_target_rate"
 BASE_API_URL="https://murongdiaodu.rl1.cc/api"
-BASE_UPDATE_JSON_URL="https://raw.githubusercontent.com/murongruyan/murongchaopin/main/update.json"
+BASE_UPDATE_JSON_URL="https://github.com/murongruyan/murongchaopin/releases/download/murong-display-enhancement/update.json"
 STOCK_DTBO="$IMG_DIR/dtbo.img"
 STOCK_MANIFEST="$IMG_DIR/dtbo.img.sha256"
 STOCK_RECOVERY="$IMG_DIR/dtbo.img.gz"
@@ -290,6 +291,37 @@ run_process_dts() {
     else
         ./process_dts
     fi
+    OGKI_PROCESS_RC=$?
+    [ "$OGKI_PROCESS_RC" -eq 0 ] || return "$OGKI_PROCESS_RC"
+
+    # Display processing remains model-specific. HMBIRD normalization is a
+    # separate structure-only pass and never consumes the model/project ID.
+    case "$(getprop ro.soc.model 2>/dev/null | tr -d '[:space:]')" in
+        SM8850|SM8850P|SM8845|MT6995) HMBIRD_TYPE=HMBIRD_EXT ;;
+        SM8750|SM8750P|SM8650|SM8650P|MT6991|MT6993) HMBIRD_TYPE=HMBIRD_OGKI ;;
+        *) return 1 ;;
+    esac
+    [ -r "$HMBIRD_PATCHER" ] || return 1
+    HMBIRD_PATCH_COUNT=0
+    HMBIRD_DTS_COUNT=0
+    for HMBIRD_DTS in "$BIN_DIR"/dtbo_dts/*.dts; do
+        [ -f "$HMBIRD_DTS" ] || continue
+        HMBIRD_DTS_COUNT=$((HMBIRD_DTS_COUNT + 1))
+        HMBIRD_TMP="$HMBIRD_DTS.hmbird.$$"
+        awk -v requested_type="$HMBIRD_TYPE" -f "$HMBIRD_PATCHER" \
+            "$HMBIRD_DTS" > "$HMBIRD_TMP"
+        HMBIRD_RC=$?
+        case "$HMBIRD_RC" in
+            0)
+                mv -f "$HMBIRD_TMP" "$HMBIRD_DTS" || return 1
+                HMBIRD_PATCH_COUNT=$((HMBIRD_PATCH_COUNT + 1))
+                ;;
+            *) rm -f "$HMBIRD_TMP"; return 1 ;;
+        esac
+    done
+    [ "$HMBIRD_DTS_COUNT" -gt 0 ] &&
+        [ "$HMBIRD_PATCH_COUNT" -eq "$HMBIRD_DTS_COUNT" ] || return 1
+    return 0
 }
 
 drm_profile_spec_defaults() {
@@ -587,7 +619,7 @@ do_ko_prepare() {
     echo "Qualcomm DRM injector 已就绪：$KO_PROFILE 档位 $KO_RATES"
     echo "DRM-KO 通过 mode_specs 复制 Qualcomm timing，并在启动早期由 display_backend.sh 加载。高刷 timing 不写入 DTBO。"
     echo "RMX5200/PJD110 的 WebUI 自定义档位保存到 runtime/drm_modes.txt，不会写入 DTBO。"
-    echo "免费独立 hmbird.ko 会在启动早期按 ColorOS/Realme UI 与 SoC gate 侧载，不依赖 DTBO/DRM-KO 后端；已有节点时只校验并复用。"
+    echo "风驰节点由安装阶段写入持久 DTBO；开机不再侧载独立 live-OF 模块，避免动态设备树修改卡住启动。"
     echo "DRM 后端不会把高刷 timing 写入 DTBO；PJD110 的 60/90Hz 去重由 6.1 DRM-KO 在内存中完成，解容由启动前配套 DTBO 生效。"
     return 0
 }
@@ -781,9 +813,13 @@ check_base_update() {
     rm -f "$UPDATE_TMP"
 }
 
-api_get_proxy() {
-    API_PATH="$1"
-    API_AUTH="$2"
+api_request_proxy() {
+    API_METHOD="$1"
+    API_PATH="$2"
+    API_AUTH="$3"
+    API_BODY_B64="$4"
+    API_NONCE="$5"
+    case "$API_METHOD" in GET|POST) ;; *) echo "Error: 非法 API 方法"; return 1 ;; esac
     case "$API_PATH" in ''|/*|*://*|*..*) API_PATH_INVALID=1 ;; *) API_PATH_INVALID=0 ;; esac
     printf '%s\n' "$API_PATH" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_./?&=%+-]*$' || API_PATH_INVALID=1
     if [ "$API_PATH_INVALID" = 1 ]; then
@@ -797,7 +833,7 @@ api_get_proxy() {
 
     set -- --silent --show-error --location --connect-timeout 10 --max-time 25 \
         --retry 2 --retry-delay 1 --proto '=https' \
-        -H 'Accept: application/json'
+        --request "$API_METHOD" -H 'Accept: application/json'
     if [ "$API_AUTH" = 1 ]; then
         [ -f "$GATE_HELPER" ] || {
             echo "Error: 授权组件缺失"
@@ -811,15 +847,50 @@ api_get_proxy() {
         }
         set -- "$@" -H "Authorization: Bearer $API_TOKEN"
     fi
+    if [ -n "$API_NONCE" ]; then
+        case "$API_NONCE" in *[!A-Za-z0-9-]*|????????????????????????????????????????????????????????????????*)
+            echo "Error: 非法请求 nonce"
+            return 1
+            ;;
+        esac
+        set -- "$@" -H "X-Display-Request-Nonce: $API_NONCE"
+    fi
+    API_BODY_FILE=""
+    if [ "$API_METHOD" = POST ]; then
+        [ -n "$API_BODY_B64" ] || {
+            echo "Error: POST 请求缺少正文"
+            return 1
+        }
+        case "$API_BODY_B64" in *[!A-Za-z0-9_-]*) echo "Error: 非法 API 正文编码"; return 1 ;; esac
+        [ "${#API_BODY_B64}" -le 196608 ] 2>/dev/null || {
+            echo "Error: API 请求正文过大"
+            return 1
+        }
+        API_BODY_FILE=$(mktemp) || {
+            echo "Error: 无法创建 API 正文临时文件"
+            return 1
+        }
+        gate_b64url_decode "$API_BODY_B64" "$API_BODY_FILE" || {
+            rm -f "$API_BODY_FILE"
+            echo "Error: API 请求正文解码失败"
+            return 1
+        }
+        set -- "$@" -H 'Content-Type: application/json' --data-binary "@$API_BODY_FILE"
+    elif [ -n "$API_BODY_B64" ]; then
+        echo "Error: GET 请求不能携带正文"
+        return 1
+    fi
     API_RESPONSE=$(mktemp) || {
+        [ -z "$API_BODY_FILE" ] || rm -f "$API_BODY_FILE"
         echo "Error: 无法创建 API 临时文件"
         return 1
     }
     if ! curl "$@" "$BASE_API_URL/$API_PATH" -o "$API_RESPONSE"; then
-        rm -f "$API_RESPONSE"
+        rm -f "$API_RESPONSE" "$API_BODY_FILE"
         echo "Error: 服务器网络请求失败"
         return 1
     fi
+    [ -z "$API_BODY_FILE" ] || rm -f "$API_BODY_FILE"
     [ -s "$API_RESPONSE" ] || {
         rm -f "$API_RESPONSE"
         echo "Error: 服务器返回空响应"
@@ -827,6 +898,10 @@ api_get_proxy() {
     }
     cat "$API_RESPONSE"
     rm -f "$API_RESPONSE"
+}
+
+api_get_proxy() {
+    api_request_proxy GET "$1" "$2" "" ""
 }
 
 json_escape() {
@@ -850,6 +925,11 @@ download_paid_package() {
 
     PACKAGE_REQUEST=$(mktemp) || { echo "Error: 无法创建下载请求"; return 1; }
     TOKEN_RESPONSE=$(mktemp) || { rm -f "$PACKAGE_REQUEST"; echo "Error: 无法创建令牌响应"; return 1; }
+    DEVICE_ID=$(gate_device_id)
+    DEVICE_SN=$(gate_device_sn)
+    [ -n "$DEVICE_SN" ] || DEVICE_SN="$DEVICE_ID"
+    DEVICE_IMEI1=$(gate_device_imei1)
+    DEVICE_IMEI2=$(gate_device_imei2)
     DEVICE_HASH=$(gate_device_id_hash)
     DEVICE_MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
     SOC_MODEL=$(getprop ro.soc.model 2>/dev/null)
@@ -859,7 +939,9 @@ download_paid_package() {
     BACKEND=$(sed -n '1{s/\r$//;p;q;}' "$DTS_BACKEND_FILE" 2>/dev/null | tr -d '[:space:]')
     REQUEST_NONCE=$(cat /proc/sys/kernel/random/uuid 2>/dev/null)
     [ -n "$REQUEST_NONCE" ] || REQUEST_NONCE="$(date +%s)-$$"
-    printf '{"device_id_hash":"%s","device_model":"%s","soc_model":"%s","build_fingerprint":"%s","base_version":"%s","kernel":"%s","backend":"%s","channel":"stable"}' \
+    printf '{"device_id":"%s","sn":"%s","imei1":"%s","imei2":"%s","device_id_hash":"%s","device_model":"%s","soc_model":"%s","build_fingerprint":"%s","base_version":"%s","kernel":"%s","backend":"%s","channel":"stable"}' \
+        "$(json_escape "$DEVICE_ID")" "$(json_escape "$DEVICE_SN")" \
+        "$(json_escape "$DEVICE_IMEI1")" "$(json_escape "$DEVICE_IMEI2")" \
         "$(json_escape "$DEVICE_HASH")" "$(json_escape "$DEVICE_MODEL")" \
         "$(json_escape "$SOC_MODEL")" "$(json_escape "$BUILD_FINGERPRINT")" \
         "$(json_escape "$BASE_VERSION")" "$(json_escape "$KERNEL_VERSION")" \
@@ -880,6 +962,8 @@ download_paid_package() {
     rm -f "$PACKAGE_REQUEST"
     DOWNLOAD_TOKEN=$(gate_json_field "$TOKEN_RESPONSE" download_token)
     SERVER_SHA=$(gate_json_field "$TOKEN_RESPONSE" sha256 | tr 'A-F' 'a-f')
+    SERVER_DTBO_ALLOWED=0
+    gate_list_contains "$TOKEN_RESPONSE" supported_backends dtbo && SERVER_DTBO_ALLOWED=1
     if [ -z "$DOWNLOAD_TOKEN" ]; then
         SERVER_MESSAGE=$(gate_json_field "$TOKEN_RESPONSE" message)
         rm -f "$TOKEN_RESPONSE"
@@ -895,15 +979,24 @@ download_paid_package() {
     }
 
     gate_package_abort >/dev/null 2>&1
+    DOWNLOAD_REQUEST=$(mktemp) || {
+        echo "Error: 无法创建下载请求临时文件"
+        return 1
+    }
+    printf '{"download_token":"%s"}' "$DOWNLOAD_TOKEN" > "$DOWNLOAD_REQUEST"
     if ! curl --fail --silent --show-error --location --connect-timeout 10 --max-time 180 \
-        --retry 2 --retry-delay 1 --proto '=https' \
+        --proto '=https' --request POST \
+        -H 'Content-Type: application/json' \
         -H "Authorization: Bearer $API_TOKEN" \
-        "$BASE_API_URL/v1/display/packages/$PACKAGE_ID/download?download_token=$DOWNLOAD_TOKEN" \
+        --data-binary "@$DOWNLOAD_REQUEST" \
+        "$BASE_API_URL/v1/display/packages/$PACKAGE_ID/download" \
         -o "$GATE_DOWNLOAD_FILE"; then
+        rm -f "$DOWNLOAD_REQUEST"
         gate_package_abort >/dev/null 2>&1
         echo "Error: 付费组件下载失败"
         return 1
     fi
+    rm -f "$DOWNLOAD_REQUEST"
     DOWNLOADED_BYTES=$(wc -c < "$GATE_DOWNLOAD_FILE" 2>/dev/null | tr -d '[:space:]')
     case "$DOWNLOADED_BYTES" in ''|*[!0-9]*) DOWNLOADED_BYTES=0 ;; esac
     [ "$DOWNLOADED_BYTES" -gt 0 ] && [ "$DOWNLOADED_BYTES" -le "$GATE_MAX_PACKAGE_BYTES" ] || {
@@ -917,6 +1010,17 @@ download_paid_package() {
         echo "Error: 付费组件下载哈希校验失败"
         return 1
     }
+    # 1.0.3's signed manifest predates the DTBO release-matrix correction.
+    # Record the server-authorized matrix beside the staged package; the gate
+    # consumes it only with this exact release ID and package SHA.
+    gate_backend_override_clear
+    if [ "$BACKEND" = dtbo ] && [ "$SERVER_DTBO_ALLOWED" = 1 ]; then
+        gate_backend_override_write "$PACKAGE_ID" "$EXPECTED_SHA" dtbo || {
+            gate_package_abort >/dev/null 2>&1
+            echo "Error: 无法保存服务器 DTBO 兼容授权"
+            return 1
+        }
+    fi
     printf '%s\n' "$DOWNLOADED_BYTES" > "$GATE_DOWNLOAD_META"
     chmod 0600 "$GATE_DOWNLOAD_FILE" "$GATE_DOWNLOAD_META" 2>/dev/null
     echo "Success: paid package staged"
@@ -960,6 +1064,11 @@ install_latest_paid_package() {
         return 0
     fi
 
+    DEVICE_ID=$(gate_device_id)
+    DEVICE_SN=$(gate_device_sn)
+    [ -n "$DEVICE_SN" ] || DEVICE_SN="$DEVICE_ID"
+    DEVICE_IMEI1=$(gate_device_imei1)
+    DEVICE_IMEI2=$(gate_device_imei2)
     DEVICE_HASH=$(gate_device_id_hash)
     DEVICE_MODEL=$(getprop ro.product.vendor.model 2>/dev/null | tr -cd 'A-Za-z0-9._-')
     SOC_MODEL=$(getprop ro.soc.model 2>/dev/null | tr -cd 'A-Za-z0-9._-')
@@ -981,7 +1090,7 @@ install_latest_paid_package() {
         echo "reason=temporary_file_failed"
         return 0
     }
-    PACKAGES_PATH="v1/display/packages?device_id_hash=$DEVICE_HASH&device_model=$DEVICE_MODEL&soc_model=$SOC_MODEL&base_version=$BASE_VERSION&kernel=$KERNEL_PREFIX&backend=$BACKEND&channel=stable"
+    PACKAGES_PATH="v1/display/packages?device_id=$DEVICE_ID&sn=$DEVICE_SN&imei1=$DEVICE_IMEI1&imei2=$DEVICE_IMEI2&device_id_hash=$DEVICE_HASH&device_model=$DEVICE_MODEL&soc_model=$SOC_MODEL&base_version=$BASE_VERSION&kernel=$KERNEL_PREFIX&backend=$BACKEND&channel=stable"
     if ! api_get_proxy "$PACKAGES_PATH" 1 > "$PACKAGES_RESPONSE"; then
         rm -f "$PACKAGES_RESPONSE"
         echo "status=deferred"
@@ -1082,6 +1191,10 @@ case "$1" in
 
     "api_get")
         api_get_proxy "$2" "$3"
+        ;;
+
+    "api_request")
+        api_request_proxy "$2" "$3" "$4" "$5" "$6"
         ;;
 
     "auth_package_download")

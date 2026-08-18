@@ -18,6 +18,9 @@ const PAYMENT_ORDER_KEY = "murongchaopin_pending_payment";
 const VIDEO_MOTION_TARGET_KEY = "murong_video_motion_target_rate";
 const SHOW_SYSTEM_APPS_KEY = "murongchaopin_show_system_apps";
 const UPDATE_NOTICE_SESSION_KEY = "murongchaopin_update_notice";
+const AUTH_REFRESH_TTL_MS = 15000;
+const VIDEO_DATA_TTL_MS = 10000;
+const APPLIED_MODE_POLL_MS = 2500;
 
 let currentMode = -1;
 let appliedMode = -1;
@@ -43,8 +46,8 @@ let paymentHistoryActive = false;
 let modalClosing = false;
 let paymentClosing = false;
 const tabScrollPositions = new Map();
-let predictiveBackSurface = null;
-let predictiveBackResetTimer = null;
+let tabHistory = [];
+let predictiveBackState = null;
 
 // 授权相关运行时状态
 let authToken = null;
@@ -60,6 +63,11 @@ let updateCheckBusy = false;
 let automaticUpdateCheckStarted = false;
 let paymentCheckBusy = false;
 let authorizationRefreshPromise = null;
+let authorizationRefreshedAt = 0;
+let videoDataRefreshPromise = null;
+let videoDataRefreshedAt = 0;
+let appListLoaded = false;
+let appListLoadPromise = null;
 
 // ============================================================
 // 调试日志
@@ -720,13 +728,83 @@ function setupTheme() {
 // ============================================================
 const TAB_ORDER = ['tab-oc', 'tab-rates', 'tab-video', 'tab-logs', 'tab-mine'];
 
+function setBottomNavIndicator(index, animate = true) {
+    const nav = document.querySelector('.bottom-nav');
+    if (!nav || index < 0) return;
+    const immediate = !animate && !nav.classList.contains('predictive-back-settle');
+    nav.classList.toggle('indicator-immediate', immediate);
+    nav.style.setProperty('--tab-indicator-index', String(index));
+    if (immediate) requestAnimationFrame(() => nav.classList.remove('indicator-immediate'));
+}
+
+function setPredictiveTabWeight(index, weight) {
+    const button = document.querySelector(`.tab-btn[data-tab="${TAB_ORDER[index] || ''}"]`);
+    if (!button) return;
+    button.classList.add('predictive-back-tab');
+    button.style.setProperty('--predictive-tab-weight', String(Math.max(0, Math.min(1, weight))));
+}
+
+function predictiveCommitDuration(progress) {
+    const bounded = Math.max(0, Math.min(1, Number(progress) || 0));
+    if (bounded >= 1) return 0;
+    return Math.max(72, Math.min(180, Math.round(180 * (1 - bounded))));
+}
+
+function configurePredictiveSettle(state, duration, easing) {
+    [state.currentPage, state.targetPage, state.surface].filter(Boolean).forEach(element => {
+        element.style.setProperty('--predictive-settle-duration', `${duration}ms`);
+        element.style.setProperty('--predictive-settle-easing', easing);
+        element.classList.add('predictive-back-settle');
+    });
+    const nav = document.querySelector('.bottom-nav');
+    if (nav) {
+        nav.classList.remove('indicator-immediate');
+        nav.style.setProperty('--predictive-settle-duration', `${duration}ms`);
+        nav.style.setProperty('--predictive-settle-easing', easing);
+        nav.classList.add('predictive-back-settle');
+    }
+}
+
+function cleanupPredictiveBack() {
+    const state = predictiveBackState;
+    if (!state) return;
+    if (state.resetTimer) clearTimeout(state.resetTimer);
+    [state.currentPage, state.targetPage, state.surface].filter(Boolean).forEach(element => {
+        element.classList.remove(
+            'predictive-back-layer', 'predictive-back-from', 'predictive-back-to',
+            'predictive-back-surface', 'predictive-back-root', 'predictive-back-settle'
+        );
+        [
+            '--predictive-back-x', '--predictive-back-scale', '--predictive-back-alpha',
+            '--predictive-back-progress', '--predictive-scroll-y', '--predictive-header-bottom',
+            '--predictive-settle-duration', '--predictive-settle-easing'
+        ].forEach(property => element.style.removeProperty(property));
+    });
+    const nav = document.querySelector('.bottom-nav');
+    if (nav) {
+        nav.classList.remove('predictive-back-nav', 'predictive-back-settle', 'indicator-immediate');
+        nav.style.removeProperty('--predictive-settle-duration');
+        nav.style.removeProperty('--predictive-settle-easing');
+        nav.querySelectorAll('.predictive-back-tab').forEach(button => {
+            button.classList.remove('predictive-back-tab');
+            button.style.removeProperty('--predictive-tab-weight');
+        });
+    }
+    document.documentElement.classList.remove('predictive-back-active', 'predictive-back-root-active');
+    predictiveBackState = null;
+    setBottomNavIndicator(TAB_ORDER.indexOf(activeTabId), false);
+}
+
 function activateTab(targetId, { push = false, back = false } = {}) {
     const tabs = document.querySelectorAll('.tab-btn');
     const contents = document.querySelectorAll('.page');
     const target = document.getElementById(targetId);
     if (!target) return;
     const changed = activeTabId !== targetId;
-    if (push && changed) history.pushState({ kind: 'tab', tab: targetId }, '', `#${targetId}`);
+    if (push && changed) {
+        history.pushState({ kind: 'tab', tab: targetId }, '', `#${targetId}`);
+        tabHistory.push(targetId);
+    }
     if (!changed) return;
 
     tabScrollPositions.set(activeTabId, window.scrollY || document.documentElement.scrollTop || 0);
@@ -741,19 +819,40 @@ function activateTab(targetId, { push = false, back = false } = {}) {
         activeTabId = targetId;
         const restoreY = tabScrollPositions.get(targetId) || 0;
         window.scrollTo(0, restoreY);
+        cleanupPredictiveBack();
+        setBottomNavIndicator(newIndex, !back);
     };
 
     apply();
 
-    if (targetId === 'tab-logs') refreshLogs();
-    if (targetId === 'tab-video' || targetId === 'tab-mine') refreshAuthorizationView();
+    syncAppliedModePolling();
+    runAfterFirstPaint(() => {
+        if (activeTabId !== targetId) return;
+        if (targetId === 'tab-logs') refreshLogs();
+        if (targetId === 'tab-video' || targetId === 'tab-mine') {
+            refreshAuthorizationView().catch(error => {
+                debugLog(`background authorization refresh failed: ${error.message}`);
+            });
+        }
+        if (targetId === 'tab-video') {
+            refreshVideoPageData();
+            ensureAppListLoaded();
+        }
+        if (targetId === 'tab-rates') {
+            refreshAppliedMode();
+            ensureAppListLoaded();
+        }
+        if (targetId === 'tab-rates' || targetId === 'tab-video') processLabelQueue();
+    });
 }
 
 function setupTabs() {
     const tabs = document.querySelectorAll('.tab-btn');
     const initial = document.querySelector('.tab-btn.active')?.getAttribute('data-tab') || 'tab-oc';
     activeTabId = initial;
+    tabHistory = [initial];
     history.replaceState({ kind: 'tab', tab: initial }, '', `#${initial}`);
+    setBottomNavIndicator(TAB_ORDER.indexOf(initial), false);
     tabs.forEach(tab => {
         tab.addEventListener('click', () => {
             const targetId = tab.getAttribute('data-tab');
@@ -778,49 +877,131 @@ function setupTabs() {
             return;
         }
         const targetId = event.state && event.state.kind === 'tab' ? event.state.tab : null;
-        if (targetId) activateTab(targetId, { back: true });
+        if (targetId) {
+            if (tabHistory.length > 1 && tabHistory[tabHistory.length - 2] === targetId) {
+                tabHistory.pop();
+            } else {
+                const existing = tabHistory.lastIndexOf(targetId);
+                if (existing >= 0) tabHistory = tabHistory.slice(0, existing + 1);
+                else tabHistory.push(targetId);
+            }
+            activateTab(targetId, { back: true });
+        }
     });
 }
 
-window.__murongPredictiveBack = function (type, progress = 0, edge = 0) {
-    const root = document.documentElement;
-    const activeSurface = () => {
-        const payment = paymentOverlayEl();
-        if (payment && !payment.hidden) return payment.querySelector('.payment-sheet');
-        const modal = modalEl();
-        if (modal && !modal.hidden) return modal.querySelector('.modal-content');
-        return document.querySelector('.page.active');
-    };
-    const cleanup = () => {
-        if (predictiveBackSurface) {
-            predictiveBackSurface.classList.remove('predictive-back-surface', 'predictive-back-cancel');
-            predictiveBackSurface.style.removeProperty('--predictive-back-x');
+// Native predictive-back needs a synchronous-looking answer, but WebView's
+// canGoBack() does not consistently count pushState entries on ColorOS. Keep
+// the decision in the same history model that renders the two-page preview.
+window.__murongPredictiveBackCanPop = function () {
+    const payment = paymentOverlayEl();
+    const modal = modalEl();
+    return tabHistory.length > 1
+        || !!(payment && !payment.hidden)
+        || !!(modal && !modal.hidden);
+};
+
+function preparePredictiveBack(edge) {
+    if (predictiveBackState) return predictiveBackState;
+    const payment = paymentOverlayEl();
+    const modal = modalEl();
+    const surface = payment && !payment.hidden
+        ? payment.querySelector('.payment-sheet')
+        : (modal && !modal.hidden ? modal.querySelector('.modal-content') : null);
+    if (surface) {
+        predictiveBackState = {
+            mode: 'surface', surface, direction: Number(edge) === 1 ? -1 : 1,
+            progress: 0, resetTimer: null
+        };
+        surface.classList.add('predictive-back-surface');
+    } else {
+        const targetId = tabHistory.length > 1 ? tabHistory[tabHistory.length - 2] : null;
+        const currentPage = document.getElementById(activeTabId);
+        const targetPage = targetId ? document.getElementById(targetId) : null;
+        const fromIndex = TAB_ORDER.indexOf(activeTabId);
+        const toIndex = TAB_ORDER.indexOf(targetId);
+        if (currentPage && targetPage && currentPage !== targetPage && fromIndex >= 0 && toIndex >= 0) {
+            const headerBottom = document.querySelector('.app-header')?.getBoundingClientRect().bottom || 0;
+            const currentScroll = window.scrollY || document.documentElement.scrollTop || 0;
+            const targetScroll = tabScrollPositions.get(targetId) || 0;
+            const direction = fromIndex > toIndex ? 1 : -1;
+            predictiveBackState = {
+                mode: 'tabs', currentPage, targetPage, fromIndex, toIndex, direction,
+                progress: 0, resetTimer: null
+            };
+            currentPage.classList.add('predictive-back-layer', 'predictive-back-from');
+            targetPage.classList.add('predictive-back-layer', 'predictive-back-to');
+            currentPage.style.setProperty('--predictive-scroll-y', `${currentScroll}px`);
+            targetPage.style.setProperty('--predictive-scroll-y', `${targetScroll}px`);
+            currentPage.style.setProperty('--predictive-header-bottom', `${headerBottom}px`);
+            targetPage.style.setProperty('--predictive-header-bottom', `${headerBottom}px`);
+            document.querySelector('.bottom-nav')?.classList.add('predictive-back-nav');
+        } else {
+            const rootSurface = document.querySelector('.app');
+            predictiveBackState = {
+                mode: 'root', surface: rootSurface, direction: Number(edge) === 1 ? -1 : 1,
+                progress: 0, resetTimer: null
+            };
+            rootSurface?.classList.add('predictive-back-surface', 'predictive-back-root');
+            document.documentElement.classList.add('predictive-back-root-active');
         }
-        predictiveBackSurface = null;
-        root.classList.remove('predictive-back-active');
-    };
-    if (predictiveBackResetTimer) {
-        clearTimeout(predictiveBackResetTimer);
-        predictiveBackResetTimer = null;
     }
+    document.documentElement.classList.add('predictive-back-active');
+    return predictiveBackState;
+}
+
+function applyPredictiveBackProgress(state, progress) {
+    const bounded = Math.max(0, Math.min(1, Number(progress) || 0));
+    state.progress = bounded;
+    if (state.mode === 'tabs') {
+        const currentX = state.direction * bounded * window.innerWidth;
+        const targetX = currentX - state.direction * window.innerWidth;
+        const currentScale = 1 - (0.1 * bounded);
+        const targetScale = 0.9 + (0.1 * bounded);
+        const currentAlpha = 1 - (0.3 * bounded);
+        const targetAlpha = 0.7 + (0.3 * bounded);
+        state.currentPage.style.setProperty('--predictive-back-x', `${currentX}px`);
+        state.currentPage.style.setProperty('--predictive-back-scale', String(currentScale));
+        state.currentPage.style.setProperty('--predictive-back-alpha', String(currentAlpha));
+        state.targetPage.style.setProperty('--predictive-back-x', `${targetX}px`);
+        state.targetPage.style.setProperty('--predictive-back-scale', String(targetScale));
+        state.targetPage.style.setProperty('--predictive-back-alpha', String(targetAlpha));
+        state.currentPage.style.setProperty('--predictive-back-progress', String(bounded));
+        state.targetPage.style.setProperty('--predictive-back-progress', String(bounded));
+        setBottomNavIndicator(state.fromIndex + (state.toIndex - state.fromIndex) * bounded, false);
+        setPredictiveTabWeight(state.fromIndex, 1 - bounded);
+        setPredictiveTabWeight(state.toIndex, bounded);
+        return;
+    }
+    if (state.surface) {
+        state.surface.style.setProperty('--predictive-back-x', `${state.direction * bounded * window.innerWidth}px`);
+        state.surface.style.setProperty('--predictive-back-scale', String(1 - 0.1 * bounded));
+        state.surface.style.setProperty('--predictive-back-alpha', String(1 - 0.3 * bounded));
+        state.surface.style.setProperty('--predictive-back-progress', String(bounded));
+    }
+}
+
+window.__murongPredictiveBack = function (type, progress = 0, edge = 0) {
     if (type === 'start' || type === 'progress') {
-        predictiveBackSurface = predictiveBackSurface || activeSurface();
-        if (!predictiveBackSurface) return;
-        const bounded = Math.max(0, Math.min(1, Number(progress) || 0));
-        const direction = Number(edge) === 1 ? -1 : 1;
-        predictiveBackSurface.classList.add('predictive-back-surface');
-        predictiveBackSurface.classList.remove('predictive-back-cancel');
-        predictiveBackSurface.style.setProperty('--predictive-back-x', `${direction * bounded * 22}px`);
-        root.classList.add('predictive-back-active');
+        const state = preparePredictiveBack(edge);
+        if (state) applyPredictiveBackProgress(state, progress);
         return;
     }
-    if (type === 'cancel' && predictiveBackSurface) {
-        predictiveBackSurface.classList.add('predictive-back-cancel');
-        predictiveBackSurface.style.setProperty('--predictive-back-x', '0px');
-        predictiveBackResetTimer = setTimeout(cleanup, 130);
+    const state = predictiveBackState;
+    if (!state) return;
+    if (type === 'cancel') {
+        configurePredictiveSettle(state, 260, 'cubic-bezier(0.2, 1.08, 0.32, 1)');
+        applyPredictiveBackProgress(state, 0);
+        state.resetTimer = setTimeout(cleanupPredictiveBack, 260);
         return;
     }
-    cleanup();
+    if (type === 'commit' || type === 'invoke') {
+        const duration = predictiveCommitDuration(state.progress);
+        configurePredictiveSettle(state, duration, 'linear');
+        applyPredictiveBackProgress(state, 1);
+        return;
+    }
+    cleanupPredictiveBack();
 };
 
 function setupAuthorizationPullRefresh() {
@@ -841,8 +1022,7 @@ function setupAuthorizationPullRefresh() {
         const endY = event.changedTouches[0].clientY;
         armed = false;
         if (endY - startY < 80) return;
-        showToast('正在刷新授权…');
-        refreshAuthorizationView();
+        forceRefreshAuthorization();
     }, { passive: true });
 }
 
@@ -853,7 +1033,8 @@ async function apiFetch(path, opts = {}) {
     const method = opts.method || 'GET';
     const headers = {};
     if (opts.auth && authToken) headers['Authorization'] = `Bearer ${authToken}`;
-    if (opts.nonce) headers['X-Display-Request-Nonce'] = randomUUID();
+    const requestNonce = opts.nonce ? randomUUID() : '';
+    if (requestNonce) headers['X-Display-Request-Nonce'] = requestNonce;
     let payload;
     if (opts.body !== undefined && opts.body !== null) {
         if (opts.form) {
@@ -864,23 +1045,27 @@ async function apiFetch(path, opts = {}) {
             payload = JSON.stringify(opts.body);
         }
     }
-    // KsuWebUI uses a local WebView origin. Some ROM WebViews reject an
-    // otherwise valid cross-origin request before HTTP/CORS is reached. GET
-    // requests therefore use the module's root-side HTTPS channel first.
-    if (method === 'GET' && opts.auth) {
-        try {
-            const raw = await ksuExec(handlerCmd('api_get', path, opts.auth ? '1' : '0'), true);
-            if (raw && !raw.startsWith('Error:')) {
-                const proxied = JSON.parse(raw);
-                if (proxied.success === false || proxied.error) {
-                    throw new Error(proxied.message || proxied.error || '请求失败');
-                }
-                return proxied;
-            }
-            if (raw && raw.startsWith('Error:')) debugLog(`root API channel: ${raw}`);
-        } catch (e) {
-            debugLog(`root API channel failed: ${e.message}`);
+    // Authenticated requests use the root-side HTTPS channel. ColorOS WebView
+    // can reject cross-origin POST before the request reaches the server, and
+    // the root channel can restore the persisted token after WebView recreation.
+    if (opts.auth && !opts.form && (method === 'GET' || method === 'POST')) {
+        const payloadB64 = payload === undefined ? '' : utf8ToBase64Url(payload);
+        const raw = await ksuExec(handlerCmd(
+            'api_request', method, path, '1', payloadB64, requestNonce
+        ), true);
+        if (!raw || raw.startsWith('Error:')) {
+            throw new Error((raw || '授权后端无响应').replace(/^Error:\s*/, ''));
         }
+        let proxied;
+        try {
+            proxied = JSON.parse(raw);
+        } catch (error) {
+            throw new Error('服务响应格式错误');
+        }
+        if (proxied.success === false || proxied.error) {
+            throw new Error(proxied.message || proxied.error || '请求失败');
+        }
+        return proxied;
     }
 
     let resp;
@@ -940,59 +1125,78 @@ async function refreshDeviceInfo() {
 }
 
 async function refreshServerAuth() {
-    if (!authToken) return;
+    if (!authToken && authState.account !== 'logged_in') return false;
+    const qs = new URLSearchParams({
+        device_id: (deviceInfo && deviceInfo.device_id) || '',
+        sn: (deviceInfo && deviceInfo.sn) || '',
+        imei1: (deviceInfo && deviceInfo.imei1) || '',
+        imei2: (deviceInfo && deviceInfo.imei2) || '',
+        device_id_hash: (deviceInfo && deviceInfo.device_id_hash) || ''
+    });
+    const ent = await apiFetch(`v1/display/entitlement?${qs.toString()}`, { auth: true });
+    serverEntitlement = ent.data || null;
+    const lic = await apiFetch('v1/display/licenses', { auth: true });
+    licenses = lic.data || [];
+    // 缓存服务端判定到本地状态（离线时展示最后已知状态）
     try {
-        const qs = new URLSearchParams({ device_id_hash: (deviceInfo && deviceInfo.device_id_hash) || '' });
-        const ent = await apiFetch(`v1/display/entitlement?${qs.toString()}`, { auth: true });
-        serverEntitlement = ent.data || null;
-        const lic = await apiFetch('v1/display/licenses', { auth: true });
-        licenses = lic.data || [];
-        // 缓存服务端判定到本地状态（离线时展示最后已知状态）
-        try {
-            const last4 = (licenses.length && licenses[0].key_last4) ? String(licenses[0].key_last4) : '';
-            const boundModel = (serverEntitlement && serverEntitlement.device && serverEntitlement.device.device_model) || '';
-            await ksuExec(handlerCmd('auth_entitlement_cache', serverEntitlement ? String(serverEntitlement.status) : 'not_purchased', last4, boundModel), true);
-        } catch (e) { /* 缓存失败不影响在线展示 */ }
-        // 服务端判定已激活且本地租约缺失/失效时，自动续租
-        if (serverEntitlement && serverEntitlement.status === 'active' && authState.lease_valid !== 1) {
-            try { await refreshLease(); } catch (e) { /* 租约失败不影响展示 */ }
-        }
-        await refreshAuthState();
-    } catch (e) {
-        // 服务端不可达：沿用本地状态，付费仅按本地租约判断
-        debugLog(`server auth sync failed: ${e.message}`);
+        const last4 = (licenses.length && licenses[0].key_last4) ? String(licenses[0].key_last4) : '';
+        const boundModel = (serverEntitlement && serverEntitlement.device && serverEntitlement.device.device_model) || '';
+        await ksuExec(handlerCmd('auth_entitlement_cache', serverEntitlement ? String(serverEntitlement.status) : 'not_purchased', last4, boundModel), true);
+    } catch (e) { /* 缓存失败不影响在线展示 */ }
+    // 服务端判定已激活且本地租约缺失/失效时，自动续租
+    if (serverEntitlement && serverEntitlement.status === 'active' && authState.lease_valid !== 1) {
+        await refreshLease();
     }
+    await refreshAuthState();
+    return true;
 }
 
-async function refreshAuthorizationView() {
-    if (authorizationRefreshPromise) return authorizationRefreshPromise;
-    // Paint from the last local state before crossing the root bridge. The
-    // bridge can take a few frames on a cold WebView; leaving both premium
-    // pages hidden until it returns produces a blank/translucent page.
-    renderMinePage();
-    renderVideoPage();
+function renderCurrentAuthorizationPage() {
+    if (activeTabId === 'tab-mine') renderMinePage();
+    if (activeTabId === 'tab-video') renderVideoPage();
     updatePaidMarkers();
+}
+
+async function refreshAuthorizationView({ force = false } = {}) {
+    renderCurrentAuthorizationPage();
+    if (!force && authorizationRefreshedAt > 0
+        && Date.now() - authorizationRefreshedAt < AUTH_REFRESH_TTL_MS) return true;
+    if (authorizationRefreshPromise) return authorizationRefreshPromise;
     authorizationRefreshPromise = (async () => {
         await refreshAuthState();
         await refreshDeviceInfo();
-        if (authToken) await refreshServerAuth();
+        authorizationRefreshedAt = Date.now();
+        if (authToken || authState.account === 'logged_in') await refreshServerAuth();
         await refreshAuthState();
-        renderMinePage();
-        renderVideoPage();
-        updatePaidMarkers();
-    })().catch((error) => {
-        debugLog(`authorization view refresh failed: ${error.message}`);
-    }).finally(() => {
+        renderCurrentAuthorizationPage();
+        if (activeTabId === 'tab-video') refreshVideoPageData({ force: true });
+        return true;
+    })().finally(() => {
         authorizationRefreshPromise = null;
     });
     return authorizationRefreshPromise;
 }
 
+async function forceRefreshAuthorization() {
+    showToast('正在刷新授权…');
+    try {
+        await refreshAuthorizationView({ force: true });
+        showToast('授权状态已刷新');
+    } catch (error) {
+        debugLog(`authorization refresh failed: ${error.message}`);
+        showToast('授权刷新失败：' + error.message);
+    }
+}
+
 async function refreshLease() {
-    if (!deviceInfo || !deviceInfo.device_id_hash) throw new Error('无法获取设备信息');
+    if (!deviceInfo || (!deviceInfo.device_id && !deviceInfo.sn && !deviceInfo.device_id_hash)) throw new Error('无法获取设备信息');
     const resp = await apiFetch('v1/display/licenses/lease', {
         method: 'POST', auth: true, nonce: true,
         body: {
+            device_id: deviceInfo.device_id || '',
+            sn: deviceInfo.sn || deviceInfo.device_id || '',
+            imei1: deviceInfo.imei1 || '',
+            imei2: deviceInfo.imei2 || '',
             device_id_hash: deviceInfo.device_id_hash,
             device_model: deviceInfo.device_model || '',
             soc_model: deviceInfo.soc_model || '',
@@ -1140,7 +1344,7 @@ function renderEntitlementSection() {
             break;
         default:
             body = productCardHtml() + `
-                <p class="text-hint">20 元永久授权，一张卡密绑定一台设备。支付成功后可直接绑定本机。</p>
+                <p class="text-hint">20 元永久授权，一张卡密绑定一台设备。支付交付时自动绑定本机。</p>
                 <button class="btn btn-primary btn-block" data-action="purchase">立即购买</button>
                 ${pendingPaymentActionHtml()}
                 <button class="btn btn-secondary btn-block" data-action="bind">输入卡密绑定</button>`;
@@ -1212,10 +1416,7 @@ const mineActions = {
     lease: doRefreshLease,
     download: doDownload,
     update: doCheckUpdate,
-    refresh: () => {
-        showToast('正在刷新授权…');
-        return refreshAuthorizationView();
-    },
+    refresh: forceRefreshAuthorization,
     openPanel: openAuthPanel
 };
 
@@ -1512,7 +1713,7 @@ async function showBind(prefilledKey = '') {
         key = await showPrompt('绑定本机', '请输入完整显示卡密。', { placeholder: 'MOC-XXXX-XXXX-XXXX-XXXX' });
     }
     if (key === null || key === undefined || !key) return;
-    if (!deviceInfo || !deviceInfo.device_id_hash) {
+    if (!deviceInfo || (!deviceInfo.device_id && !deviceInfo.sn && !deviceInfo.device_id_hash)) {
         showToast('无法获取设备信息，请稍后重试');
         return;
     }
@@ -1522,6 +1723,10 @@ async function showBind(prefilledKey = '') {
             method: 'POST', auth: true, nonce: true,
             body: {
                 card_key: key,
+                device_id: deviceInfo.device_id || '',
+                sn: deviceInfo.sn || deviceInfo.device_id || '',
+                imei1: deviceInfo.imei1 || '',
+                imei2: deviceInfo.imei2 || '',
                 device_id_hash: deviceInfo.device_id_hash,
                 device_model: deviceInfo.device_model || '',
                 soc_model: deviceInfo.soc_model || '',
@@ -1703,6 +1908,10 @@ function renderPurchaseSheet(catalog) {
 }
 
 async function createDisplayPaymentOrder(product, methodCode) {
+    if (!deviceInfo || (!deviceInfo.device_id && !deviceInfo.sn && !deviceInfo.device_id_hash)) {
+        showToast('无法读取本机设备标识，不能创建未绑定授权');
+        return;
+    }
     setPaymentActions([
         { label: '正在创建订单…', className: 'btn-primary', disabled: true, onClick: () => {} }
     ]);
@@ -1719,9 +1928,15 @@ async function createDisplayPaymentOrder(product, methodCode) {
                 order_kind: 'display_cardkey_new',
                 device_info: JSON.stringify({
                     client: 'module-webui',
+                    device_id: (deviceInfo && deviceInfo.device_id) || '',
+                    sn: (deviceInfo && (deviceInfo.sn || deviceInfo.device_id)) || '',
+                    imei1: (deviceInfo && deviceInfo.imei1) || '',
+                    imei2: (deviceInfo && deviceInfo.imei2) || '',
                     order_kind: 'display_cardkey_new',
                     device_id_hash: (deviceInfo && deviceInfo.device_id_hash) || '',
-                    device_model: (deviceInfo && deviceInfo.device_model) || ''
+                    device_model: (deviceInfo && deviceInfo.device_model) || '',
+                    soc_model: (deviceInfo && deviceInfo.soc_model) || '',
+                    build_fingerprint: (deviceInfo && deviceInfo.build_fingerprint) || ''
                 })
             }
         });
@@ -1876,12 +2091,11 @@ function renderPaymentSuccess(cardKey) {
         <div class="auth-lock-hero">
             ${ICON.check(40)}
             <h3>显示授权已发放</h3>
-            <p class="text-hint">卡密已归属当前慕容调度账号。确认后即可绑定这台设备。</p>
+            <p class="text-hint">卡密已在支付交付时绑定到本机，授权立即可用。</p>
         </div>
         ${cardKey ? `<div class="payment-license">${esc(cardKey)}</div>` : ''}`;
     setPaymentActions([
-        { label: '稍后绑定', className: 'btn-secondary', onClick: closePaymentOverlay },
-        { label: '绑定本机', className: 'btn-primary', onClick: async () => { closePaymentOverlay(); await showBind(cardKey); } }
+        { label: '完成', className: 'btn-primary', onClick: async () => { closePaymentOverlay(); await refreshAuthorizationView({ force: true }); } }
     ]);
 }
 
@@ -1927,6 +2141,10 @@ function openAuthPanel() {
 // ============================================================
 function packagesQuery() {
     return new URLSearchParams({
+        device_id: (deviceInfo && deviceInfo.device_id) || '',
+        sn: (deviceInfo && (deviceInfo.sn || deviceInfo.device_id)) || '',
+        imei1: (deviceInfo && deviceInfo.imei1) || '',
+        imei2: (deviceInfo && deviceInfo.imei2) || '',
         device_id_hash: (deviceInfo && deviceInfo.device_id_hash) || '',
         device_model: (deviceInfo && deviceInfo.device_model) || '',
         soc_model: (deviceInfo && deviceInfo.soc_model) || '',
@@ -1939,7 +2157,7 @@ function packagesQuery() {
 }
 
 async function fetchPackages() {
-    if (!deviceInfo || !deviceInfo.device_id_hash) return [];
+    if (!deviceInfo || (!deviceInfo.device_id && !deviceInfo.sn && !deviceInfo.device_id_hash)) return [];
     const resp = await apiFetch(`v1/display/packages?${packagesQuery().toString()}`, { auth: true });
     return (resp.data || []).filter(p => p.status !== 'disabled');
 }
@@ -2019,18 +2237,42 @@ function renderVideoPage() {
     if (isPremium()) {
         authPanel.hidden = true;
         content.hidden = false;
-        renderVideoPackageArea();
         if (authState.package_installed === 1) {
             document.getElementById('video-installed').hidden = false;
-            loadVideoMotionConfig();
+            const info = document.getElementById('video-package-info');
+            if (info) info.hidden = true;
         } else {
             document.getElementById('video-installed').hidden = true;
+            const info = document.getElementById('video-package-info');
+            if (info) info.hidden = false;
         }
     } else {
         content.hidden = true;
         authPanel.hidden = false;
         renderVideoAuthPanel();
     }
+}
+
+async function refreshVideoPageData({ force = false } = {}) {
+    if (activeTabId !== 'tab-video' || !isPremium()) return false;
+    if (!force && videoDataRefreshedAt > 0
+        && Date.now() - videoDataRefreshedAt < VIDEO_DATA_TTL_MS) return true;
+    if (videoDataRefreshPromise) return videoDataRefreshPromise;
+    videoDataRefreshPromise = (async () => {
+        if (authState.package_installed === 1) {
+            await loadVideoMotionConfig();
+        } else {
+            await renderVideoPackageArea();
+        }
+        videoDataRefreshedAt = Date.now();
+        return true;
+    })().catch(error => {
+        debugLog(`video page refresh failed: ${error.message}`);
+        return false;
+    }).finally(() => {
+        videoDataRefreshPromise = null;
+    });
+    return videoDataRefreshPromise;
 }
 
 function renderVideoAuthPanel() {
@@ -3313,7 +3555,7 @@ async function saveGlobalMode() {
 }
 
 async function refreshAppliedMode() {
-    if (document.hidden || appliedModePollBusy) return;
+    if (document.hidden || activeTabId !== 'tab-rates' || appliedModePollBusy) return;
     appliedModePollBusy = true;
     try {
         const raw = await ksuExec(`head -n 1 "${CONFIG_FILE}"`, true);
@@ -3339,18 +3581,32 @@ async function refreshAppliedMode() {
 }
 
 function startAppliedModePolling() {
-    if (appliedModePoll !== null) clearInterval(appliedModePoll);
-    appliedModePoll = setInterval(refreshAppliedMode, 1200);
+    if (appliedModePoll !== null || document.hidden || activeTabId !== 'tab-rates') return;
+    appliedModePoll = setInterval(refreshAppliedMode, APPLIED_MODE_POLL_MS);
+}
+
+function stopAppliedModePolling() {
+    if (appliedModePoll === null) return;
+    clearInterval(appliedModePoll);
+    appliedModePoll = null;
+}
+
+function syncAppliedModePolling() {
+    if (!document.hidden && activeTabId === 'tab-rates') startAppliedModePolling();
+    else stopAppliedModePolling();
+}
+
+function setupLiveRefresh() {
     document.addEventListener('visibilitychange', () => {
-        if (!document.hidden) {
-            refreshAppliedMode();
-            if (isPremium()) loadVideoMotionConfig();
-        }
+        syncAppliedModePolling();
+        if (document.hidden) return;
+        if (activeTabId === 'tab-rates') refreshAppliedMode();
+        if (activeTabId === 'tab-video') refreshVideoPageData({ force: true });
     });
 }
 
 // 应用列表
-async function loadAppList() {
+async function loadAppListNow() {
     const listEl = document.getElementById('app-list');
     if (!listEl) return;
     listEl.innerHTML = '<div class="loading">正在加载应用列表…</div>';
@@ -3392,16 +3648,37 @@ async function loadAppList() {
     renderAppList(allPackages);
     renderVideoAppPicker();
     setTimeout(() => {
+        if (activeTabId !== 'tab-rates' && activeTabId !== 'tab-video') return;
         allPackages.forEach(pkg => {
             if (!appLabels[pkg]) queueAppLabelFetch(pkg);
         });
     }, 1000);
 }
 
+async function ensureAppListLoaded({ force = false } = {}) {
+    if (appListLoaded && !force) return true;
+    if (appListLoadPromise) return appListLoadPromise;
+    appListLoadPromise = loadAppListNow().then(() => {
+        appListLoaded = true;
+        return true;
+    }).catch(error => {
+        debugLog(`application list load failed: ${error.message}`);
+        return false;
+    }).finally(() => {
+        appListLoadPromise = null;
+    });
+    return appListLoadPromise;
+}
+
+async function loadAppList() {
+    return ensureAppListLoaded();
+}
+
 async function toggleSystemApps() {
     const toggle = document.getElementById('show-system-apps');
     try { localStorage.setItem(SHOW_SYSTEM_APPS_KEY, toggle && toggle.checked ? '1' : '0'); } catch (e) { /* ignore */ }
-    await loadAppList();
+    appListLoaded = false;
+    await ensureAppListLoaded({ force: true });
 }
 
 function filterAppList() {
@@ -3490,7 +3767,9 @@ function updateLabelUI(pkg, label) {
 async function processLabelQueue() {
     if (processingQueue) return;
     processingQueue = true;
-    while (labelQueue.length > 0) {
+    while (labelQueue.length > 0
+        && (activeTabId === 'tab-rates' || activeTabId === 'tab-video')
+        && !document.hidden) {
         const batch = labelQueue.splice(0, 3);
         await Promise.all(batch.map(pkg => fetchAppLabel(pkg)));
         await new Promise(r => setTimeout(r, 50));
@@ -3784,8 +4063,7 @@ function runAfterFirstPaint(task) {
 
 async function initializeModuleData() {
     try {
-        await refreshAuthState();
-        await refreshDeviceInfo();
+        await Promise.all([refreshAuthState(), refreshDeviceInfo()]);
         updatePaidMarkers();
 
         await loadSystemStatus();
@@ -3794,17 +4072,18 @@ async function initializeModuleData() {
         await loadDisplayModes();
         renderVideoPage();
         renderMinePage();
-        startAppliedModePolling();
-        setTimeout(loadAppList, 500);
+        syncAppliedModePolling();
+        if (activeTabId === 'tab-rates' || activeTabId === 'tab-video') {
+            ensureAppListLoaded();
+        }
 
         // 后台同步服务端授权（不阻塞免费流程）
-        if (authToken) {
-            refreshServerAuth().then(() => {
-                renderMinePage();
-                renderVideoPage();
-                updatePaidMarkers();
+        if (authToken || authState.account === 'logged_in') {
+            refreshAuthorizationView({ force: true }).catch(error => {
+                debugLog(`initial authorization sync failed: ${error.message}`);
             });
         }
+        if (activeTabId === 'tab-video') refreshVideoPageData({ force: true });
         scheduleAutomaticUpdateCheck();
     } catch (e) {
         console.error("Init failed:", e);
@@ -3821,6 +4100,7 @@ function init() {
         setupTheme();
         setupTabs();
         setupAuthorizationPullRefresh();
+        setupLiveRefresh();
         bindStaticEvents();
 
         // Restore only in-memory state before the first frame. Root bridge and

@@ -50,7 +50,6 @@ try {
     $entries = @($archive.Entries | ForEach-Object { $_.FullName })
     $requiredFreePaths = @(
         "post-fs-data.sh",
-        "bin/hmbird.ko",
         "bin/rmx5200_drm_modes.ko",
         "bin/plk110_drm_modes.ko",
         "bin/pjd110_drm_modes.ko",
@@ -79,6 +78,9 @@ try {
             $_ -like "bin/process_dts.*" -or
             $_ -like "bin/rate_daemon.*"
         }
+    )
+    $retiredHmbirdLeaks = @(
+        $entries | Where-Object { $_ -eq "bin/hmbird.ko" }
     )
 
     $daemonEntry = $archive.Entries | Where-Object { $_.FullName -eq "bin/rate_daemon" }
@@ -136,7 +138,7 @@ Write-Host "files: $($entries.Count)"
 Write-Host "bytes: $size"
 Write-Host "sha256: $hash"
 
-$failures = @($pathLeaks) + @($researchLeaks) + @($daemonMarkers) + @($hookMarkers)
+$failures = @($pathLeaks) + @($researchLeaks) + @($retiredHmbirdLeaks) + @($daemonMarkers) + @($hookMarkers)
 if ($failures.Count -gt 0) {
     $failures | ForEach-Object { Write-Error "Private/research leak: $_" }
     exit 1

@@ -2,7 +2,6 @@
 
 MODDIR=${0%/*}
 DISPLAY_HELPER="$MODDIR/scripts/display_backend.sh"
-HMBIRD_HELPER="$MODDIR/scripts/hmbird_backend.sh"
 COLOROS_CONFIG_HELPER="$MODDIR/scripts/coloros_config.sh"
 GATE_HELPER="$MODDIR/scripts/display_license_gate.sh"
 PREMIUM_POST_FS="$MODDIR/premium/scripts/premium_post_fs_data.sh"
@@ -65,12 +64,9 @@ if [ -f "$COLOROS_CONFIG_HELPER" ]; then
     sh "$COLOROS_CONFIG_HELPER" apply >/dev/null 2>&1 || true
 fi
 
-# HMBIRD is a free compatibility component independent of the selected display
-# backend. If DTBO already supplied the node, the KO validates and reuses it;
-# otherwise it creates the live node when the kernel exposes dynamic OF.
-if [ -f "$HMBIRD_HELPER" ]; then
-    sh "$HMBIRD_HELPER" apply >/dev/null 2>&1 || true
-fi
+# HMBIRD is supplied by the persistent DTBO written during installation.
+# The retired live-OF sidecar path is intentionally disabled because it can
+# block boot before the vendor consumer has initialized.
 
 [ -f "$DISPLAY_HELPER" ] || exit 0
 if [ ! -d /sys/module/rmx5200_ltpo_modes ]; then
