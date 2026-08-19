@@ -3214,7 +3214,7 @@ async function removeRate(nodeName) {
 }
 
 // 应用更改（start_apply 后台流式）
-async function applyChanges() {
+async function runApplyChanges() {
     await loadDtsBackend();
     const term = openFlowModal("应用 DTS 更改");
     term.log(`应用后端: ${currentDtsBackend}`, 'step');
@@ -3281,7 +3281,7 @@ async function applyChanges() {
 }
 
 // 一键智能超频（smart_add_rate + start_flash）
-async function flashDtbo(customRate) {
+async function runFlashDtbo(customRate) {
     await loadDtsBackend();
     const backendLabels = { dtbo: 'DTBO', drm: 'DRM-KO' };
     const backendLabel = backendLabels[currentDtsBackend] || 'DTBO';
@@ -3352,6 +3352,36 @@ async function flashDtbo(customRate) {
         await term.waitButton(); term.close();
     }
     await loadSystemStatus();
+}
+
+// A touch can be delivered twice by some KSU WebUI hosts. Keep one flow per
+// page so a duplicate event cannot create a second backend task or replace the
+// user's successful log with the lock rejection from the duplicate request.
+let displayFlowInFlight = false;
+async function applyChanges() {
+    if (displayFlowInFlight) {
+        showToast('应用任务已在运行，请等待当前流程完成');
+        return;
+    }
+    displayFlowInFlight = true;
+    try {
+        return await runApplyChanges();
+    } finally {
+        displayFlowInFlight = false;
+    }
+}
+
+async function flashDtbo(customRate) {
+    if (displayFlowInFlight) {
+        showToast('应用任务已在运行，请等待当前流程完成');
+        return;
+    }
+    displayFlowInFlight = true;
+    try {
+        return await runFlashDtbo(customRate);
+    } finally {
+        displayFlowInFlight = false;
+    }
 }
 
 async function restoreDtbo() {

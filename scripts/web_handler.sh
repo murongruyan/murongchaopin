@@ -44,6 +44,7 @@ BASE_UPDATE_JSON_URL="https://github.com/murongruyan/murongchaopin/releases/down
 STOCK_DTBO="$IMG_DIR/dtbo.img"
 STOCK_MANIFEST="$IMG_DIR/dtbo.img.sha256"
 STOCK_RECOVERY="$IMG_DIR/dtbo.img.gz"
+DTBO_APPLY_LOCK_DIR="$MOD_PATH/runtime/dtbo_apply.lock"
 
 [ -f "$AVB_HELPER" ] && . "$AVB_HELPER"
 [ -r "$MODE_MANIFEST_HELPER" ] && . "$MODE_MANIFEST_HELPER"
@@ -215,6 +216,98 @@ stock_guard_end() {
         return 1
     fi
     return 0
+}
+
+dtbo_apply_lock_pid_alive() {
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    kill -0 "$1" 2>/dev/null
+}
+
+dtbo_apply_lock_active() {
+    DTBO_APPLY_LOCK_ACTIVE=0
+    [ -d "$DTBO_APPLY_LOCK_DIR" ] || return 1
+    DTBO_LOCK_PID=$(sed -n '1p' "$DTBO_APPLY_LOCK_DIR/pid" 2>/dev/null |
+        tr -d '[:space:]')
+    if [ -z "$DTBO_LOCK_PID" ]; then
+        sleep 1
+        DTBO_LOCK_PID=$(sed -n '1p' "$DTBO_APPLY_LOCK_DIR/pid" 2>/dev/null |
+            tr -d '[:space:]')
+    fi
+    if dtbo_apply_lock_pid_alive "$DTBO_LOCK_PID"; then
+        DTBO_APPLY_LOCK_ACTIVE=1
+        return 0
+    fi
+    return 1
+}
+
+acquire_dtbo_apply_lock() {
+    DTBO_APPLY_LOCK_ACTIVE=0
+    DTBO_APPLY_LOCK_QUIET_ACTIVE="${1:-0}"
+    mkdir -p "$MOD_PATH/runtime" || return 1
+    DTBO_APPLY_LOCK_TOKEN="$$.$(date +%s 2>/dev/null)"
+
+    if ! mkdir "$DTBO_APPLY_LOCK_DIR" 2>/dev/null; then
+        DTBO_LOCK_PID=$(sed -n '1p' "$DTBO_APPLY_LOCK_DIR/pid" 2>/dev/null |
+            tr -d '[:space:]')
+        if [ -z "$DTBO_LOCK_PID" ]; then
+            sleep 1
+            DTBO_LOCK_PID=$(sed -n '1p' "$DTBO_APPLY_LOCK_DIR/pid" 2>/dev/null |
+                tr -d '[:space:]')
+        fi
+        if dtbo_apply_lock_pid_alive "$DTBO_LOCK_PID"; then
+            DTBO_APPLY_LOCK_ACTIVE=1
+            if [ "$DTBO_APPLY_LOCK_QUIET_ACTIVE" != 1 ]; then
+                echo "Error: 已有 DTBO 应用任务正在运行（PID $DTBO_LOCK_PID），请等待当前任务完成"
+            fi
+            return 1
+        fi
+
+        DTBO_STALE_LOCK="$DTBO_APPLY_LOCK_DIR.stale.$$"
+        if ! mv "$DTBO_APPLY_LOCK_DIR" "$DTBO_STALE_LOCK" 2>/dev/null; then
+            echo "Error: DTBO 应用任务锁正被其他进程更新，请稍后重试"
+            return 1
+        fi
+        rm -f "$DTBO_STALE_LOCK/pid" "$DTBO_STALE_LOCK/token" 2>/dev/null
+        rmdir "$DTBO_STALE_LOCK" 2>/dev/null
+        if ! mkdir "$DTBO_APPLY_LOCK_DIR" 2>/dev/null; then
+            echo "Error: 无法取得 DTBO 应用任务锁，请稍后重试"
+            return 1
+        fi
+    fi
+
+    printf '%s\n' "$DTBO_APPLY_LOCK_TOKEN" > "$DTBO_APPLY_LOCK_DIR/token" || {
+        rmdir "$DTBO_APPLY_LOCK_DIR" 2>/dev/null
+        return 1
+    }
+    printf '%s\n' "$$" > "$DTBO_APPLY_LOCK_DIR/pid" || {
+        rm -f "$DTBO_APPLY_LOCK_DIR/token"
+        rmdir "$DTBO_APPLY_LOCK_DIR" 2>/dev/null
+        return 1
+    }
+    return 0
+}
+
+claim_dtbo_apply_lock() {
+    DTBO_CLAIM_TOKEN="$1"
+    [ -n "$DTBO_CLAIM_TOKEN" ] || return 1
+    [ "$(sed -n '1p' "$DTBO_APPLY_LOCK_DIR/token" 2>/dev/null)" = \
+      "$DTBO_CLAIM_TOKEN" ] || return 1
+    DTBO_APPLY_LOCK_TOKEN="$DTBO_CLAIM_TOKEN"
+    printf '%s\n' "$$" > "$DTBO_APPLY_LOCK_DIR/pid" || return 1
+}
+
+release_dtbo_apply_lock() {
+    [ -n "${DTBO_APPLY_LOCK_TOKEN:-}" ] || return 0
+    [ "$(sed -n '1p' "$DTBO_APPLY_LOCK_DIR/token" 2>/dev/null)" = \
+      "$DTBO_APPLY_LOCK_TOKEN" ] || return 0
+    rm -f "$DTBO_APPLY_LOCK_DIR/pid" "$DTBO_APPLY_LOCK_DIR/token" 2>/dev/null
+    rmdir "$DTBO_APPLY_LOCK_DIR" 2>/dev/null
+}
+
+arm_dtbo_apply_lock_cleanup() {
+    trap 'release_dtbo_apply_lock' 0 1 2 15
 }
 
 read_dts_backend() {
@@ -1509,6 +1602,8 @@ case "$1" in
         ;;
 
     "apply_changes")
+        acquire_dtbo_apply_lock || exit 1
+        arm_dtbo_apply_lock_cleanup
         echo "开始应用更改..."
         stock_guard_begin || exit 1
         APPLY_RESULT=0
@@ -1519,6 +1614,8 @@ case "$1" in
         ;;
 
     "flash_dtbo")
+        acquire_dtbo_apply_lock || exit 1
+        arm_dtbo_apply_lock_cleanup
         stock_guard_begin || exit 1
         FLASH_RESULT=0
         do_smart_add "$2" && do_apply_selected_backend || FLASH_RESULT=$?
@@ -1531,12 +1628,27 @@ case "$1" in
     # start_apply / start_flash：立即返回，流程在后台运行，日志写 apply.log，状态写 apply.status
     # apply_changes_bg / flash_dtbo_bg：后台实际执行体
     "start_apply")
+        if ! acquire_dtbo_apply_lock 1; then
+            if [ "${DTBO_APPLY_LOCK_ACTIVE:-0}" = 1 ]; then
+                echo "Started: $MOD_PATH/apply.log (已有任务，继续读取当前流程)"
+                exit 0
+            fi
+            exit 1
+        fi
         rm -f "$MOD_PATH/apply.log" "$MOD_PATH/apply.status"
-        setsid sh "$MOD_PATH/scripts/web_handler.sh" apply_changes_bg > "$MOD_PATH/apply.log" 2>&1 &
+        setsid sh "$MOD_PATH/scripts/web_handler.sh" apply_changes_bg \
+            "$DTBO_APPLY_LOCK_TOKEN" > "$MOD_PATH/apply.log" 2>&1 &
+        printf '%s\n' "$!" > "$DTBO_APPLY_LOCK_DIR/pid"
         echo "Started: $MOD_PATH/apply.log"
         ;;
 
     "apply_changes_bg")
+        claim_dtbo_apply_lock "$2" || {
+            echo "Error: DTBO 应用任务锁无效，已拒绝启动并发任务"
+            echo "FAIL" > "$MOD_PATH/apply.status"
+            exit 1
+        }
+        arm_dtbo_apply_lock_cleanup
         rm -f "$MOD_PATH/apply.status"
         APPLY_RESULT=0
         stock_guard_begin && do_apply_selected_backend || APPLY_RESULT=$?
@@ -1550,12 +1662,27 @@ case "$1" in
         ;;
 
     "start_flash")
+        if ! acquire_dtbo_apply_lock 1; then
+            if [ "${DTBO_APPLY_LOCK_ACTIVE:-0}" = 1 ]; then
+                echo "Started: $MOD_PATH/apply.log (已有任务，继续读取当前流程)"
+                exit 0
+            fi
+            exit 1
+        fi
         rm -f "$MOD_PATH/apply.log" "$MOD_PATH/apply.status"
-        setsid sh "$MOD_PATH/scripts/web_handler.sh" flash_dtbo_bg "$2" > "$MOD_PATH/apply.log" 2>&1 &
+        setsid sh "$MOD_PATH/scripts/web_handler.sh" flash_dtbo_bg "$2" \
+            "$DTBO_APPLY_LOCK_TOKEN" > "$MOD_PATH/apply.log" 2>&1 &
+        printf '%s\n' "$!" > "$DTBO_APPLY_LOCK_DIR/pid"
         echo "Started: $MOD_PATH/apply.log"
         ;;
 
     "flash_dtbo_bg")
+        claim_dtbo_apply_lock "$3" || {
+            echo "Error: DTBO 应用任务锁无效，已拒绝启动并发任务"
+            echo "FAIL" > "$MOD_PATH/apply.status"
+            exit 1
+        }
+        arm_dtbo_apply_lock_cleanup
         rm -f "$MOD_PATH/apply.status"
         FLASH_RESULT=0
         stock_guard_begin && do_smart_add "$2" && \
