@@ -63,9 +63,11 @@ if "$TMP_DIR/model-1-process_dts" --hmbird-only=HMBIRD_EXT \
 fi
 
 grep -q 'prepare-dtbo' "$ROOT/scripts/hmbird_backend.sh"
-grep -q 'patch_hmbird_dtbo.awk' "$ROOT/scripts/hmbird_backend.sh"
+grep -q 'PROCESS_DTS_MODE="--hmbird-only=' "$ROOT/scripts/hmbird_backend.sh"
+grep -q 'process_dts.*PROCESS_DTS_MODE' "$ROOT/scripts/hmbird_backend.sh"
 grep -q 'hmbird_backend.sh.*prepare-dtbo' "$ROOT/customize.sh"
 grep -q 'HMBIRD 已由 DTBO 显示流程写入' "$ROOT/customize.sh"
+! grep -q 'patch_hmbird_dtbo.awk' "$ROOT/scripts/hmbird_backend.sh"
 ! grep -q 'patch_hmbird_dtbo.awk' "$ROOT/customize.sh"
 grep -q 'HMBIRD_HELPER.*prepare-dtbo' "$ROOT/scripts/web_handler.sh"
 

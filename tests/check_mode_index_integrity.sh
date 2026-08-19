@@ -7,6 +7,7 @@ PROCESS_DTS="$ROOT/src/process_dts.c"
 RMX_KO="$ROOT/src/ko/rmx5200_display_modes.c"
 PLK_KO="$ROOT/src/ko/plk110_display_modes.c"
 PLK_FIXTURE="$ROOT/tests/fixtures/plk110_index_input.dts"
+PLK_NO_INDEX_FIXTURE="$ROOT/tests/fixtures/plk110_no_index_input.dts"
 PJD_FIXTURE="$ROOT/tests/fixtures/pjd110_index_input.dts"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
@@ -60,6 +61,16 @@ if grep -q 'timing@sdc_fhd_90\|timing@oplus_fhd_120' "$PLK_OUTPUT"; then
     echo 'FAIL: PLK110 removed modes remain in the final timing table' >&2
     exit 1
 fi
+
+mkdir -p "$TMP_DIR/plk110-no-index/dtbo_dts"
+cp "$PLK_NO_INDEX_FIXTURE" "$TMP_DIR/plk110-no-index/dtbo_dts/input.dts"
+(cd "$TMP_DIR/plk110-no-index" && "$TMP_DIR/process_dts_plk110" >/dev/null)
+PLK_NO_INDEX_OUTPUT="$TMP_DIR/plk110-no-index/dtbo_dts/input.dts"
+no_index_count=$(grep -c 'cell-index' "$PLK_NO_INDEX_OUTPUT")
+[ "$no_index_count" -eq 11 ] || {
+    echo "FAIL: missing PLK110 cell-index properties were not synthesized: $no_index_count" >&2
+    exit 1
+}
 
 (cd "$TMP_DIR/pjd110" && "$TMP_DIR/process_dts_pjd110" >/dev/null)
 PJD_OUTPUT="$TMP_DIR/pjd110/dtbo_dts/input.dts"

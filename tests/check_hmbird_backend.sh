@@ -24,7 +24,8 @@ if grep -Eq '(^|[[:space:];])insmod[[:space:]].*hmbird|bin/hmbird\.ko' \
 fi
 
 grep -q 'prepare-dtbo' "$ROOT/scripts/hmbird_backend.sh"
-grep -q 'patch_hmbird_dtbo.awk' "$ROOT/scripts/hmbird_backend.sh"
+grep -q 'PROCESS_DTS_MODE="--hmbird-only=' "$ROOT/scripts/hmbird_backend.sh"
+grep -q 'process_dts.*PROCESS_DTS_MODE' "$ROOT/scripts/hmbird_backend.sh"
 grep -q 'hmbird_ko_free=0' "$ROOT/config/display_mode_manifest.txt"
 grep -q 'hmbird_ko_backends=dtbo' "$ROOT/config/display_mode_manifest.txt"
 

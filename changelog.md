@@ -1,5 +1,11 @@
 # 更新日志
 
+## v2.9.8
+
+1. 修复 DRM-KO 安装在真实 DTBO 中因使用 overlay-only HMBIRD 扫描器而报 `no unambiguous HMBIRD target structure`；恢复使用按机型、项目 ID 和面板识别的 `process_dts --hmbird-only` 路径。
+2. 修复 OnePlus 15 原厂 timing 节点缺少 `cell-index` 时的安装失败；工具现在只对缺失的 `cell-index` 自动补写，仍对时钟和帧率等关键属性严格报错。
+3. 加入真实无 `cell-index` 的 PLK110 回归用例，并将模式索引检查纳入 CI。
+
 ## v2.9.7
 
 1. 修复 WebUI 重复点击或多个页面同时启动 DTBO 应用任务时，两个后台进程共用并互删 `dtb_temp.*.dtb`，最终报 `Can not read file: dtb_temp.0.dtb` 的竞态问题。

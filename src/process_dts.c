@@ -884,8 +884,38 @@ unsigned long long get_prop_u64(const char *content, const char *prop_name) {
 int update_prop_u64(char *content, const char *prop_name, unsigned long long new_val) {
     char *p = find_prop(content, prop_name);
     if (!p) {
-        // printf("Warning: Property '%s' not found for update.\n", prop_name);
-        return 0;
+        /* Some stock PLK110 timing nodes omit cell-index. Synthesize only
+         * that structural property; inventing a missing clock/framerate
+         * would make the timing invalid. */
+        if (strcmp(prop_name, "cell-index") != 0) return 0;
+        char *close = strrchr(content, '}');
+        char *line_start;
+        char indent[64] = {0};
+        char new_line[128];
+        size_t content_len;
+        size_t indent_len = 0;
+        size_t insert_len;
+        size_t i;
+        if (!close || close == content) return 0;
+        line_start = close;
+        while (line_start > content && line_start[-1] != '\n') line_start--;
+        for (i = 0; line_start + i < close &&
+                    (line_start[i] == ' ' || line_start[i] == '\t') &&
+                    indent_len + 1 < sizeof(indent); i++) {
+            indent[indent_len++] = line_start[i];
+        }
+        if (indent_len + 1 >= sizeof(indent)) return 0;
+        indent[indent_len++] = '\t';
+        indent[indent_len] = '\0';
+        snprintf(new_line, sizeof(new_line), "%scell-index = <0x%llx>;\n",
+                 indent, new_val);
+        insert_len = strlen(new_line);
+        content_len = strlen(content);
+        if (content_len + insert_len + 1 >= MAX_BLOCK) return 0;
+        memmove(line_start + insert_len, line_start,
+                content_len - (size_t)(line_start - content) + 1);
+        memcpy(line_start, new_line, insert_len);
+        return 1;
     }
     
     // Safety: Find ;

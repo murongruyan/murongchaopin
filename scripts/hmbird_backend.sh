@@ -6,7 +6,6 @@ BIN_DIR="$MOD_DIR/bin"
 IMG_DIR="$MOD_DIR/img"
 WORK_DIR="$MOD_DIR/workspace"
 AVB_HELPER="$MOD_DIR/scripts/dtbo_avb.sh"
-HMBIRD_PATCHER="$MOD_DIR/scripts/patch_hmbird_dtbo.awk"
 STATE_DIR="$MOD_DIR/runtime/hmbird"
 STATUS_FILE="$STATE_DIR/status.txt"
 LOG_FILE="$STATE_DIR/runtime.log"
@@ -61,12 +60,16 @@ prepare_hmbird_dtbo() {
             }
             ;;
         *)
-            PROCESS_DTS_MODE=
+            # process_dts already understands the real Qualcomm DTBO entry
+            # layout used by RMX5200/PLK110 and applies HMBIRD only to the
+            # matching project/panel. Do not replace it with an overlay-only
+            # text scanner: many stock DTBOs are plain DTS nodes.
+            PROCESS_DTS_MODE="--hmbird-only=$HMBIRD_TYPE"
             DTBO_PROFILE=hmbird-only
             ;;
     esac
-    [ -r "$AVB_HELPER" ] && [ -r "$HMBIRD_PATCHER" ] &&
-        [ -x "$BIN_DIR/unpack_dtbo" ] && [ -x "$BIN_DIR/pack_dtbo" ] || {
+    [ -r "$AVB_HELPER" ] && [ -x "$BIN_DIR/unpack_dtbo" ] &&
+        [ -x "$BIN_DIR/process_dts" ] && [ -x "$BIN_DIR/pack_dtbo" ] || {
         echo "Error: HMBIRD DTBO tooling is incomplete" >&2
         return 1
     }
@@ -91,43 +94,11 @@ prepare_hmbird_dtbo() {
         echo "Error: unable to unpack stock DTBO for HMBIRD" >&2
         return 1
     }
-    # PJD110 keeps its separate battery-capacity companion patch. HMBIRD is
-    # normalized by the structure-only pass below regardless of this step.
-    if [ -n "$PROCESS_DTS_MODE" ]; then
-        ./process_dts "$PROCESS_DTS_MODE" >/dev/null 2>&1 || {
-            echo "Error: unable to create $DTBO_PROFILE DTS" >&2
-            return 1
-        }
-    fi
-    HMBIRD_PATCH_COUNT=0
-    HMBIRD_DTS_COUNT=0
-    for HMBIRD_DTS in "$BIN_DIR"/dtbo_dts/*.dts; do
-        [ -f "$HMBIRD_DTS" ] || continue
-        HMBIRD_DTS_COUNT=$((HMBIRD_DTS_COUNT + 1))
-        HMBIRD_PATCH_TMP="$HMBIRD_DTS.hmbird.$$"
-        awk -v requested_type="$HMBIRD_TYPE" -f "$HMBIRD_PATCHER" \
-            "$HMBIRD_DTS" > "$HMBIRD_PATCH_TMP"
-        HMBIRD_PATCH_RC=$?
-        case "$HMBIRD_PATCH_RC" in
-            0)
-                mv -f "$HMBIRD_PATCH_TMP" "$HMBIRD_DTS" || return 1
-                HMBIRD_PATCH_COUNT=$((HMBIRD_PATCH_COUNT + 1))
-                ;;
-            3)
-                rm -f "$HMBIRD_PATCH_TMP"
-                echo "Error: no unambiguous HMBIRD target structure in $HMBIRD_DTS" >&2
-                return 1
-                ;;
-            *)
-                rm -f "$HMBIRD_PATCH_TMP"
-                echo "Error: malformed or conflicting HMBIRD structure in $HMBIRD_DTS" >&2
-                return 1
-                ;;
-        esac
-    done
-    [ "$HMBIRD_DTS_COUNT" -gt 0 ] &&
-        [ "$HMBIRD_PATCH_COUNT" -eq "$HMBIRD_DTS_COUNT" ] || {
-        echo "Error: expected every DTBO entry to be patched (patched=$HMBIRD_PATCH_COUNT entries=$HMBIRD_DTS_COUNT)" >&2
+    # PJD110 keeps its separate battery-capacity companion patch. The same
+    # process_dts binary performs the HMBIRD-only structural edit for every
+    # supported model and leaves unrelated DTBO entries byte-for-byte intact.
+    ./process_dts "$PROCESS_DTS_MODE" || {
+        echo "Error: unable to create $DTBO_PROFILE DTS" >&2
         return 1
     }
     ./pack_dtbo >/dev/null 2>&1 || {
