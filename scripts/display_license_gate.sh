@@ -723,21 +723,30 @@ gate_package_commit() {
         rm -rf "$_staging"; echo "Error: symbolic links are not allowed"; return 1
     fi
     [ -f "$_staging/manifest.json" ] || { rm -rf "$_staging"; echo "Error: manifest.json missing"; return 1; }
-    [ -f "$_staging/manifest.sig" ] || { rm -rf "$_staging"; echo "Error: manifest.sig missing"; return 1; }
 
-    # manifest signature (package public key, base64url signature file)
+    # Package authorization comes from the server-issued one-time download
+    # token and the whole-archive SHA-256 checked above. Legacy packages may
+    # still contain manifest.sig; verify it when the old public key is
+    # available, but an unsigned package is valid when all manifest/file
+    # hashes pass. This keeps old 1.0.3 packages installable without making a
+    # production signing key a release prerequisite.
     _pkg_pub=$(gate_pkg_pubkey_hex)
     _pkg_keyid=$(gate_pkg_key_id)
-    [ -n "$_pkg_pub" ] && [ -x "$GATE_VERIFY_BIN" ] || {
-        rm -rf "$_staging"; echo "Error: package verifier or public key missing"; return 1
-    }
-    _sig_b64=$(sed -n '1{s/\r$//;p;q;}' "$_staging/manifest.sig" | tr -d '[:space:]')
-    _sig_hex=$(gate_b64url_to_hex "$_sig_b64") || {
-        rm -rf "$_staging"; echo "Error: manifest signature decode failed"; return 1
-    }
-    "$GATE_VERIFY_BIN" "$_pkg_pub" "$_staging/manifest.json" "$_sig_hex" || {
-        rm -rf "$_staging"; echo "Error: manifest signature verification failed"; return 1
-    }
+    _manifest_signed=0
+    if [ -f "$_staging/manifest.sig" ]; then
+        _sig_b64=$(sed -n '1{s/\r$//;p;q;}' "$_staging/manifest.sig" | tr -d '[:space:]')
+        if [ -n "$_pkg_pub" ] && [ -x "$GATE_VERIFY_BIN" ]; then
+            _sig_hex=$(gate_b64url_to_hex "$_sig_b64") || {
+                rm -rf "$_staging"; echo "Error: manifest signature decode failed"; return 1
+            }
+            "$GATE_VERIFY_BIN" "$_pkg_pub" "$_staging/manifest.json" "$_sig_hex" || {
+                rm -rf "$_staging"; echo "Error: manifest signature verification failed"; return 1
+            }
+            _manifest_signed=1
+        else
+            echo "Notice: manifest signature present but local verifier is unavailable; using token and SHA-256 checks"
+        fi
+    fi
 
     # manifest identity + compatibility
     _schema=$(gate_json_number "$_staging/manifest.json" schema_version)
@@ -767,9 +776,11 @@ gate_package_commit() {
     else
         _version_code="$_manifest_version_code"
     fi
-    [ -n "$_manifest_keyid" ] && [ "$_manifest_keyid" = "$_pkg_keyid" ] || {
-        rm -rf "$_staging"; echo "Error: manifest signature key_id mismatch"; return 1
-    }
+    if [ "$_manifest_signed" = 1 ]; then
+        [ -n "$_manifest_keyid" ] && [ -n "$_pkg_keyid" ] && [ "$_manifest_keyid" = "$_pkg_keyid" ] || {
+            rm -rf "$_staging"; echo "Error: manifest signature key_id mismatch"; return 1
+        }
+    fi
     [ -n "$_min_base" ] || { rm -rf "$_staging"; echo "Error: manifest missing min_base_version"; return 1; }
     if ! awk -v a="$_base" -v b="$_min_base" 'BEGIN { split(a, x, "."); split(b, y, "."); for (i = 1; i <= 3; i++) { x[i] += 0; y[i] += 0 } ok = (x[1] > y[1]) || (x[1] == y[1] && x[2] > y[2]) || (x[1] == y[1] && x[2] == y[2] && x[3] >= y[3]); exit ok ? 0 : 1 }' 2>/dev/null; then
         rm -rf "$_staging"; echo "Error: base module version too old (need >= $_min_base, have $_base)"; return 1
@@ -852,7 +863,7 @@ gate_package_commit() {
         rm -f "$_files_list" "$_targets_list"; rm -rf "$_staging"; echo "Error: manifest declares no files"; return 1
     }
 
-    # reject undeclared files (outside manifest.json + manifest.sig)
+    # reject undeclared files (outside manifest.json and optional manifest.sig)
     _extra=$(cd "$_staging" && find . -type f ! -name manifest.json ! -name manifest.sig | \
         sed 's|^\./||' | while IFS= read -r _p; do
         case "$_p" in
@@ -893,12 +904,21 @@ gate_package_commit() {
             echo "Error: cannot set target mode $_target"; return 1
         }
     done < "$_files_list"
-    cp "$_staging/manifest.json" "$_install/manifest.json" &&
+    cp "$_staging/manifest.json" "$_install/manifest.json" || {
+        rm -f "$_files_list" "$_targets_list"; rm -rf "$_staging" "$_install"
+        echo "Error: cannot materialize manifest"; return 1
+    }
+    chmod 0644 "$_install/manifest.json" || {
+        rm -f "$_files_list" "$_targets_list"; rm -rf "$_staging" "$_install"
+        echo "Error: cannot set manifest mode"; return 1
+    }
+    if [ -f "$_staging/manifest.sig" ]; then
         cp "$_staging/manifest.sig" "$_install/manifest.sig" &&
-        chmod 0644 "$_install/manifest.json" "$_install/manifest.sig" || {
+            chmod 0644 "$_install/manifest.sig" || {
             rm -f "$_files_list" "$_targets_list"; rm -rf "$_staging" "$_install"
-            echo "Error: cannot materialize signed manifest"; return 1
+            echo "Error: cannot materialize optional manifest signature"; return 1
         }
+    fi
     rm -f "$_files_list" "$_targets_list"
 
     # atomic swap: keep previous paid version on failure

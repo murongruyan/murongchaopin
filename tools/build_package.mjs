@@ -4,9 +4,11 @@
 //   node build_package.mjs --payload <payload-dir> --out <staging-dir> \
 //     --version <x.y.z> --version-code <int> --feature-code <code> \
 //     --min-base <x.y.z> --models RMX5200 --socs SM8750 --kernels 6.12 \
-//     --backends drm,dtbo --channel stable --key-seed <hex seed>
+//     --backends drm,dtbo --channel stable [--key-seed <hex seed>]
 //
-// The staging dir receives manifest.json, manifest.sig and payload/.
+// The staging dir receives manifest.json and payload/. A manifest signature is
+// optional; download authorization and archive/file SHA-256 checks remain
+// mandatory for package delivery and installation.
 // Zip the staging dir contents afterwards (WSL: zip -r out.zip .).
 import { createHash, createPrivateKey, sign } from 'node:crypto';
 import { copyFileSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
@@ -28,20 +30,27 @@ const socs = (arg('--socs', 'SM8750') || '').split(',').map((s) => s.trim()).fil
 const kernels = (arg('--kernels', '6.12') || '').split(',').map((s) => s.trim()).filter(Boolean);
 const backends = (arg('--backends', 'drm') || '').split(',').map((s) => s.trim()).filter(Boolean);
 const channel = arg('--channel', 'stable');
-const keySeedHex = arg('--key-seed');
-const keyId = arg('--key-id', process.env.DISPLAY_PACKAGE_KEY_ID || 'display-package-2026-08-prod');
+const keySeedHex = arg('--key-seed', '');
+const keyId = arg('--key-id', process.env.DISPLAY_PACKAGE_KEY_ID || '');
 
-if (!payloadDir || !outDir || !keySeedHex) {
+if (!payloadDir || !outDir) {
   console.error('missing required arguments');
   process.exit(2);
 }
 
 const PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
-const privateKey = createPrivateKey({
-  key: Buffer.concat([PREFIX, Buffer.from(keySeedHex, 'hex')]),
-  format: 'der',
-  type: 'pkcs8',
-});
+let privateKey = null;
+if (keySeedHex) {
+  if (!/^[0-9a-fA-F]{64}$/.test(keySeedHex) || !keyId) {
+    console.error('key-seed must be 32-byte hex and key-id must be provided when signing');
+    process.exit(2);
+  }
+  privateKey = createPrivateKey({
+    key: Buffer.concat([PREFIX, Buffer.from(keySeedHex, 'hex')]),
+    format: 'der',
+    type: 'pkcs8',
+  });
+}
 
 function walk(dir, prefix) {
   const entries = [];
@@ -81,7 +90,7 @@ const manifest = {
   supported_socs: socs,
   supported_kernels: kernels,
   supported_backends: backends,
-  signature_key_id: keyId,
+  signature_key_id: privateKey ? keyId : '',
   files,
 };
 
@@ -112,11 +121,12 @@ function prettyManifest(m) {
 
 const manifestText = prettyManifest(manifest);
 const manifestBytes = Buffer.from(manifestText, 'utf8');
-const signature = sign(null, manifestBytes, privateKey);
-
 mkdirSync(join(outDir, 'payload'), { recursive: true });
 writeFileSync(join(outDir, 'manifest.json'), manifestBytes);
-writeFileSync(join(outDir, 'manifest.sig'), Buffer.from(signature).toString('base64url') + '\n');
+if (privateKey) {
+  const signature = sign(null, manifestBytes, privateKey);
+  writeFileSync(join(outDir, 'manifest.sig'), Buffer.from(signature).toString('base64url') + '\n');
+}
 for (const entry of files) {
   const source = join(payloadDir, entry.target_path.split('/').join(sep));
   const target = join(outDir, entry.path.split('/').join(sep));
@@ -126,4 +136,5 @@ for (const entry of files) {
 
 console.log('staging written to', outDir);
 console.log('version', version, 'version_code', versionCode, 'files', files.length);
+console.log('manifest signature', privateKey ? 'enabled' : 'disabled');
 void relative;
