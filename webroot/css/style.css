@@ -1003,6 +1003,8 @@ textarea.form-input {
     gap: 12px;
     padding: 12px 0;
     border-bottom: 1px solid var(--border);
+    content-visibility: auto;
+    contain-intrinsic-size: 76px;
 }
 
 .app-item:last-child {
@@ -1130,6 +1132,15 @@ textarea.form-input {
     align-items: center;
     padding: 12px 0;
     border-bottom: 1px solid var(--border);
+    content-visibility: auto;
+    contain-intrinsic-size: 58px;
+}
+
+.selection-progress {
+    padding: 12px;
+    color: var(--text-3);
+    font-size: 12px;
+    text-align: center;
 }
 
 .video-app-name {
@@ -1702,7 +1713,7 @@ textarea.form-input {
     display: flex;
     width: 88%;
     max-width: 620px;
-    transform: translateX(-50%);
+    transform: translate3d(-50%, 0, 0);
     border-radius: var(--radius-lg);
     background: var(--nav-bg);
     border: 1px solid var(--nav-border);
@@ -1712,6 +1723,8 @@ textarea.form-input {
     backdrop-filter: blur(22px) saturate(175%);
     z-index: 1000;
     overflow: hidden;
+    contain: paint;
+    backface-visibility: hidden;
 }
 
 .bottom-nav::before {

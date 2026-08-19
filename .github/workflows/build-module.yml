@@ -9,14 +9,14 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "module.prop 中的新版本号，例如 2.9.8"
+        description: "module.prop 中的新版本号，例如 2.9.9"
         required: false
-        default: "2.9.8"
+        default: "2.9.9"
         type: string
       version_code:
-        description: "module.prop 中的新 versionCode，例如 37"
+        description: "module.prop 中的新 versionCode，例如 38"
         required: false
-        default: "37"
+        default: "38"
         type: string
 
 env:
@@ -33,7 +33,7 @@ jobs:
       RELEASE_NAME: 慕容显示增强
       NDK_PACKAGE: "30.0.14904198"
       API_LEVEL: "29"
-      ZIP_NAME: Murong.Display.Enhancement-v2.9.8.zip
+      ZIP_NAME: Murong.Display.Enhancement-v2.9.9.zip
 
     steps:
       - name: Checkout
@@ -210,6 +210,8 @@ jobs:
           sh tests/check_refresh_rate_warning.sh
           sh tests/check_paid_webui.sh
           sh tests/check_webui_performance.sh
+          sh tests/check_webui_auth_flow.sh
+          sh tests/check_server_update_contract.sh
           sh tests/check_ksu_predictive_back.sh
           node --check webroot/js/main.js
           sh tests/check_web_stock_isolation.sh
@@ -454,7 +456,7 @@ jobs:
           artifactErrorsFailBuild: true
           artifacts: ${{ steps.package.outputs.zip_path }},${{ steps.package.outputs.checksum_path }}
           commit: ${{ env.RELEASE_COMMIT_SHA }}
-          bodyFile: docs/RELEASE_NOTES_v2.9.8.md
+          bodyFile: docs/RELEASE_NOTES_v2.9.9.md
           generateReleaseNotes: false
           makeLatest: true
           name: ${{ steps.release_meta.outputs.release_name }}

@@ -63,11 +63,20 @@ let updateCheckBusy = false;
 let automaticUpdateCheckStarted = false;
 let paymentCheckBusy = false;
 let authorizationRefreshPromise = null;
+let leaseRefreshPromise = null;
 let authorizationRefreshedAt = 0;
 let videoDataRefreshPromise = null;
 let videoDataRefreshedAt = 0;
 let appListLoaded = false;
 let appListLoadPromise = null;
+let appListRenderGeneration = 0;
+let appListRenderTimer = null;
+let displayModesLoaded = false;
+let displayModesLoadPromise = null;
+let minePageRenderKey = '';
+let videoPageRenderKey = '';
+let videoAuthRenderKey = '';
+let tabWorkGeneration = 0;
 
 // ============================================================
 // 调试日志
@@ -98,63 +107,60 @@ async function ksuExec(cmd, quiet = false, timeoutMs = 30000) {
             return;
         }
 
+        let settled = false;
+        let callbackName = '';
+        let timer = null;
+        const finish = (value) => {
+            if (settled) return;
+            settled = true;
+            if (timer) clearTimeout(timer);
+            if (callbackName) delete window[callbackName];
+            resolve(value);
+        };
+        const finishCallback = (code, stdout, stderr) => {
+            if (!quiet) debugLog(`[CB] code=${code} out_len=${stdout ? stdout.length : 0}`);
+            if (code !== 0) {
+                console.error(`Command failed with code ${code}: ${stderr}`);
+                finish(stdout ? stdout.trim() : (stderr ? "Error: " + stderr : "Error: Unknown failure"));
+                return;
+            }
+            finish(stdout ? stdout.trim() : "");
+        };
         try {
-            const result = ksu.exec(cmd, "{}");
-            if (result instanceof Promise) {
-                let settled = false;
-                const timer = setTimeout(() => {
-                    if (settled) return;
-                    settled = true;
-                    if (!quiet) debugLog(`[Timeout] ${cmd}`);
-                    resolve("Error: Command timed out");
-                }, timeoutMs);
+            // Register the callback before dispatching. Some KSU WebUI versions
+            // expose a callback API, while newer versions return a Promise. A
+            // probe call would execute state-changing commands twice, causing
+            // nonce-protected POSTs such as lease renewal to be replayed.
+            callbackName = `cb_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+            window[callbackName] = finishCallback;
+            timer = setTimeout(() => {
+                if (settled) return;
+                if (!quiet) debugLog(`[Timeout] ${cmd}`);
+                console.warn(`Command timed out: ${cmd}`);
+                finish("Error: Command timed out");
+            }, timeoutMs);
+
+            const result = ksu.exec(cmd, "{}", callbackName);
+            if (result && typeof result.then === 'function') {
                 result.then(res => {
-                    if (settled) return;
-                    settled = true;
-                    clearTimeout(timer);
                     if (typeof res === 'string') {
                         if (!quiet) debugLog(`[Res] length=${res.length}`);
-                        resolve(res);
+                        finish(res.trim());
                     } else {
-                        if (!quiet) debugLog(`[Res] stdout length=${res.stdout ? res.stdout.length : 0}`);
-                        resolve(res.stdout || "");
+                        const stdout = res && res.stdout ? res.stdout : "";
+                        if (!quiet) debugLog(`[Res] stdout length=${stdout.length}`);
+                        finish(stdout.trim());
                     }
                 }).catch(err => {
-                    if (settled) return;
-                    settled = true;
-                    clearTimeout(timer);
                     if (!quiet) debugLog(`[Err] ${err}`);
                     console.error("KSU Promise Error:", err);
-                    resolve("");
+                    finish("");
                 });
-            } else {
-                const callbackName = `cb_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-                const timeout = setTimeout(() => {
-                    delete window[callbackName];
-                    debugLog(`[Timeout] ${cmd}`);
-                    console.warn(`Command timed out: ${cmd}`);
-                    resolve("Error: Command timed out");
-                }, timeoutMs);
-
-                window[callbackName] = (code, stdout, stderr) => {
-                    clearTimeout(timeout);
-                    delete window[callbackName];
-                    debugLog(`[CB] code=${code} out_len=${stdout ? stdout.length : 0}`);
-                    if (code !== 0) {
-                        console.error(`Command failed with code ${code}: ${stderr}`);
-                        resolve(stdout ? stdout.trim() : (stderr ? "Error: " + stderr : "Error: Unknown failure"));
-                        return;
-                    }
-                    resolve(stdout ? stdout.trim() : "");
-                };
-
-                ksu.exec(cmd, "{}", callbackName);
             }
         } catch (e) {
             debugLog(`[Exception] ${e.message}`);
             console.error("KSU Exec Exception:", e);
-            resolve("");
+            finish("");
         }
     });
 }
@@ -170,6 +176,16 @@ function parseKeyValueOutput(output) {
         values[line.slice(0, separator).trim()] = line.slice(separator + 1).trim();
     });
     return values;
+}
+
+function authorizationRenderKey() {
+    return JSON.stringify({
+        token: !!authToken,
+        authState,
+        entitlement: serverEntitlement,
+        licenseCount: Array.isArray(licenses) ? licenses.length : -1,
+        payment: paymentOrder && paymentOrder.status ? paymentOrder.status : ''
+    });
 }
 
 function shellQuote(value) {
@@ -826,23 +842,50 @@ function activateTab(targetId, { push = false, back = false } = {}) {
     apply();
 
     syncAppliedModePolling();
-    runAfterFirstPaint(() => {
-        if (activeTabId !== targetId) return;
-        if (targetId === 'tab-logs') refreshLogs();
-        if (targetId === 'tab-video' || targetId === 'tab-mine') {
-            refreshAuthorizationView().catch(error => {
-                debugLog(`background authorization refresh failed: ${error.message}`);
-            });
+    // Keep the tap handler and the first visible frame free of DOM rebuilding.
+    // The target page shell is cheap, but rebuilding it synchronously is still
+    // noticeable on the Android WebView when the source page owns a large app
+    // list. Do it after the navigation frame, then start root/network work on
+    // the existing two-frame idle path.
+    requestAnimationFrame(() => {
+        if (activeTabId !== targetId || document.hidden) return;
+        if (targetId === 'tab-mine') renderMinePage();
+        if (targetId === 'tab-video') renderVideoPage();
+        scheduleTabBackgroundWork(targetId);
+    });
+}
+
+function scheduleTabBackgroundWork(targetId) {
+    const generation = ++tabWorkGeneration;
+    runAfterFirstPaint(async () => {
+        if (generation !== tabWorkGeneration || activeTabId !== targetId || document.hidden) return;
+        try {
+            if (targetId === 'tab-logs') {
+                await refreshLogs();
+                return;
+            }
+            if (targetId === 'tab-mine') {
+                await refreshAuthorizationView();
+                return;
+            }
+            if (targetId === 'tab-video') {
+                await Promise.all([refreshAuthorizationView(), ensureDisplayModesLoaded()]);
+                if (generation !== tabWorkGeneration || activeTabId !== targetId) return;
+                renderVideoPage();
+                await refreshVideoPageData();
+                processLabelQueue();
+                return;
+            }
+            if (targetId === 'tab-rates') {
+                await ensureDisplayModesLoaded();
+                if (generation !== tabWorkGeneration || activeTabId !== targetId) return;
+                refreshAppliedMode();
+                await ensureAppListLoaded({ renderRates: true });
+                processLabelQueue();
+            }
+        } catch (error) {
+            debugLog(`background ${targetId} refresh failed: ${error.message}`);
         }
-        if (targetId === 'tab-video') {
-            refreshVideoPageData();
-            ensureAppListLoaded();
-        }
-        if (targetId === 'tab-rates') {
-            refreshAppliedMode();
-            ensureAppListLoaded();
-        }
-        if (targetId === 'tab-rates' || targetId === 'tab-video') processLabelQueue();
     });
 }
 
@@ -1133,9 +1176,11 @@ async function refreshServerAuth() {
         imei2: (deviceInfo && deviceInfo.imei2) || '',
         device_id_hash: (deviceInfo && deviceInfo.device_id_hash) || ''
     });
-    const ent = await apiFetch(`v1/display/entitlement?${qs.toString()}`, { auth: true });
+    const [ent, lic] = await Promise.all([
+        apiFetch(`v1/display/entitlement?${qs.toString()}`, { auth: true }),
+        apiFetch('v1/display/licenses', { auth: true })
+    ]);
     serverEntitlement = ent.data || null;
-    const lic = await apiFetch('v1/display/licenses', { auth: true });
     licenses = lic.data || [];
     // 缓存服务端判定到本地状态（离线时展示最后已知状态）
     try {
@@ -1158,18 +1203,18 @@ function renderCurrentAuthorizationPage() {
 }
 
 async function refreshAuthorizationView({ force = false } = {}) {
-    renderCurrentAuthorizationPage();
     if (!force && authorizationRefreshedAt > 0
-        && Date.now() - authorizationRefreshedAt < AUTH_REFRESH_TTL_MS) return true;
+        && Date.now() - authorizationRefreshedAt < AUTH_REFRESH_TTL_MS) {
+        renderCurrentAuthorizationPage();
+        return true;
+    }
     if (authorizationRefreshPromise) return authorizationRefreshPromise;
     authorizationRefreshPromise = (async () => {
-        await refreshAuthState();
-        await refreshDeviceInfo();
+        await Promise.all([refreshAuthState(), refreshDeviceInfo()]);
         authorizationRefreshedAt = Date.now();
         if (authToken || authState.account === 'logged_in') await refreshServerAuth();
         await refreshAuthState();
         renderCurrentAuthorizationPage();
-        if (activeTabId === 'tab-video') refreshVideoPageData({ force: true });
         return true;
     })().finally(() => {
         authorizationRefreshPromise = null;
@@ -1189,24 +1234,32 @@ async function forceRefreshAuthorization() {
 }
 
 async function refreshLease() {
-    if (!deviceInfo || (!deviceInfo.device_id && !deviceInfo.sn && !deviceInfo.device_id_hash)) throw new Error('无法获取设备信息');
-    const resp = await apiFetch('v1/display/licenses/lease', {
-        method: 'POST', auth: true, nonce: true,
-        body: {
-            device_id: deviceInfo.device_id || '',
-            sn: deviceInfo.sn || deviceInfo.device_id || '',
-            imei1: deviceInfo.imei1 || '',
-            imei2: deviceInfo.imei2 || '',
-            device_id_hash: deviceInfo.device_id_hash,
-            device_model: deviceInfo.device_model || '',
-            soc_model: deviceInfo.soc_model || '',
-            build_fingerprint: deviceInfo.build_fingerprint || ''
+    if (leaseRefreshPromise) return leaseRefreshPromise;
+    leaseRefreshPromise = (async () => {
+        if (!deviceInfo || (!deviceInfo.device_id && !deviceInfo.sn && !deviceInfo.device_id_hash)) {
+            throw new Error('无法获取设备信息');
         }
+        const resp = await apiFetch('v1/display/licenses/lease', {
+            method: 'POST', auth: true, nonce: true,
+            body: {
+                device_id: deviceInfo.device_id || '',
+                sn: deviceInfo.sn || deviceInfo.device_id || '',
+                imei1: deviceInfo.imei1 || '',
+                imei2: deviceInfo.imei2 || '',
+                device_id_hash: deviceInfo.device_id_hash,
+                device_model: deviceInfo.device_model || '',
+                soc_model: deviceInfo.soc_model || '',
+                build_fingerprint: deviceInfo.build_fingerprint || ''
+            }
+        });
+        const leaseB64 = utf8ToBase64Url(JSON.stringify(resp.data));
+        const r = await ksuExec(handlerCmd('auth_save_lease', leaseB64), true);
+        if (!r.includes('Success')) throw new Error(r || '租约保存失败');
+        return resp.data;
+    })().finally(() => {
+        leaseRefreshPromise = null;
     });
-    const leaseB64 = utf8ToBase64Url(JSON.stringify(resp.data));
-    const r = await ksuExec(handlerCmd('auth_save_lease', leaseB64), true);
-    if (!r.includes('Success')) throw new Error(r || '租约保存失败');
-    return resp.data;
+    return leaseRefreshPromise;
 }
 
 // 有效 entitlement：服务端在线时优先，离线回退本地
@@ -1250,9 +1303,12 @@ function productCardHtml() {
         </div>`;
 }
 
-function renderMinePage() {
+function renderMinePage({ force = false } = {}) {
     const el = document.getElementById('auth-section');
     if (!el) return;
+    const renderKey = authorizationRenderKey();
+    if (!force && minePageRenderKey === renderKey && el.childElementCount > 0) return;
+    minePageRenderKey = renderKey;
     el.innerHTML = '';
     const st = authState;
 
@@ -1481,13 +1537,9 @@ function compareVersions(left, right) {
     return 0;
 }
 
-function trustedUpdateUrl(value, kind) {
+function trustedUpdateUrl(value) {
     const url = String(value || '');
-    if (kind === 'zip') {
-        return url.startsWith('https://github.com/murongruyan/murongchaopin/releases/download/');
-    }
-    return url.startsWith('https://github.com/murongruyan/murongchaopin')
-        || url.startsWith('https://raw.githubusercontent.com/murongruyan/murongchaopin/');
+    return url.startsWith('https://github.com/murongruyan/murongchaopin/releases/download/');
 }
 
 async function fetchBaseUpdateInfo() {
@@ -1496,30 +1548,33 @@ async function fetchBaseUpdateInfo() {
         throw new Error((raw || '更新后端无响应').replace(/^Error:\s*/, ''));
     }
     const values = parseKeyValueOutput(raw);
-    let remote;
+    let response;
     try {
-        remote = JSON.parse(base64UrlToUtf8(values.remote_json_b64));
+        response = JSON.parse(base64UrlToUtf8(values.remote_json_b64));
     } catch (e) {
         throw new Error('更新信息格式错误');
     }
+    if (!response || response.success !== true || !response.data || !response.data.latest_version) {
+        throw new Error((response && response.message) || '服务器未返回模块版本');
+    }
+    const remote = response.data.latest_version;
+    const updateInfo = response.data.update_info || {};
     const localCode = Number(values.local_version_code);
-    const remoteCode = Number(remote.versionCode);
+    const remoteCode = Number(remote.version_code);
     if (!Number.isInteger(localCode) || localCode < 0
         || !Number.isInteger(remoteCode) || remoteCode <= 0) {
         throw new Error('更新版本号无效');
     }
-    if (!trustedUpdateUrl(remote.zipUrl, 'zip')) throw new Error('更新下载地址不受信任');
-    if (remote.changelog && !trustedUpdateUrl(remote.changelog, 'changelog')) {
-        throw new Error('更新日志地址不受信任');
-    }
+    if (!trustedUpdateUrl(remote.download_url)) throw new Error('更新下载地址不受信任');
     const info = {
         localVersion: values.local_version || '—',
         localCode,
         remoteVersion: String(remote.version || remoteCode),
         remoteCode,
-        zipUrl: remote.zipUrl,
-        changelogUrl: remote.changelog || '',
-        available: remoteCode > localCode
+        zipUrl: remote.download_url,
+        updateLog: String(remote.update_log || updateInfo.update_message || '').trim(),
+        forceUpdate: updateInfo.force_update === true,
+        available: updateInfo.need_update === true || remoteCode > localCode
     };
     const versionEl = document.getElementById('module-version');
     if (versionEl) versionEl.innerText = `${info.localVersion} (${info.localCode})`;
@@ -1571,6 +1626,13 @@ async function showAvailableUpdate(result, automatic) {
         rows.push(`<li><span class="kv-label">付费组件</span><span class="kv-value">${esc(authState.package_version || '—')} → ${esc(result.paid.version || '—')}</span></li>`);
     }
     const paidNotes = result.paid && String(result.paid.release_notes || '').trim();
+    const baseNotes = result.base && result.base.available && String(result.base.updateLog || '').trim();
+    const baseNotesHtml = baseNotes
+        ? `<section class="update-release-notes">
+            <div class="update-release-notes-title">基础模块更新日志</div>
+            <div class="update-release-notes-body">${esc(baseNotes).replace(/\r?\n/g, '<br>')}</div>
+        </section>`
+        : '';
     const paidNotesHtml = paidNotes
         ? `<section class="update-release-notes">
             <div class="update-release-notes-title">付费组件更新日志</div>
@@ -1580,8 +1642,9 @@ async function showAvailableUpdate(result, automatic) {
     body.innerHTML = `
         <div class="notice notice-info">检测到可用更新</div>
         <ul class="kv-list">${rows.join('')}</ul>
+        ${baseNotesHtml}
         ${paidNotesHtml}
-        ${result.base && result.base.available && result.base.changelogUrl ? '<p class="text-hint">基础模块更新日志可在下载页面查看。</p>' : ''}`;
+        `;
     const buttons = [{ label: '稍后', className: 'btn-secondary', value: 'later' }];
     if (result.base && result.base.available) {
         buttons.push({ label: '下载基础模块', className: 'btn-primary', value: 'base' });
@@ -1648,27 +1711,41 @@ async function showLogin() {
     ], { okLabel: '登录' });
     if (!values) return false;
     showToast('正在登录…');
+    let data;
     try {
         const resp = await apiFetch('user.php?action=login', {
             method: 'POST', form: true,
             body: { username: values.username, password: values.password }
         });
-        const data = resp.data || {};
+        data = resp.data || {};
         if (!data.token) throw new Error(resp.message || '登录失败');
         authToken = data.token;
         try { sessionStorage.setItem(TOKEN_KEY, authToken); } catch (e) { /* ignore */ }
         await ksuExec(handlerCmd('auth_save_account', data.username || values.username, String(data.user_id || ''), authToken), true);
-        showToast('登录成功');
+    } catch (e) {
+        showToast('登录失败：' + e.message);
+        return false;
+    }
+
+    // The account session is valid even when a follow-up entitlement or lease
+    // sync is temporarily rejected. Do not report that secondary failure as a
+    // bad username/password, otherwise users keep retrying a successful login.
+    showToast('登录成功');
+    try {
         await refreshAuthState();
         await refreshServerAuth();
         await renderMinePage();
         await renderVideoPage();
         updatePaidMarkers();
-        return true;
     } catch (e) {
-        showToast('登录失败：' + e.message);
-        return false;
+        debugLog(`post-login authorization sync failed: ${e.message}`);
+        await refreshAuthState();
+        renderMinePage();
+        renderVideoPage();
+        updatePaidMarkers();
+        showToast('登录成功，但授权同步失败：' + e.message);
     }
+    return true;
 }
 
 async function showRegister() {
@@ -2234,6 +2311,10 @@ function renderVideoPage() {
     const content = document.getElementById('video-content');
     if (!authPanel || !content) return;
 
+    const renderKey = `${authorizationRenderKey()}|premium=${isPremium() ? 1 : 0}|installed=${authState.package_installed || 0}`;
+    if (videoPageRenderKey === renderKey) return;
+    videoPageRenderKey = renderKey;
+
     if (isPremium()) {
         authPanel.hidden = true;
         content.hidden = false;
@@ -2278,6 +2359,9 @@ async function refreshVideoPageData({ force = false } = {}) {
 function renderVideoAuthPanel() {
     const el = document.getElementById('video-auth-panel');
     if (!el) return;
+    const renderKey = authorizationRenderKey();
+    if (videoAuthRenderKey === renderKey && el.childElementCount > 0) return;
+    videoAuthRenderKey = renderKey;
     el.innerHTML = `
         <h2 class="group-title">显示增强</h2>
         <div class="card auth-panel">
@@ -2350,7 +2434,10 @@ async function loadVideoMotionConfig() {
     if (!isPremium()) return;
     const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
     try {
-        const result = await ksuExec(`sh "${scriptPath}" get_video_motion_config`, true);
+        const [result, appsResult] = await Promise.all([
+            ksuExec(`sh "${scriptPath}" get_video_motion_config`, true),
+            ksuExec(`sh "${scriptPath}" get_video_motion_apps`, true)
+        ]);
         const values = {};
         result.split(/\r?\n/).forEach(line => {
             const separator = line.indexOf('=');
@@ -2384,7 +2471,7 @@ async function loadVideoMotionConfig() {
         else if (status.startsWith('applied:')) setVideoMotionStatus('已挂载', 'success');
         else setVideoMotionStatus('已启用', 'success');
         refreshVideoMotionTargetDetail();
-        await loadVideoMotionApps();
+        parseVideoMotionApps(appsResult);
     } catch (error) {
         setVideoMotionStatus('读取失败', 'error');
         debugLog(`Video motion load failed: ${error.message}`);
@@ -2408,7 +2495,11 @@ function refreshVideoMotionTargetDetail() {
 async function loadVideoMotionApps() {
     const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
     const result = await ksuExec(`sh "${scriptPath}" get_video_motion_apps`, true);
-    videoMotionEntries = result.split(/\r?\n/).map(line => {
+    parseVideoMotionApps(result);
+}
+
+function parseVideoMotionApps(result) {
+    videoMotionEntries = String(result || '').split(/\r?\n/).map(line => {
         const fields = line.split('|');
         if (fields.length !== 4) return null;
         return { packageName: fields[0], vendorRate: fields[1], activity: fields[2], command: fields[3] };
@@ -2663,6 +2754,10 @@ async function openVideoRatePicker() {
 }
 
 async function openVideoAppPicker() {
+    if (!appListLoaded) {
+        showToast('正在读取已安装应用…');
+        await ensureAppListLoaded({ renderRates: false });
+    }
     const body = document.createElement('div');
     body.className = 'selection-dialog';
     const search = document.createElement('input');
@@ -2674,7 +2769,10 @@ async function openVideoAppPicker() {
     list.className = 'selection-list';
     body.append(search, list);
 
-    const render = () => {
+    const batchSize = 60;
+    let visibleLimit = batchSize;
+    const render = (reset = false) => {
+        if (reset) visibleLimit = batchSize;
         const term = search.value.trim().toLowerCase();
         const packages = allPackages.filter(pkg => !term
             || pkg.toLowerCase().includes(term)
@@ -2683,19 +2781,30 @@ async function openVideoAppPicker() {
             list.innerHTML = '<div class="empty-state">未找到匹配的应用</div>';
             return;
         }
-        list.innerHTML = packages.map(pkg => `
+        const visible = packages.slice(0, visibleLimit);
+        const previousTop = list.scrollTop;
+        list.innerHTML = visible.map(pkg => `
             <button class="selection-row" type="button" data-package="${esc(pkg)}">
                 <img class="selection-app-icon" src="ksu://icon/${encodeURIComponent(pkg)}" alt="" loading="lazy">
                 <span class="selection-app-copy">
                     <strong class="selection-app-name">${esc(appLabels[pkg] || pkg)}</strong>
                     <small>${esc(pkg)}</small>
                 </span>
-            </button>`).join('');
+            </button>`).join('') + (visible.length < packages.length
+                ? `<div class="selection-progress">${visible.length} / ${packages.length}</div>` : '');
+        list.scrollTop = previousTop;
         list.querySelectorAll('[data-package]').forEach(button => {
             button.onclick = () => finishModal(button.dataset.package);
         });
     };
-    search.addEventListener('input', render);
+    search.addEventListener('input', () => render(true));
+    list.addEventListener('scroll', () => {
+        if (list.scrollTop + list.clientHeight < list.scrollHeight - 120) return;
+        const nextLimit = Math.min(allPackages.length, visibleLimit + batchSize);
+        if (nextLimit === visibleLimit) return;
+        visibleLimit = nextLimit;
+        render();
+    }, { passive: true });
     render();
     const result = await showModalRaw('选择已安装应用', body, [
         { label: '取消', className: 'btn-secondary', value: null }
@@ -2727,35 +2836,27 @@ async function rebootForVideoMotionConfig() {
 // 超频页：系统状态 / 显示策略 / 自定义超频
 // ============================================================
 async function loadSystemStatus() {
-    // 槽位
-    try {
-        const slot = await ksuExec("getprop ro.boot.slot_suffix");
-        const el = document.getElementById('sys-slot');
-        if (el) el.innerText = slot || "未知";
-    } catch (e) { /* ignore */ }
-
-    // 当前刷新率
-    try {
-        const fpsRaw = await ksuExec("dumpsys display | grep -oE 'fps=[0-9.]+' | head -n1");
-        const fps = fpsRaw.split('=')[1] || "未知";
-        const el = document.getElementById('sys-fps');
-        if (el) el.innerText = fps;
-    } catch (e) { /* ignore */ }
-
-    // 型号
-    try {
-        const model = await ksuExec("getprop ro.product.vendor.model");
-        const el = document.getElementById('sys-model');
-        if (el) el.innerText = model || "Unknown";
-    } catch (e) { /* ignore */ }
-
-    // 原厂备份
+    const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
     const backupBadge = document.getElementById('sys-backup');
     const restoreBtn = document.getElementById('btn-restore');
     if (backupBadge) { backupBadge.innerText = "检查中…"; backupBadge.className = "status-badge"; }
     try {
-        const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
-        const checkBackup = await ksuExec(`sh "${scriptPath}" check_backup`);
+        const result = await ksuExec(
+            `slot="$(getprop ro.boot.slot_suffix 2>/dev/null)"; `
+            + `fps="$(dumpsys display 2>/dev/null | grep -oE 'fps=[0-9.]+' | head -n1 | cut -d= -f2)"; `
+            + `model="$(getprop ro.product.vendor.model 2>/dev/null)"; `
+            + `backup="$(sh "${scriptPath}" check_backup 2>/dev/null | head -n1)"; `
+            + `printf 'slot=%s\\nfps=%s\\nmodel=%s\\nbackup=%s\\n' "$slot" "$fps" "$model" "$backup"`,
+            true
+        );
+        const values = parseKeyValueOutput(result);
+        const slotEl = document.getElementById('sys-slot');
+        const fpsEl = document.getElementById('sys-fps');
+        const modelEl = document.getElementById('sys-model');
+        if (slotEl) slotEl.innerText = values.slot || '未知';
+        if (fpsEl) fpsEl.innerText = values.fps || '未知';
+        if (modelEl) modelEl.innerText = values.model || 'Unknown';
+        const checkBackup = values.backup || '';
         if (backupBadge && restoreBtn) {
             if (!checkBackup) {
                 backupBadge.innerText = "未知";
@@ -3513,6 +3614,16 @@ async function loadDisplayModes() {
     currentResolutionWidth = currentModeObj ? currentModeObj.width : (globalChoice.width > 0 ? globalChoice.width : 1080);
     renderResolutionSeg();
     renderDisplayModes();
+    displayModesLoaded = displayModes.length > 0;
+}
+
+async function ensureDisplayModesLoaded() {
+    if (displayModesLoaded) return true;
+    if (displayModesLoadPromise) return displayModesLoadPromise;
+    displayModesLoadPromise = loadDisplayModes().then(() => displayModesLoaded).finally(() => {
+        displayModesLoadPromise = null;
+    });
+    return displayModesLoadPromise;
 }
 
 function renderDisplayModes() {
@@ -3636,10 +3747,10 @@ function setupLiveRefresh() {
 }
 
 // 应用列表
-async function loadAppListNow() {
+async function loadAppListNow({ renderRates = activeTabId === 'tab-rates' } = {}) {
     const listEl = document.getElementById('app-list');
     if (!listEl) return;
-    listEl.innerHTML = '<div class="loading">正在加载应用列表…</div>';
+    if (renderRates) listEl.innerHTML = '<div class="loading">正在加载应用列表…</div>';
 
     const showSystem = (() => {
         try { return localStorage.getItem(SHOW_SYSTEM_APPS_KEY) === '1'; } catch (e) { return false; }
@@ -3652,7 +3763,7 @@ async function loadAppListNow() {
     const raw = await ksuExec(cmd);
     const packages = [...new Set(raw.split('\n').map(p => p.trim()).filter(Boolean))].sort();
     if (packages.length === 0) {
-        listEl.innerHTML = `<div class="empty-state">${showSystem ? '未找到应用' : '未找到第三方应用'}</div>`;
+        if (renderRates) listEl.innerHTML = `<div class="empty-state">${showSystem ? '未找到应用' : '未找到第三方应用'}</div>`;
         return;
     }
     allPackages = packages;
@@ -3671,11 +3782,15 @@ async function loadAppListNow() {
                         if (pkg) appLabels[pkg] = label;
                     });
                 }
+                // Package-manager calls can be synchronous in older KSU
+                // WebViews. Yield between batches so a tab switch or scroll
+                // event gets a frame even with system apps enabled.
+                if (i + batchSize < packages.length) await yieldToBrowser();
             }
         } catch (e) { /* ignore */ }
     }
 
-    renderAppList(allPackages);
+    if (renderRates && activeTabId === 'tab-rates') renderAppList(allPackages);
     renderVideoAppPicker();
     setTimeout(() => {
         if (activeTabId !== 'tab-rates' && activeTabId !== 'tab-video') return;
@@ -3685,10 +3800,13 @@ async function loadAppListNow() {
     }, 1000);
 }
 
-async function ensureAppListLoaded({ force = false } = {}) {
-    if (appListLoaded && !force) return true;
+async function ensureAppListLoaded({ force = false, renderRates = activeTabId === 'tab-rates' } = {}) {
+    if (appListLoaded && !force) {
+        if (renderRates && activeTabId === 'tab-rates') renderAppList(allPackages);
+        return true;
+    }
     if (appListLoadPromise) return appListLoadPromise;
-    appListLoadPromise = loadAppListNow().then(() => {
+    appListLoadPromise = loadAppListNow({ renderRates }).then(() => {
         appListLoaded = true;
         return true;
     }).catch(error => {
@@ -3815,54 +3933,77 @@ function queueAppLabelFetch(pkg) {
     }
 }
 
+function createAppListItem(pkg) {
+    const item = document.createElement('div');
+    item.className = 'app-item';
+
+    const config = appConfigs[pkg] || { modeId: -1, width: null, fps: -1 };
+    const configuredMode = config.modeId >= 0 ? displayModes.find(mode => mode.id === config.modeId) : null;
+    const selectedWidth = config.width || (configuredMode && configuredMode.width) || currentResolutionWidth;
+    const selectedFps = config.fps >= 30 ? config.fps : (configuredMode ? configuredMode.fps : -1);
+    const policyText = (configuredMode || selectedFps >= 30)
+        ? `${resolutionLabel(selectedWidth)} · ${selectedFps >= 30 ? selectedFps + 'Hz' : '默认刷新率'}`
+        : '跟随全局';
+
+    const parts = pkg.split('.');
+    let displayName = pkg;
+    if (parts.length > 1) {
+        const last = parts.pop();
+        displayName = `${parts.join('.')}.<b>${esc(last)}</b>`;
+    } else {
+        displayName = esc(displayName);
+    }
+    if (!appLabels[pkg]) queueAppLabelFetch(pkg);
+    const label = esc(appLabels[pkg] || "加载中…");
+
+    item.innerHTML = `
+        <div class="app-info">
+            <div class="app-name" id="label-${esc(pkg)}">${label}</div>
+            <div class="app-pkg">${displayName}</div>
+        </div>
+        <div class="app-policy">${esc(policyText)}</div>
+        <div class="app-actions">
+            <button class="icon-btn" title="配置">${ICON.edit()}</button>
+            <button class="icon-btn danger" title="删除">${ICON.trash()}</button>
+        </div>`;
+    const [editBtn, delBtn] = item.querySelectorAll('.icon-btn');
+    editBtn.onclick = () => openAppConfigDialog(pkg);
+    delBtn.onclick = () => removeAppConfig(pkg);
+    return item;
+}
+
 function renderAppList(packages) {
     const listEl = document.getElementById('app-list');
     if (!listEl) return;
-    if (!packages.length) {
+    const generation = ++appListRenderGeneration;
+    if (appListRenderTimer !== null) {
+        clearTimeout(appListRenderTimer);
+        appListRenderTimer = null;
+    }
+    const list = Array.isArray(packages) ? packages.slice() : [];
+    if (!list.length) {
         listEl.innerHTML = '<div class="empty-state">未找到匹配的应用</div>';
         return;
     }
     listEl.innerHTML = '';
-    const fragment = document.createDocumentFragment();
-    packages.forEach(pkg => {
-        const item = document.createElement('div');
-        item.className = 'app-item';
-
-        const config = appConfigs[pkg] || { modeId: -1, width: null, fps: -1 };
-        const configuredMode = config.modeId >= 0 ? displayModes.find(mode => mode.id === config.modeId) : null;
-        const selectedWidth = config.width || (configuredMode && configuredMode.width) || currentResolutionWidth;
-        const selectedFps = config.fps >= 30 ? config.fps : (configuredMode ? configuredMode.fps : -1);
-        const policyText = (configuredMode || selectedFps >= 30)
-            ? `${resolutionLabel(selectedWidth)} · ${selectedFps >= 30 ? selectedFps + 'Hz' : '默认刷新率'}`
-            : '跟随全局';
-
-        const parts = pkg.split('.');
-        let displayName = pkg;
-        if (parts.length > 1) {
-            const last = parts.pop();
-            displayName = `${parts.join('.')}.<b>${esc(last)}</b>`;
-        } else {
-            displayName = esc(displayName);
+    let cursor = 0;
+    const chunkSize = 24;
+    const appendChunk = () => {
+        appListRenderTimer = null;
+        if (generation !== appListRenderGeneration || activeTabId !== 'tab-rates') return;
+        const fragment = document.createDocumentFragment();
+        const end = Math.min(cursor + chunkSize, list.length);
+        for (; cursor < end; cursor++) {
+            fragment.appendChild(createAppListItem(list[cursor]));
         }
-        if (!appLabels[pkg]) queueAppLabelFetch(pkg);
-        const label = esc(appLabels[pkg] || "加载中…");
-
-        item.innerHTML = `
-            <div class="app-info">
-                <div class="app-name" id="label-${esc(pkg)}">${label}</div>
-                <div class="app-pkg">${displayName}</div>
-            </div>
-            <div class="app-policy">${esc(policyText)}</div>
-            <div class="app-actions">
-                <button class="icon-btn" title="配置">${ICON.edit()}</button>
-                <button class="icon-btn danger" title="删除">${ICON.trash()}</button>
-            </div>`;
-        const [editBtn, delBtn] = item.querySelectorAll('.icon-btn');
-        editBtn.onclick = () => openAppConfigDialog(pkg);
-        delBtn.onclick = () => removeAppConfig(pkg);
-        fragment.appendChild(item);
-    });
-    listEl.appendChild(fragment);
+        listEl.appendChild(fragment);
+        if (cursor < list.length) {
+            // A zero-delay task yields to touch/scroll handling without
+            // leaving a visible blank list for the first chunk.
+            appListRenderTimer = setTimeout(appendChunk, 0);
+        }
+    };
+    appendChunk();
 }
 
 async function openAppConfigDialog(pkg) {
@@ -4085,27 +4226,37 @@ function bindStaticEvents() {
     }
 }
 
+function yieldToBrowser() {
+    return new Promise(resolve => {
+        requestAnimationFrame(() => setTimeout(resolve, 0));
+    });
+}
+
 function runAfterFirstPaint(task) {
     requestAnimationFrame(() => {
-        requestAnimationFrame(() => setTimeout(task, 0));
+        requestAnimationFrame(() => {
+            if (typeof requestIdleCallback === 'function') {
+                requestIdleCallback(task, { timeout: 350 });
+            } else {
+                setTimeout(task, 48);
+            }
+        });
     });
 }
 
 async function initializeModuleData() {
     try {
-        await Promise.all([refreshAuthState(), refreshDeviceInfo()]);
+        await Promise.all([
+            refreshAuthState(),
+            refreshDeviceInfo(),
+            loadSystemStatus(),
+            loadAdfrPolicy(),
+            loadDtsBackend()
+        ]);
         updatePaidMarkers();
-
-        await loadSystemStatus();
-        await loadAdfrPolicy();
-        await loadDtsBackend();
-        await loadDisplayModes();
         renderVideoPage();
         renderMinePage();
         syncAppliedModePolling();
-        if (activeTabId === 'tab-rates' || activeTabId === 'tab-video') {
-            ensureAppListLoaded();
-        }
 
         // 后台同步服务端授权（不阻塞免费流程）
         if (authToken || authState.account === 'logged_in') {
@@ -4113,7 +4264,7 @@ async function initializeModuleData() {
                 debugLog(`initial authorization sync failed: ${error.message}`);
             });
         }
-        if (activeTabId === 'tab-video') refreshVideoPageData({ force: true });
+        if (activeTabId !== 'tab-oc') scheduleTabBackgroundWork(activeTabId);
         scheduleAutomaticUpdateCheck();
     } catch (e) {
         console.error("Init failed:", e);

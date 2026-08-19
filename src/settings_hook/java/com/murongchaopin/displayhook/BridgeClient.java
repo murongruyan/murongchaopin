@@ -67,6 +67,23 @@ final class BridgeClient {
         }
         ArrayList<Integer> sorted = new ArrayList<>(rates);
         Collections.sort(sorted);
+        // ColorOS filters overclocked modes out of an app process' Display
+        // object. Ask the root bridge for the same-resolution HWC list so the
+        // game assistant and Scene can expose the user's complete mode set.
+        String response = request("LISTRATES");
+        if (response.startsWith("RATES ")) {
+            String[] fields = response.substring(6).trim().split("\\s+");
+            for (String field : fields) {
+                try {
+                    int fps = Integer.parseInt(field);
+                    if (fps >= 30 && fps <= 1000) rates.add(fps);
+                } catch (NumberFormatException ignored) {
+                    // Ignore a malformed bridge field and keep valid Display modes.
+                }
+            }
+            sorted = new ArrayList<>(rates);
+            Collections.sort(sorted);
+        }
         return sorted;
     }
 

@@ -40,7 +40,6 @@ COLOROS_CONFIG_HELPER="$MOD_PATH/scripts/coloros_config.sh"
 VIDEO_MEMC_APPS_FILE="$MOD_PATH/config/video_memc_apps.txt"
 VIDEO_MOTION_TARGET_KEY="murong_video_motion_target_rate"
 BASE_API_URL="https://murongdiaodu.rl1.cc/api"
-BASE_UPDATE_JSON_URL="https://github.com/murongruyan/murongchaopin/releases/download/murong-display-enhancement/update.json"
 STOCK_DTBO="$IMG_DIR/dtbo.img"
 STOCK_MANIFEST="$IMG_DIR/dtbo.img.sha256"
 STOCK_RECOVERY="$IMG_DIR/dtbo.img.gz"
@@ -872,34 +871,35 @@ check_base_update() {
         echo "Error: 无法创建更新检查临时文件"
         return 1
     }
-    if ! http_get_file "$BASE_UPDATE_JSON_URL" "$UPDATE_TMP"; then
+    LOCAL_VERSION=$(sed -n 's/^version=//p' "$MOD_PATH/module.prop" 2>/dev/null |
+        head -n 1 | tr -cd '0-9A-Za-z._-')
+    LOCAL_VERSION_CODE=$(sed -n 's/^versionCode=//p' "$MOD_PATH/module.prop" 2>/dev/null |
+        head -n 1 | tr -d '[:space:]')
+    case "$LOCAL_VERSION_CODE" in ''|*[!0-9]*) LOCAL_VERSION_CODE=0 ;; esac
+    [ -n "$LOCAL_VERSION" ] || LOCAL_VERSION=0
+
+    UPDATE_URL="$BASE_API_URL/version.php?action=check&version=$LOCAL_VERSION&version_code=$LOCAL_VERSION_CODE&platform=display_module"
+    if ! http_get_file "$UPDATE_URL" "$UPDATE_TMP"; then
         rm -f "$UPDATE_TMP"
-        echo "Error: 无法连接更新服务器"
+        echo "Error: 无法连接模块更新服务器"
+        return 1
+    fi
+    if [ ! -s "$UPDATE_TMP" ]; then
+        rm -f "$UPDATE_TMP"
+        echo "Error: 模块更新服务器返回空响应"
+        return 1
+    fi
+    if ! grep -q '"success"[[:space:]]*:[[:space:]]*true' "$UPDATE_TMP" 2>/dev/null; then
+        UPDATE_MESSAGE=$(sed -n 's/.*"message"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$UPDATE_TMP" | head -n 1)
+        rm -f "$UPDATE_TMP"
+        [ -n "$UPDATE_MESSAGE" ] || UPDATE_MESSAGE="模块更新信息不可用"
+        echo "Error: $UPDATE_MESSAGE"
         return 1
     fi
 
-    REMOTE_VERSION_CODE=$(sed -n 's/.*"versionCode"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$UPDATE_TMP" | head -n 1)
-    REMOTE_ZIP_URL=$(sed -n 's/.*"zipUrl"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$UPDATE_TMP" | head -n 1)
-    case "$REMOTE_VERSION_CODE" in ''|*[!0-9]*)
-        rm -f "$UPDATE_TMP"
-        echo "Error: 更新信息缺少有效 versionCode"
-        return 1
-        ;;
-    esac
-    case "$REMOTE_ZIP_URL" in
-        https://github.com/murongruyan/murongchaopin/releases/download/*) ;;
-        *)
-            rm -f "$UPDATE_TMP"
-            echo "Error: 更新下载地址不受信任"
-            return 1
-            ;;
-    esac
-
-    LOCAL_VERSION=$(sed -n 's/^version=//p' "$MOD_PATH/module.prop" 2>/dev/null | head -n 1 | tr -d '\r')
-    LOCAL_VERSION_CODE=$(sed -n 's/^versionCode=//p' "$MOD_PATH/module.prop" 2>/dev/null | head -n 1 | tr -d '[:space:]')
-    case "$LOCAL_VERSION_CODE" in ''|*[!0-9]*) LOCAL_VERSION_CODE=0 ;; esac
     echo "local_version=$LOCAL_VERSION"
     echo "local_version_code=$LOCAL_VERSION_CODE"
+    echo "update_source=server"
     printf 'remote_json_b64='
     base64url_file "$UPDATE_TMP"
     printf '\n'

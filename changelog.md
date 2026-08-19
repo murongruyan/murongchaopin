@@ -1,5 +1,12 @@
 # 更新日志
 
+## v2.9.9
+
+1. WebUI 的基础模块更新检查改为调用服务器版本接口，统一返回模块版本、下载地址和更新说明，不再直接请求 GitHub Raw，减少 CDN 限流和缓存导致的“网络不可用”。
+2. 优化 WebUI 页面切换：授权刷新改为后台缓存刷新，应用列表只在对应页面活跃时加载，列表项启用内容可见性隔离，减少切换页面时的卡顿。
+3. API 102 的游戏助手与 Scene 刷新率选择改为四列平铺，并通过 root bridge 补齐同分辨率的全部刷新率节点；保留全局/应用独立设置同步。
+4. 公开 Hook 与付费 Hook 的 API 102 作用域和构建检查继续隔离，新增认证流程、服务端更新契约和 Web 性能回归检查。
+
 ## v2.9.8
 
 1. 修复 DRM-KO 安装在真实 DTBO 中因使用 overlay-only HMBIRD 扫描器而报 `no unambiguous HMBIRD target structure`；恢复使用按机型、项目 ID 和面板识别的 `process_dts --hmbird-only` 路径。

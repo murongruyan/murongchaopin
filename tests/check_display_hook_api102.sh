@@ -108,6 +108,8 @@ grep -q 'PerfDisplayRefreshRateVH' "$GAME"
 grep -q 'PerfModeSettingView' "$GAME"
 grep -q 'PerfSelectionStateView' "$GAME"
 grep -q 'GAME_STATUS_CLASS = "de0.a"' "$GAME"
+grep -q 'CURRENT_ROOT_PANEL_CLASS = "a.iz"' "$SCENE"
+grep -q 'CURRENT_ADB_PANEL_CLASS = "a.jz"' "$SCENE"
 grep -q 'ROOT_PANEL_CLASS = "a.r02"' "$SCENE"
 grep -q 'ADB_PANEL_CLASS = "a.g12"' "$SCENE"
 grep -q 'PopupWindow.class.getDeclaredMethods' "$SCENE"
@@ -116,6 +118,20 @@ grep -q 'android.view.WindowManagerImpl' "$SCENE"
 grep -q 'Scene hooks installed popup=' "$SCENE"
 grep -q 'BridgeClient.setGlobalRate' "$SCENE"
 grep -q 'BridgeClient.setAppRate' "$GAME"
+grep -q 'GridLayout' "$GAME"
+grep -q 'setColumnCount(4)' "$GAME"
+if grep -q 'HorizontalScrollView' "$GAME"; then
+    echo 'FAIL: Game Assistant rate picker regressed to horizontal scrolling' >&2
+    exit 1
+fi
+grep -q 'GridLayout' "$SCENE"
+grep -q 'setColumnCount(4)' "$SCENE"
+if grep -q 'HorizontalScrollView' "$SCENE"; then
+    echo 'FAIL: Scene rate picker regressed to horizontal scrolling' >&2
+    exit 1
+fi
+grep -q 'displayRates(Context context)' "$BRIDGE"
+grep -q 'LISTRATES' "$BRIDGE"
 grep -q 'OPlusRefreshRateService' "$SERVICES"
 grep -q 'handleFrontAppChange' "$SERVICES"
 grep -q 'getPreferredFrameRate' "$SERVICES"

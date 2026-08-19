@@ -5219,6 +5219,32 @@ static void handle_display_hook_client(int server_fd, const char *base_path) {
 
     if (strcmp(trim(request), "PING") == 0) {
         dprintf(client_fd, "OK API 4\n");
+    } else if (strcmp(trim(request), "LISTRATES") == 0) {
+        int active_width = get_mode_width(default_mode_id);
+        int active_height = mode_height(default_mode_id);
+        int emitted[MAX_MODES];
+        int emitted_count = 0;
+        dprintf(client_fd, "RATES");
+        for (int i = 0; i < mode_count; i++) {
+            int fps = modes[i].fps;
+            int duplicate = 0;
+            if (modes[i].width != active_width || modes[i].height != active_height
+                    || fps < 30 || fps > 1000) {
+                continue;
+            }
+            for (int j = 0; j < emitted_count; j++) {
+                if (emitted[j] == fps) {
+                    duplicate = 1;
+                    break;
+                }
+            }
+            if (duplicate || emitted_count >= MAX_MODES) continue;
+            emitted[emitted_count++] = fps;
+            dprintf(client_fd, " %d", fps);
+        }
+        dprintf(client_fd, "\n");
+        log_msg("Display hook listed %d rates for %dx%d", emitted_count,
+                active_width, active_height);
     } else if (strcmp(trim(request), "LTPOBOOST") == 0) {
 #ifndef MURONG_FREE_BUILD
         if (rmx5200_ltpo_touch_boost()) {
