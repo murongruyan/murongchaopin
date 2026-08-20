@@ -148,7 +148,7 @@ jobs:
           set -euo pipefail
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager --channel=1 --install "ndk;${NDK_PACKAGE}"
-          sdkmanager --install "platforms;android-37" "build-tools;37.0.0"
+          sdkmanager --install "platforms;android-37.0" "build-tools;37.0.0"
 
       - name: Build native binaries
         shell: bash
@@ -252,13 +252,13 @@ jobs:
             echo "signed=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build free and premium Hook APKs
+      - name: Build free Hook APK
         shell: bash
         run: |
           set -euo pipefail
           cd src/settings_hook
           chmod +x gradlew
-          ./gradlew exportFreeApk exportPremiumApk --no-daemon
+          ./gradlew exportFreeApk --no-daemon
 
       - name: Require Hook signing for release
         if: steps.release_meta.outputs.is_release == 'true'
@@ -469,15 +469,6 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-      - name: Upload premium Hook artifact
-        if: vars.PUBLISH_PREMIUM_TO_RELEASE == 'true'
-        uses: actions/upload-artifact@v7
-        with:
-          name: premium-hook-apk
-          path: packaging/paid-payload/hooks/display_premium_hook.apk
-          if-no-files-found: error
-          retention-days: 7
-
       - name: Commit version changes
         if: steps.release_meta.outputs.is_release == 'true'
         shell: bash
@@ -506,24 +497,13 @@ jobs:
         shell: bash
         run: echo "RELEASE_COMMIT_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
-      - name: Compute release artifacts
-        id: release_artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-          artifacts="${{ steps.package.outputs.zip_path }},${{ steps.package.outputs.checksum_path }}"
-          if [ "${{ vars.PUBLISH_PREMIUM_TO_RELEASE }}" = "true" ]; then
-            artifacts="${artifacts},packaging/paid-payload/hooks/display_premium_hook.apk"
-          fi
-          echo "release_artifacts=${artifacts}" >> "$GITHUB_OUTPUT"
-
       - name: Publish GitHub release
         if: steps.release_meta.outputs.is_release == 'true'
         uses: ncipollo/release-action@v1
         with:
           allowUpdates: true
           artifactErrorsFailBuild: true
-          artifacts: ${{ steps.release_artifacts.outputs.release_artifacts }}
+          artifacts: ${{ steps.package.outputs.zip_path }},${{ steps.package.outputs.checksum_path }}
           commit: ${{ env.RELEASE_COMMIT_SHA }}
           bodyFile: docs/RELEASE_NOTES_v2.9.10.md
           generateReleaseNotes: false
