@@ -347,28 +347,59 @@ fi
 
 # 显示设置 Hook 是独立的 API 102 APK。通过 stdin 安装可避免 Package
 # Installer 无法直接读取 /data/adb/modules 下文件的 SELinux 路径问题。
+DISPLAY_HOOK_PACKAGE="com.murongchaopin.displayhook"
+PREMIUM_HOOK_PACKAGE="com.murongchaopin.displayhook.premium"
 DISPLAY_HOOK_APK="$BIN_DIR/display_settings_hook.apk"
-if [ -f "$DISPLAY_HOOK_APK" ]; then
-  # The Hook signing key changed with this release. Remove either old flavor
-  # first so PackageManager cannot reject the replacement certificate.
-  pm uninstall --user 0 com.murongchaopin.displayhook.premium >/dev/null 2>&1 || true
-  pm uninstall --user 0 com.murongchaopin.displayhook >/dev/null 2>&1 || true
-  DISPLAY_HOOK_SIZE=$(wc -c < "$DISPLAY_HOOK_APK" 2>/dev/null | tr -d '[:space:]')
-  case "$DISPLAY_HOOK_SIZE" in
-    ""|*[!0-9]*)
-      ui_print "警告: 无法读取 API 102 Hook APK 大小，跳过安装"
-      ;;
-    *)
-      if cat "$DISPLAY_HOOK_APK" | pm install -r -d -S "$DISPLAY_HOOK_SIZE" \
-          >/dev/null 2>&1; then
-        ui_print "已安装 libxposed API 102 显示设置 Hook"
-        ui_print "静态作用域: system_server / 系统设置 / 游戏助手 / Scene"
-      else
-        ui_print "警告: API 102 Hook APK 安装失败，模块主体继续安装"
-      fi
+LSPD_DB="/data/adb/lspd/config/modules_config.db"
+SQLITE_BIN="$BIN_DIR/sqlite3"
+
+# 安装/更新一个 Hook APK。先尝试原地更新（同证书更新不卸载，LSPosed
+# 作用域保留）；仅当证书不兼容（旧版证书切换）时才卸载后重装。
+install_hook_apk() {
+  _pkg="$1"
+  _apk="$2"
+  [ -s "$_apk" ] || return 1
+  _size=$(wc -c < "$_apk" 2>/dev/null | tr -d '[:space:]')
+  case "$_size" in
+    ""|*[!0-9]*|0)
+      ui_print "警告: 无法读取 Hook APK 大小: $_apk"
+      return 1
       ;;
   esac
+  if cat "$_apk" | pm install -r -d -S "$_size" >/dev/null 2>&1; then
+    return 0
+  fi
+  pm uninstall --user 0 "$_pkg" >/dev/null 2>&1 || true
+  if cat "$_apk" | pm install -r -d -S "$_size" >/dev/null 2>&1; then
+    return 0
+  fi
+  ui_print "警告: Hook APK 安装失败: $_apk"
+  return 1
+}
+
+# 恢复 LSPosed 模块启用状态与作用域，避免卸载重装后作用域丢失、
+# 需要再手动开一次并重启。
+ensure_lsposed_scope() {
+  [ -f "$MODPATH/scripts/lspd_scope.sh" ] || return 0
+  sh "$MODPATH/scripts/lspd_scope.sh" >/dev/null 2>&1 || true
+}
+
+# 如果模块目录里已经有付费载荷（升级保留的旧付费包，或刚下载的新付费包），
+# 刷入阶段就直接安装付费 Hook，避免只装免费 Hook、付费 Hook 要等开机后才装。
+install_premium_hook_from_payload() {
+  _premium_hook="$MODPATH/premium/hooks/display_premium_hook.apk"
+  [ -f "$_premium_hook" ] || return 0
+  install_hook_apk "$PREMIUM_HOOK_PACKAGE" "$_premium_hook"
+}
+
+if [ -f "$DISPLAY_HOOK_APK" ]; then
+  if install_hook_apk "$DISPLAY_HOOK_PACKAGE" "$DISPLAY_HOOK_APK"; then
+    ui_print "已安装 libxposed API 102 显示设置 Hook"
+    ui_print "静态作用域: system_server / 系统设置 / 游戏助手 / Scene"
+  fi
 fi
+
+install_premium_hook_from_payload
 
 # Pixelworks/MEMC 固件补丁已拆入付费包（premium/scripts/）。付费包在
 # 开机时由 premium_post_fs_data.sh 按授权执行 install-payload，安装阶段
@@ -402,6 +433,10 @@ if [ -f "$MODPATH/scripts/web_handler.sh" ] &&
       ;;
   esac
 fi
+
+# 授权组件下载/更新完成后，重新同步最新付费 Hook 并恢复 LSPosed 作用域。
+install_premium_hook_from_payload
+ensure_lsposed_scope
 
 # 清理临时文件（可选，建议保留以便调试）
 # ui_print "清理临时文件..."

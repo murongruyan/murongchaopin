@@ -978,6 +978,11 @@ gate_package_commit() {
     gate_backend_override_clear
     gate_state_write remove_premium "0" || true
     gate_state_write reboot_required "1" || true
+    # Restore LSPosed module scope before the requested reboot so the premium
+    # Hook is injected on the first boot after installation.
+    if [ -f "$GATE_MOD_PATH/scripts/lspd_scope.sh" ]; then
+        sh "$GATE_MOD_PATH/scripts/lspd_scope.sh" >/dev/null 2>&1 || true
+    fi
     echo "Success: paid package installed; a full reboot is required"
     return 0
 }
