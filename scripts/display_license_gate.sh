@@ -397,6 +397,20 @@ gate_check() {
         GATE_REASON="feature $1 is not covered by this lease"
         return 1
     }
+    # Video MEMC/插帧 payloads are validated only on RMX5200. PLK110/PJD110
+    # still receive the paid Hook (settings/game assistant/Scene); their
+    # MEMC feature stays denied instead of blocking the whole package.
+    if [ "$1" = video_memc ]; then
+        _model=$(getprop ro.product.vendor.model 2>/dev/null)
+        case "$_model" in
+            RMX5200) ;;
+            *)
+                GATE_MODE="denied"
+                GATE_REASON="video_memc requires RMX5200 (device model=$_model)"
+                return 1
+                ;;
+        esac
+    fi
     if [ "$GATE_LEASE_MODE" = grace ]; then
         GATE_MODE="grace"
         GATE_REASON=""
