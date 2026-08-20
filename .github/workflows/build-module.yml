@@ -33,7 +33,6 @@ jobs:
       RELEASE_NAME: 慕容显示增强
       NDK_PACKAGE: "30.0.14904198"
       API_LEVEL: "29"
-      ZIP_NAME: Murong.Display.Enhancement-v2.9.10.zip
 
     steps:
       - name: Checkout
@@ -77,6 +76,7 @@ jobs:
             echo "release_name=" >> "$GITHUB_OUTPUT"
             echo "target_branch=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
+          echo "ZIP_NAME=Murong.Display.Enhancement-v${version}.zip" >> "$GITHUB_ENV"
 
       - name: Update version files
         if: steps.release_meta.outputs.is_release == 'true'
@@ -136,7 +136,7 @@ jobs:
         uses: android-actions/setup-android@v4
 
       - name: Set up JDK 21 for Hook APK build
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
