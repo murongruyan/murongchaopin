@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -32,16 +33,42 @@ final class BridgeClient {
     private static final int TIMEOUT_MS = 400;
     private static final int MODE_TIMEOUT_MS = 4000;
     private static final int RESOLUTION_TIMEOUT_MS = 8000;
+    private static final long RATES_TTL_MS = 15000L;
+    private static final long PING_TTL_MS = 10000L;
+    private static final long STATE_TTL_MS = 1200L;
     private static final ExecutorService IO = Executors.newCachedThreadPool(runnable -> {
         Thread thread = new Thread(runnable, "MurongDisplayHookIo");
         thread.setDaemon(true);
         return thread;
     });
+    private static final Object RATES_LOCK = new Object();
+    private static final ConcurrentHashMap<String, CachedValue> READ_CACHE =
+            new ConcurrentHashMap<>();
+    private static volatile List<Integer> hwcRatesCache;
+    private static volatile long hwcRatesCachedAt;
+    private static volatile boolean ratesLoading;
 
     private BridgeClient() {
     }
 
     static List<Integer> displayRates(Context context) {
+        List<Integer> base = baseRates(context);
+        List<Integer> hwc = hwcRatesCache;
+        if (hwc != null && SystemClock.elapsedRealtime() - hwcRatesCachedAt
+                < RATES_TTL_MS) {
+            return mergeRates(base, hwc);
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            // Never block the Settings/Game UI main thread with a loopback
+            // round trip. Return the Display-backed list immediately and let
+            // the HWC list warm up in the background.
+            warmRatesAsync();
+            return base;
+        }
+        return mergeRates(base, fetchHwcRates());
+    }
+
+    private static List<Integer> baseRates(Context context) {
         if (context == null) {
             return Collections.emptyList();
         }
@@ -67,24 +94,66 @@ final class BridgeClient {
         }
         ArrayList<Integer> sorted = new ArrayList<>(rates);
         Collections.sort(sorted);
-        // ColorOS filters overclocked modes out of an app process' Display
-        // object. Ask the root bridge for the same-resolution HWC list so the
-        // game assistant and Scene can expose the user's complete mode set.
-        String response = request("LISTRATES");
+        return sorted;
+    }
+
+    private static List<Integer> mergeRates(List<Integer> base, List<Integer> hwc) {
+        if (hwc == null || hwc.isEmpty()) {
+            return base;
+        }
+        LinkedHashSet<Integer> merged = new LinkedHashSet<>(base);
+        for (int fps : hwc) {
+            if (fps >= 30 && fps <= 1000) {
+                merged.add(fps);
+            }
+        }
+        ArrayList<Integer> sorted = new ArrayList<>(merged);
+        Collections.sort(sorted);
+        return sorted;
+    }
+
+    private static List<Integer> fetchHwcRates() {
+        String response = requestSocket("LISTRATES", TIMEOUT_MS);
+        ArrayList<Integer> parsed = new ArrayList<>();
         if (response.startsWith("RATES ")) {
             String[] fields = response.substring(6).trim().split("\\s+");
             for (String field : fields) {
                 try {
                     int fps = Integer.parseInt(field);
-                    if (fps >= 30 && fps <= 1000) rates.add(fps);
+                    if (fps >= 30 && fps <= 1000) {
+                        parsed.add(fps);
+                    }
                 } catch (NumberFormatException ignored) {
                     // Ignore a malformed bridge field and keep valid Display modes.
                 }
             }
-            sorted = new ArrayList<>(rates);
-            Collections.sort(sorted);
+            Collections.sort(parsed);
+            if (!parsed.isEmpty()) {
+                synchronized (RATES_LOCK) {
+                    hwcRatesCache = parsed;
+                    hwcRatesCachedAt = SystemClock.elapsedRealtime();
+                }
+            }
         }
-        return sorted;
+        return parsed;
+    }
+
+    private static void warmRatesAsync() {
+        synchronized (RATES_LOCK) {
+            if (ratesLoading) {
+                return;
+            }
+            ratesLoading = true;
+        }
+        IO.execute(() -> {
+            try {
+                fetchHwcRates();
+            } finally {
+                synchronized (RATES_LOCK) {
+                    ratesLoading = false;
+                }
+            }
+        });
     }
 
     static boolean setAppRate(String packageName, int fps) {
@@ -305,21 +374,79 @@ final class BridgeClient {
     }
 
     private static String request(String command, int timeoutMs) {
+        String cached = cachedRead(command);
+        if (cached != null) {
+            return cached;
+        }
+        String response;
         // Settings and game UI callbacks run on the main thread. Android rejects
         // network I/O there for targetSdk >= 11, so perform the short loopback
         // transaction on a daemon worker and keep the existing bounded timeout.
         if (Looper.myLooper() == Looper.getMainLooper()) {
             Future<String> future = IO.submit(() -> requestSocket(command, timeoutMs));
             try {
-                return future.get(timeoutMs + 150L, TimeUnit.MILLISECONDS);
+                response = future.get(timeoutMs + 150L, TimeUnit.MILLISECONDS);
             } catch (TimeoutException timeout) {
                 future.cancel(true);
-                return "";
+                response = "";
             } catch (Exception ignored) {
-                return "";
+                response = "";
             }
+        } else {
+            response = requestSocket(command, timeoutMs);
         }
-        return requestSocket(command, timeoutMs);
+        cacheRead(command, response);
+        return response;
+    }
+
+    private static long readTtl(String command) {
+        if (command.startsWith("PING")) {
+            return PING_TTL_MS;
+        }
+        if (command.startsWith("GETGLOBAL") || command.startsWith("GET ")
+                || command.startsWith("GETID ")) {
+            return STATE_TTL_MS;
+        }
+        return 0L;
+    }
+
+    private static String cachedRead(String command) {
+        long ttl = readTtl(command);
+        if (ttl <= 0L) {
+            return null;
+        }
+        CachedValue value = READ_CACHE.get(command);
+        if (value != null && SystemClock.elapsedRealtime() - value.at < ttl) {
+            return value.value;
+        }
+        return null;
+    }
+
+    private static void cacheRead(String command, String response) {
+        if (response == null || response.isEmpty()) {
+            return;
+        }
+        long ttl = readTtl(command);
+        if (ttl > 0L) {
+            READ_CACHE.put(command, new CachedValue(response,
+                    SystemClock.elapsedRealtime()));
+            return;
+        }
+        // A write (SET/SETGLOBAL/...) invalidates read caches so a follow-up
+        // GET observes the new state instead of a stale snapshot.
+        if (!READ_CACHE.isEmpty()) {
+            READ_CACHE.clear();
+        }
+    }
+
+    private static final class CachedValue {
+        final String value;
+        final long at;
+
+        CachedValue(String value, long at) {
+            this.value = value;
+            this.at = at;
+        }
     }
 
     private static String requestSocket(String command, int timeoutMs) {
