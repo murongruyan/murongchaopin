@@ -37,6 +37,7 @@ write_bridge 0 ""
 # already owns the mode array.
 if [ -f "$PREMIUM_POST_FS" ]; then
     . "$GATE_HELPER" 2>/dev/null
+    gate_normalize_premium_scripts >/dev/null 2>&1 || true
     REMOVE_PREMIUM=$(gate_json_field "$GATE_STATE_FILE" remove_premium)
     if [ "$REMOVE_PREMIUM" != "1" ]; then
         sh "$PREMIUM_POST_FS" >/dev/null 2>&1 || true

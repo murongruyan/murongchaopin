@@ -37,7 +37,8 @@ WebUI 只有两种应用后端：
   `bin/rmx5200_drm_modes.ko` 会克隆原 `process_dts.c` 的 WQHD timing，运行时追加
   `1440x3136@123` 和 `150-180Hz`，并接受 WebUI 写入的 `runtime/drm_modes.txt` 自定义档位。
   它必须匹配本机 6.12 `msm_drm` ABI；用户选择 DRM-KO 后由启动脚本直接加载。
-  PLK110 的 KO 仍只完成编译和 fail-closed 框架，未有 PLK110 真机 ABI 证据；PJD110
+  PLK110 的默认 DRM 规格和启动探测已恢复，首次加载仍由 KO 做 fail-closed 的运行时
+  ABI/布局校验；当前工作区未保留 PLK110 真机 ABI 证据；PJD110
   使用官方 6.1 ABI 编译的 `pjd110_drm_modes.ko` 删除原生 60/90Hz 并注入 WebUI 档位，
   但目前同样只有静态验证，没有 PJD110 真机加载证据。
 
@@ -82,6 +83,11 @@ DRM-KO 将自定义刷新率转换为 `宽x高@刷新率[:clock_hz]` 规格，�
 - **兼容性**：本模块目前仅适配 **真我 GT8 Pro**、**OnePlus 12** 和 **OnePlus 15**。其他 OnePlus/Realme 机型请谨慎测试。
 
 ## 更新日志
+
+付费组件启动前会校正已通过签名校验的 `premium/scripts/*.sh` 行尾。这样从
+Windows/WebUI 下载的付费包不会因为 CRLF 被 Android `sh` 静默跳过；租约签名、设备绑定、
+功能特性和包文件哈希仍然在校正前完成验证。发布工作流同时拒绝 CRLF 付费脚本。
+
 请查看 [update.json](https://raw.githubusercontent.com/murongruyan/murongchaopin/main/update.json) 获取最新版本信息。
 
 ## 开源协议

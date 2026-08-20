@@ -426,7 +426,8 @@ drm_profile_spec_defaults() {
             DRM_SPEC_DEFAULTS=$(mode_manifest_specs RMX5200 drm) || return 1
             ;;
         PLK110)
-            return 1
+            DRM_SPEC_RES=$(mode_manifest_resolution PLK110) || return 1
+            DRM_SPEC_DEFAULTS=$(mode_manifest_specs PLK110 drm) || return 1
             ;;
         PJD110|*)
             if [ "$MODEL" = PJD110 ]; then
@@ -691,7 +692,7 @@ do_ko_prepare() {
         PLK110)
             KO_PROFILE=PLK110
             KO_MODULE="$BIN_DIR/plk110_drm_modes.ko"
-            KO_RATES="未完成真机 ABI 验证"
+            KO_RATES="清单默认 170/175/180/185/190/195/199Hz；首次加载按运行时 ABI 自检"
             ;;
         PJD110)
             KO_PROFILE=PJD110

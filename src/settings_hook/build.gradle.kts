@@ -121,14 +121,18 @@ tasks.withType<org.gradle.api.tasks.compile.JavaCompile>().configureEach {
 
 tasks.register<Copy>("exportFreeApk") {
     dependsOn("assembleFreeRelease")
-    from(layout.buildDirectory.file("outputs/apk/free/release/murong-display-hook-free-release.apk"))
+    from(layout.buildDirectory.dir("outputs/apk/free/release")) {
+        include("*.apk")
+        rename { "display_settings_hook.apk" }
+    }
     into(rootDir.resolve("../../bin"))
-    rename { "display_settings_hook.apk" }
 }
 
 tasks.register<Copy>("exportPremiumApk") {
     dependsOn("assemblePremiumRelease")
-    from(layout.buildDirectory.file("outputs/apk/premium/release/murong-display-hook-premium-release.apk"))
+    from(layout.buildDirectory.dir("outputs/apk/premium/release")) {
+        include("*.apk")
+        rename { "display_premium_hook.apk" }
+    }
     into(rootDir.resolve("../../packaging/paid-payload/hooks"))
-    rename { "display_premium_hook.apk" }
 }

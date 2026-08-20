@@ -349,6 +349,10 @@ fi
 # Installer 无法直接读取 /data/adb/modules 下文件的 SELinux 路径问题。
 DISPLAY_HOOK_APK="$BIN_DIR/display_settings_hook.apk"
 if [ -f "$DISPLAY_HOOK_APK" ]; then
+  # The Hook signing key changed with this release. Remove either old flavor
+  # first so PackageManager cannot reject the replacement certificate.
+  pm uninstall --user 0 com.murongchaopin.displayhook.premium >/dev/null 2>&1 || true
+  pm uninstall --user 0 com.murongchaopin.displayhook >/dev/null 2>&1 || true
   DISPLAY_HOOK_SIZE=$(wc -c < "$DISPLAY_HOOK_APK" 2>/dev/null | tr -d '[:space:]')
   case "$DISPLAY_HOOK_SIZE" in
     ""|*[!0-9]*)

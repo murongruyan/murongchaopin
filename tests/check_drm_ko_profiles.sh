@@ -61,6 +61,9 @@ grep -q 'OC_PANEL_TOKEN "AA545_P_3_A0005"' src/ko/pjd110_display_modes.c
 grep -q 'offsetof(struct dsi_display, modes)' src/ko/pjd110_display_modes.c
 grep -q 'OC_EXPECT_REMOVED_STOCK_LOW 2U' src/ko/pjd110_display_modes.c
 grep -q 'removed_stock_low_drm_count' src/ko/plk110_display_modes.c
+grep -q 'mode_manifest_specs PLK110 drm' scripts/display_backend.sh
+grep -q 'KO_PROFILE" != plk110' scripts/display_backend.sh
+grep -q 'DRM_SPEC_RES=$(mode_manifest_resolution PLK110)' scripts/web_handler.sh
 grep -q 'KO_MODULE_NAME=pjd110_drm_modes' scripts/display_backend.sh
 grep -q 'drop_stock_low=1' scripts/display_backend.sh
 grep -q 'KO_MODULE="$BIN_DIR/pjd110_drm_modes.ko"' scripts/web_handler.sh
@@ -78,6 +81,8 @@ mode_manifest_validate
   '1440x3136@123;1440x3136@150;1440x3136@155;1440x3136@160;1440x3136@165;1440x3136@170;1440x3136@175;1440x3136@180' ]
 [ "$(mode_manifest_specs PLK110 dtbo)" = \
   '1272x2772@123;1272x2772@170;1272x2772@175;1272x2772@180;1272x2772@185;1272x2772@190;1272x2772@195;1272x2772@199' ]
+[ "$(mode_manifest_specs PLK110 drm)" = \
+  '1272x2772@170;1272x2772@175;1272x2772@180;1272x2772@185;1272x2772@190;1272x2772@195;1272x2772@199' ]
 if grep -q 'oc_default_mode_specs' src/ko/rmx5200_display_modes.c src/ko/plk110_display_modes.c; then
     echo "FAIL: KO still contains a second compiled default mode manifest" >&2
     exit 1

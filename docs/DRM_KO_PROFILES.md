@@ -31,7 +31,7 @@ blanking 数值决定。此前降低 link 再缩短 porch 的方向也只会把 
 | 机型 | 后端 | KO | 运行时规格 | 状态 |
 | --- | --- | --- | --- | --- |
 | RMX5200 | DTBO / DRM-KO | `rmx5200_drm_modes.ko` | 默认 WQHD 123/150-180；WebUI 可追加任意安全范围档位 | 已在 RMX5200 实机完成 probe、单档追加、DRM/SurfaceFlinger 冷启动可见性、首选模式切换和 DTBO 哈希闭环；持续锁定受厂商 ADFR 策略影响 |
-| PLK110 | DTBO / DRM-KO 框架 | `plk110_drm_modes.ko` | DTBO 支持原有 123/170-199 逻辑；DRM 规格待真机 ABI 验证 | 只能编译和 fail-closed 静态验证，不能宣称 PLK110 实机完成 |
+| PLK110 | DTBO / DRM-KO | `plk110_drm_modes.ko` | DTBO 支持原有 123/170-199 逻辑；DRM 默认 170-199 规格由清单生成 | 已恢复默认规格和 PLK110 专用启动探测；首次加载仍由 KO 做运行时 ABI/布局自检，当前没有本工作区的一加 15 实机证据 |
 | PJD110 | DTBO / DRM-KO | `pjd110_drm_modes.ko` | 1440x3168；默认删除原生 60/90Hz，WebUI 可追加运行时档位 | 已使用一加 12 官方 6.1.141 源码编译和静态事务验证；缺少 PJD110 真机 probe/切换证据，首次启动按精确 ABI fail-closed |
 
 DTBO 与 KO 的差异是显式保留的，不要求三机型强行一致：
@@ -40,8 +40,9 @@ DTBO 与 KO 的差异是显式保留的，不要求三机型强行一致：
   DTBO 后端还负责 DTS 级节点处理；DRM 后端只注入 live mode，高刷 timing 不写 DTBO，
   仅从原厂基线写入 HMBIRD-only 最小 DTBO。
 - PLK110 的 DTBO 清单是 `123,170,175,180,185,190,195,199`，并保留原有 DTS/ADFR
-  处理；DRM 清单只有 `170,175,180,185,190,195,199`，且尚未完成 PLK110 真机
-  Qualcomm ABI 验证，所以启动脚本继续 fail-closed。
+  处理；DRM 清单只有 `170,175,180,185,190,195,199`。启动脚本只取消了错误的
+  规格/符号硬拒绝，KO 仍会在写入前验证面板 token、实时 DT、多模式数组、私有 timing
+  和 offsets，任一项不匹配都会拒绝加载。
 - PJD110（一加 12）的 `pjd110_drm_modes.ko` 使用官方 SM8650 6.1 私有头在编译期取得
   `dsi_display` 偏移（lock `0x48`、modes `0x308`、panel `0x108`、connector `0x10`），
   验证 AA545/1440x3168 原生 60/90/120/144 四档后，事务删除 parsed/DRM 两侧的 60/90，

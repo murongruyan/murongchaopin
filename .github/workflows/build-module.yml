@@ -135,12 +135,20 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Install Android NDK
+      - name: Set up JDK 21 for Hook APK build
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Install Android NDK and SDK 37
         shell: bash
         run: |
           set -euo pipefail
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager --channel=1 --install "ndk;${NDK_PACKAGE}"
+          sdkmanager --install "platforms;android-37" "build-tools;37.0.0"
 
       - name: Build native binaries
         shell: bash
@@ -221,6 +229,46 @@ jobs:
           sh tests/check_install_tool_permissions.sh
           sh tests/check_volume_key_parser.sh
           sh tests/check_surfaceflinger_ltps_vote_patch.sh
+          sh tests/check_premium_script_line_endings.sh
+
+      - name: Configure Hook signing
+        id: hook_signing
+        shell: bash
+        env:
+          KS_B64: ${{ secrets.MURONG_HOOK_KEYSTORE_BASE64 }}
+          STORE_PW: ${{ secrets.MURONG_HOOK_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.MURONG_HOOK_KEY_ALIAS }}
+          KEY_PW: ${{ secrets.MURONG_HOOK_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > src/settings_hook/release.jks
+            echo "MURONG_HOOK_KEYSTORE=${PWD}/src/settings_hook/release.jks" >> "$GITHUB_ENV"
+            echo "MURONG_HOOK_STORE_PASSWORD=${STORE_PW}" >> "$GITHUB_ENV"
+            echo "MURONG_HOOK_KEY_ALIAS=${KEY_ALIAS}" >> "$GITHUB_ENV"
+            echo "MURONG_HOOK_KEY_PASSWORD=${KEY_PW}" >> "$GITHUB_ENV"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build free and premium Hook APKs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd src/settings_hook
+          chmod +x gradlew
+          ./gradlew exportFreeApk exportPremiumApk --no-daemon
+
+      - name: Require Hook signing for release
+        if: steps.release_meta.outputs.is_release == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.hook_signing.outputs.signed }}" != "true" ]; then
+            echo "Release requires MURONG_HOOK_KEYSTORE_BASE64 / MURONG_HOOK_STORE_PASSWORD / MURONG_HOOK_KEY_ALIAS / MURONG_HOOK_KEY_PASSWORD secrets" >&2
+            exit 1
+          fi
 
       - name: Read module metadata
         id: meta
@@ -417,8 +465,18 @@ jobs:
           path: |
             ${{ steps.package.outputs.zip_path }}
             ${{ steps.package.outputs.checksum_path }}
+            bin/display_settings_hook.apk
           if-no-files-found: error
           retention-days: 1
+
+      - name: Upload premium Hook artifact
+        if: vars.PUBLISH_PREMIUM_TO_RELEASE == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: premium-hook-apk
+          path: packaging/paid-payload/hooks/display_premium_hook.apk
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Commit version changes
         if: steps.release_meta.outputs.is_release == 'true'
@@ -448,13 +506,24 @@ jobs:
         shell: bash
         run: echo "RELEASE_COMMIT_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
+      - name: Compute release artifacts
+        id: release_artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifacts="${{ steps.package.outputs.zip_path }},${{ steps.package.outputs.checksum_path }}"
+          if [ "${{ vars.PUBLISH_PREMIUM_TO_RELEASE }}" = "true" ]; then
+            artifacts="${artifacts},packaging/paid-payload/hooks/display_premium_hook.apk"
+          fi
+          echo "release_artifacts=${artifacts}" >> "$GITHUB_OUTPUT"
+
       - name: Publish GitHub release
         if: steps.release_meta.outputs.is_release == 'true'
         uses: ncipollo/release-action@v1
         with:
           allowUpdates: true
           artifactErrorsFailBuild: true
-          artifacts: ${{ steps.package.outputs.zip_path }},${{ steps.package.outputs.checksum_path }}
+          artifacts: ${{ steps.release_artifacts.outputs.release_artifacts }}
           commit: ${{ env.RELEASE_COMMIT_SHA }}
           bodyFile: docs/RELEASE_NOTES_v2.9.10.md
           generateReleaseNotes: false

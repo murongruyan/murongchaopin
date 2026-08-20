@@ -11,7 +11,7 @@
 // mandatory for package delivery and installation.
 // Zip the staging dir contents afterwards (WSL: zip -r out.zip .).
 import { createHash, createPrivateKey, sign } from 'node:crypto';
-import { copyFileSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 
 function arg(key, fallback) {
@@ -66,14 +66,24 @@ function walk(dir, prefix) {
   return entries;
 }
 
+function normalizePayloadData(path, data) {
+  // Shell payloads may be authored on Windows. Android's /system/bin/sh does
+  // not discard CR at token boundaries, so normalize before hashing and
+  // copying; the manifest must describe the exact bytes that are installed.
+  if (path.endsWith('.sh')) {
+    return Buffer.from(data.toString('utf8').replace(/\r\n?/g, '\n'), 'utf8');
+  }
+  return data;
+}
+
 const files = walk(payloadDir, '').map((entry) => {
   const normalized = entry.path.split(sep).join('/');
-  const data = readFileSync(entry.full);
+  const data = normalizePayloadData(normalized, readFileSync(entry.full));
   const mode = normalized.startsWith('bin/') || normalized.startsWith('scripts/') ? '0755' : '0644';
   return {
     path: 'payload/' + normalized,
     sha256: createHash('sha256').update(data).digest('hex'),
-    size: entry.size,
+    size: data.length,
     mode,
     target_path: normalized,
   };
@@ -131,7 +141,7 @@ for (const entry of files) {
   const source = join(payloadDir, entry.target_path.split('/').join(sep));
   const target = join(outDir, entry.path.split('/').join(sep));
   mkdirSync(join(target, '..'), { recursive: true });
-  copyFileSync(source, target);
+  writeFileSync(target, normalizePayloadData(entry.target_path, readFileSync(source)));
 }
 
 console.log('staging written to', outDir);

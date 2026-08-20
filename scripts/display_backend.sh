@@ -116,9 +116,11 @@ ensure_drm_specs() {
             mode_manifest_specs RMX5200 drm > "$DRM_SPECS_FILE" || return 1
             ;;
         plk110)
-            # PLK110 remains fail-closed until its Qualcomm mode ABI is
-            # validated on a real device; do not feed its legacy profile here.
-            return 1
+            # PLK110 uses the same runtime layout discovery and transaction
+            # checks as the KO itself. Keep the input bounded by the shared
+            # manifest; an ABI/layout mismatch still fails closed at insmod.
+            mode_manifest_validate || return 1
+            mode_manifest_specs PLK110 drm > "$DRM_SPECS_FILE" || return 1
             ;;
         pjd110)
             mode_manifest_validate || return 1
@@ -187,8 +189,9 @@ collect_probe() {
         PROBE_REASON=msm_drm_not_loaded
     elif [ "$PROBE_GET_MAIN_DISPLAY" != available ]; then
         PROBE_REASON=get_main_display_missing
-    elif [ "$PROBE_DSI_GET_MODES" != available ] ||
-         [ "$PROBE_SDE_GET_MODES" != available ]; then
+    elif [ "$KO_PROFILE" != plk110 ] &&
+         { [ "$PROBE_DSI_GET_MODES" != available ] ||
+           [ "$PROBE_SDE_GET_MODES" != available ]; }; then
         PROBE_REASON=qualcomm_mode_hooks_missing
     elif [ "$PROBE_KO" != present ]; then
         PROBE_REASON=ko_not_built

@@ -39,6 +39,7 @@ fi
 # when the paid package is installed and not marked for removal.
 if [ -f "$PREMIUM_SERVICE" ]; then
     . "$GATE_HELPER" 2>/dev/null
+    gate_normalize_premium_scripts >/dev/null 2>&1 || true
     REMOVE_PREMIUM=$(gate_json_field "$GATE_STATE_FILE" remove_premium)
     if [ "$REMOVE_PREMIUM" != "1" ]; then
         sh "$PREMIUM_SERVICE" >/dev/null 2>&1 || true

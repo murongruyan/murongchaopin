@@ -411,6 +411,36 @@ gate_premium_installed() {
     [ -s "$GATE_PACKAGE_FILE" ] && [ -d "$GATE_PREMIUM_DIR" ] && [ -s "$GATE_PREMIUM_DIR/manifest.json" ]
 }
 
+# Paid packages can be downloaded through Windows-backed WebUI storage, where
+# shell payloads may acquire CRLF line endings. Android's /system/bin/sh keeps
+# the carriage return in assignments and paths, causing the paid boot scripts
+# to fail silently when their callers redirect diagnostics. The package has
+# already passed archive, manifest, and per-file hash validation before this
+# compatibility normalization is called. Keep the fix limited to shell
+# scripts and preserve the executable contract expected by the payload.
+gate_normalize_premium_scripts() {
+    gate_premium_installed || return 1
+    _cr=$(printf '\r')
+    for _script in "$GATE_PREMIUM_DIR/scripts/"*.sh; do
+        [ -f "$_script" ] || continue
+        grep -q "$_cr" "$_script" 2>/dev/null || continue
+        _tmp="$_script.lf.$$"
+        tr -d '\r' < "$_script" > "$_tmp" 2>/dev/null || {
+            rm -f "$_tmp"
+            return 1
+        }
+        chmod 0755 "$_tmp" 2>/dev/null || {
+            rm -f "$_tmp"
+            return 1
+        }
+        mv -f "$_tmp" "$_script" 2>/dev/null || {
+            rm -f "$_tmp"
+            return 1
+        }
+    done
+    return 0
+}
+
 gate_state_print() {
     # prints auth_state key=value block for the WebUI
     gate_init
