@@ -505,7 +505,7 @@ jobs:
           artifactErrorsFailBuild: true
           artifacts: ${{ steps.package.outputs.zip_path }},${{ steps.package.outputs.checksum_path }}
           commit: ${{ env.RELEASE_COMMIT_SHA }}
-          bodyFile: docs/RELEASE_NOTES_v2.9.10.md
+          bodyFile: docs/RELEASE_NOTES_${{ steps.release_meta.outputs.version }}.md
           generateReleaseNotes: false
           makeLatest: true
           name: ${{ steps.release_meta.outputs.release_name }}
