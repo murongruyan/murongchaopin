@@ -15,6 +15,7 @@ public class DisplaySettingsHook extends XposedModule {
     static final String GAMES = "com.oplus.games";
     static final String SCENE = "com.omarea.vtools";
     static final String KERNELSU = "me.weishu.kernelsu";
+    static final String SYSTEM_UI = "com.android.systemui";
     static final String COLOROS_VIDEO = "com.coloros.video";
     private static final String TAG = "MurongDisplayHook";
 
@@ -45,6 +46,8 @@ public class DisplaySettingsHook extends XposedModule {
                 return;
             } else if (KERNELSU.equals(packageName)) {
                 KernelSuWebUiHooks.install(this, param.getClassLoader());
+            } else if (SYSTEM_UI.equals(packageName)) {
+                SystemUiStabilityHooks.install(this, param.getClassLoader());
             }
         } catch (Throwable error) {
             error("scope initialization failed for " + packageName, error);

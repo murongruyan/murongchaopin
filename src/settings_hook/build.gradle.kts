@@ -2,6 +2,8 @@ plugins {
     id("com.android.application") version "9.2.1"
 }
 
+val hookVersionCode = 69
+
 android {
     namespace = "com.murongchaopin.displayhook"
     compileSdk = 37
@@ -11,8 +13,6 @@ android {
         applicationId = "com.murongchaopin.displayhook"
         minSdk = 29
         targetSdk = 37
-        versionCode = 68
-        versionName = "68.0-api102-predictive-back-history"
     }
 
     buildFeatures {
@@ -24,11 +24,15 @@ android {
     productFlavors {
         create("free") {
             dimension = "tier"
+            versionCode = hookVersionCode
+            versionName = "69.0-api102-free-stability"
             buildConfigField("boolean", "IS_PREMIUM_BUILD", "false")
         }
         create("premium") {
             dimension = "tier"
             applicationIdSuffix = ".premium"
+            versionCode = hookVersionCode
+            versionName = "69.0-api102-paid-display-ui"
             buildConfigField("boolean", "IS_PREMIUM_BUILD", "true")
         }
     }
@@ -135,4 +139,14 @@ tasks.register<Copy>("exportPremiumApk") {
         rename { "display_premium_hook.apk" }
     }
     into(rootDir.resolve("../../packaging/paid-payload/hooks"))
+}
+
+tasks.named("exportPremiumApk") {
+    doLast {
+        // Sidecar version file used by premium_service.sh so boot-time installs
+        // only upgrade, never overwrite a newer installed paid hook.
+        val out = rootDir.resolve("../../packaging/paid-payload/hooks")
+        out.mkdirs()
+        out.resolve("display_premium_hook.version").writeText("$hookVersionCode\n")
+    }
 }

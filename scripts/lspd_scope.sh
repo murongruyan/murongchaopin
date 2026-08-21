@@ -28,7 +28,7 @@ scope_insert() {
 
 if pm path "$FREE_PKG" >/dev/null 2>&1; then
   scope_insert "$FREE_PKG"
-  for _app in system me.weishu.kernelsu; do
+  for _app in system me.weishu.kernelsu com.android.systemui; do
     "$SQLITE_BIN" "$LSPD_DB" \
       "INSERT OR IGNORE INTO scope(module_pkg_name,app_pkg_name,user_id) VALUES('$FREE_PKG','$_app',0);" \
       >/dev/null 2>&1 || true
