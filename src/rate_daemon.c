@@ -211,6 +211,17 @@ static int video_override_mode_id = -1;
 static int video_override_vendor_owned = 0;
 static int video_handoff_active = 0;
 static int video_exit_pending = 0;
+/* The vendor MEMC state machine can release its screen-rate vote on brief UI
+ * events (danmaku toggles, comment panels, feed swipes) while the video
+ * SurfaceView is still present. Restoring mode.txt on those events lets the
+ * stock LTPS policy drop the display to 60 until the next VIDEOSTART. Defer
+ * the exit while the video surface remains, bounded by this grace window. */
+static int video_exit_defer_active = 0;
+static long long video_exit_defer_until_ms = -1;
+/* Hold the video mode while the video SurfaceView is present (restore happens
+ * as soon as the surface disappears). The deadline is only a failsafe so a
+ * stuck probe can never lock the display at the video rate forever. */
+#define VIDEO_EXIT_DEFER_GRACE_MS 120000
 static int video_iris_esd_saved_ctrl = -1;
 static int video_iris_esd_restore_pending = 0;
 static long long video_iris_esd_restore_requested_ms = 0;
@@ -288,7 +299,9 @@ static int next_refresh_ladder_step(int active_id, int target_id);
 static int complete_resolution_geometry(int target_id, int target_width);
 static int create_display_hook_server(void);
 static void handle_display_hook_client(int server_fd, const char *base_path);
+void get_foreground_app(char *buffer, int size);
 #ifndef MURONG_FREE_BUILD
+static int rmx5200_video_surface_probe(const char *foreground_package);
 static int start_video_vendor_hold(const char *base_path);
 static int start_video_override(const char *base_path, int follow, int fps);
 static int stop_video_override(const char *base_path, const char *reason);
@@ -2234,6 +2247,8 @@ static int clear_video_override(const char *base_path) {
     video_override_follow = 0;
     video_override_fps = -1;
     video_override_vendor_owned = 0;
+    video_exit_defer_active = 0;
+    video_exit_defer_until_ms = -1;
     if (!video_exit_pending) video_override_mode_id = -1;
     return 1;
 }
@@ -2366,6 +2381,8 @@ static int start_video_override(const char *base_path, int follow, int fps) {
     video_override_mode_id = target_id;
     video_override_vendor_owned = 0;
     video_handoff_active = 0;
+    video_exit_defer_active = 0;
+    video_exit_defer_until_ms = -1;
     screen_state = get_screen_state();
     sync_oti_pause_policy(base_path, 1);
     update_rmx5200_ltpo_controller(base_path, target_id, screen_state);
@@ -2404,6 +2421,20 @@ static int stop_video_override(const char *base_path, const char *reason) {
     if (!video_override_active) {
         maybe_restore_video_iris_esd(base_path);
         return 1;
+    }
+    if (strcmp(device_model, "RMX5200") == 0 && !video_override_vendor_owned) {
+        char defer_pkg[MAX_PKG_LEN] = "";
+        get_foreground_app(defer_pkg, sizeof(defer_pkg));
+        if (rmx5200_video_surface_probe(defer_pkg)) {
+            video_exit_defer_active = 1;
+            video_exit_defer_until_ms = monotonic_ms()
+                    + VIDEO_EXIT_DEFER_GRACE_MS;
+            log_msg("Video temporary mode exit deferred: surface active "
+                    "package=%s grace=%dms mode=%d/%dHz",
+                    defer_pkg, VIDEO_EXIT_DEFER_GRACE_MS,
+                    video_override_mode_id, mode_fps(video_override_mode_id));
+            return 1;
+        }
     }
     load_config(base_path);
     if (strcmp(device_model, "RMX5200") == 0 &&
@@ -5778,25 +5809,41 @@ int main(int argc, char *argv[]) {
             } else if (video_override_active) {
                 int applied_id;
 
-                target_id = resolve_video_override_mode();
-                if (is_valid_mode(target_id)) {
-                    video_override_mode_id = target_id;
-                    applied_id = get_current_applied_mode();
-                    if (is_valid_mode(applied_id) &&
-                            same_mode_geometry(applied_id, target_id) &&
-                            applied_id != target_id) {
-                        log_msg("Video temporary mode drift detected: "
-                                "target=%d/%dHz applied=%d/%dHz; reasserting",
-                                target_id, mode_fps(target_id), applied_id,
-                                mode_fps(applied_id));
-                        current_mode_id = applied_id;
+                if (video_exit_defer_active) {
+                    char defer_pkg[MAX_PKG_LEN] = "";
+                    get_foreground_app(defer_pkg, sizeof(defer_pkg));
+                    if (!rmx5200_video_surface_probe(defer_pkg) ||
+                            monotonic_ms() >= video_exit_defer_until_ms) {
+                        video_exit_defer_active = 0;
+                        video_exit_defer_until_ms = -1;
+                        log_msg("Video temporary mode defer expired; "
+                                "restoring mode.txt");
+                        clear_video_override(base_path);
+                        target_id = default_mode_id;
                         force_reapply = 1;
                     }
-                } else {
-                    log_msg("Video temporary mode became invalid; restoring mode.txt");
-                    clear_video_override(base_path);
-                    target_id = default_mode_id;
-                    force_reapply = 1;
+                }
+                if (video_override_active) {
+                    target_id = resolve_video_override_mode();
+                    if (is_valid_mode(target_id)) {
+                        video_override_mode_id = target_id;
+                        applied_id = get_current_applied_mode();
+                        if (is_valid_mode(applied_id) &&
+                                same_mode_geometry(applied_id, target_id) &&
+                                applied_id != target_id) {
+                            log_msg("Video temporary mode drift detected: "
+                                    "target=%d/%dHz applied=%d/%dHz; reasserting",
+                                    target_id, mode_fps(target_id), applied_id,
+                                    mode_fps(applied_id));
+                            current_mode_id = applied_id;
+                            force_reapply = 1;
+                        }
+                    } else {
+                        log_msg("Video temporary mode became invalid; restoring mode.txt");
+                        clear_video_override(base_path);
+                        target_id = default_mode_id;
+                        force_reapply = 1;
+                    }
                 }
             } else
 #endif
