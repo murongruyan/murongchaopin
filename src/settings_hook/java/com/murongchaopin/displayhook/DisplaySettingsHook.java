@@ -40,7 +40,6 @@ public class DisplaySettingsHook extends XposedModule {
         try {
             if ((ANDROID.equals(packageName) || SYSTEM.equals(packageName))
                     && isSystemServerProcess()) {
-                PremiumGateBridge.warmSystemContext();
                 installOplusServices(param.getClassLoader(), "package-ready:" + packageName);
             } else if (!packageName.equals(processName)) {
                 return;
@@ -58,7 +57,6 @@ public class DisplaySettingsHook extends XposedModule {
             return;
         }
         try {
-            PremiumGateBridge.warmSystemContext();
             installOplusServices(param.getClassLoader(), "system-server-starting");
         } catch (Throwable error) {
             error("system-server initialization failed", error);

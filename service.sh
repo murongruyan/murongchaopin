@@ -27,6 +27,18 @@ until [ "$(getprop sys.boot_completed)" = "1" ]; do
     sleep 1
 done
 
+# 自动诊断：如果最近一次开机出现过 system_server watchdog（死机/热重启/安全
+# 模式常见诱因），或存在手动触发标记，就自动收集诊断包到 /sdcard/Download，
+# 用户无需任何操作，直接把压缩包发回来即可。
+BUGPACK_REQUEST="$MODDIR/runtime/request_bugpack"
+if [ -f "$BUGPACK_REQUEST" ] || \
+   find /data/anr -maxdepth 1 -name 'traces_SystemServer_WDT*' -mmin -40 2>/dev/null | grep -q .; then
+  if [ -f "$MODDIR/scripts/collect_bugpack.sh" ]; then
+    sh "$MODDIR/scripts/collect_bugpack.sh" >/dev/null 2>&1 || true
+  fi
+  rm -f "$BUGPACK_REQUEST"
+fi
+
 # Clearing the pending marker only after Android and the patched
 # SurfaceFlinger both survived this boot gives the next boot an automatic
 # fallback if the native hook ever becomes incompatible.

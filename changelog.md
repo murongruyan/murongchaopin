@@ -1,8 +1,12 @@
 # 更新日志
 
-## v2.9.15
+## v2.9.16
 
-1. 修复 system_server 开机阶段可能与 DisplayManagerService 产生锁死、导致死机热重启的问题：Hook 回调不再在显示锁内反射 `ActivityThread.systemMain()`，系统上下文改为模块启动早期预热并缓存。
+1. 修复 v2.9.15 引入的开机不稳定问题：启动阶段不再反射 `ActivityThread`，物理包络 Hook 也不在显示锁路径内查询系统状态；system_server 稳定不再被 LSPosed 判为崩溃进安全模式。
+
+## v2.9.15（已撤回）
+
+1. 该版本尝试在启动早期预热系统上下文，实测会导致 system_server 启动阶段异常、LSPosed 反复进入安全模式，已撤回，请使用 v2.9.16。
 
 ## v2.9.14
 

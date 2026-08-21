@@ -82,15 +82,6 @@ final class FrameworkPhysicalEnvelopeHooks {
             Display.Mode[] modes = appSupportedModes(director, displayId);
             int originalBaseId = numberField(specs, "baseModeId").intValue();
             Display.Mode base = findMode(modes, originalBaseId);
-            if (base != null && PremiumGateBridge.isVendorMemcActive()
-                    && base.getRefreshRate() <= ENVELOPE_RATE_HZ + RATE_EPSILON_HZ) {
-                float memcInputRate = base.getRefreshRate();
-                setPhysicalRange(specs, "primary", memcInputRate);
-                setPhysicalRange(specs, "appRequest", memcInputRate);
-                logAdjustment(module, "memc base=" + originalBaseId
-                        + " physical=" + memcInputRate);
-                return;
-            }
             if (base == null
                     || Math.abs(base.getRefreshRate() - ENVELOPE_RATE_HZ)
                     > RATE_EPSILON_HZ) {

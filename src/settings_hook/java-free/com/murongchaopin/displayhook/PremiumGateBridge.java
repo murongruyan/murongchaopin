@@ -47,9 +47,11 @@ public final class PremiumGateBridge {
             }
             try {
                 Class<?> activityThread = Class.forName("android.app.ActivityThread");
-                Object systemMain = activityThread.getMethod("systemMain").invoke(null);
-                Object value = activityThread.getMethod("getSystemContext")
-                        .invoke(systemMain);
+                Object current = activityThread.getMethod("currentActivityThread").invoke(null);
+                if (current == null) {
+                    current = activityThread.getMethod("systemMain").invoke(null);
+                }
+                Object value = activityThread.getMethod("getSystemContext").invoke(current);
                 if (value instanceof Context) {
                     cachedContext = (Context) value;
                 }
