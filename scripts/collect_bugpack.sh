@@ -3,6 +3,16 @@
 # 由 service.sh 在检测到崩溃/安全模式后自动调用，也可手动执行：
 #   su -c "sh /data/adb/modules/murongchaopin/scripts/collect_bugpack.sh"
 
+if [ -z "${MODDIR:-}" ] || [ ! -f "$MODDIR/module.prop" ]; then
+  MODDIR=""
+  for cand in /data/adb/modules/*/; do
+    [ -f "$cand/module.prop" ] || continue
+    if grep -q '^id=murongchaopin$' "$cand/module.prop" 2>/dev/null; then
+      MODDIR="${cand%/}"
+      break
+    fi
+  done
+fi
 MODDIR=${MODDIR:-/data/adb/modules/murongchaopin}
 STAMP=$(date +%Y%m%d-%H%M%S)
 OUT_DIR="/sdcard/Download"

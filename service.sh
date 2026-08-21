@@ -33,9 +33,9 @@ done
 BUGPACK_REQUEST="$MODDIR/runtime/request_bugpack"
 if [ -f "$BUGPACK_REQUEST" ] || \
    find /data/anr -maxdepth 1 -name 'traces_SystemServer_WDT*' -mmin -40 2>/dev/null | grep -q .; then
-  if [ -f "$MODDIR/scripts/collect_bugpack.sh" ]; then
-    sh "$MODDIR/scripts/collect_bugpack.sh" >/dev/null 2>&1 || true
-  fi
+if [ -f "$MODDIR/scripts/collect_bugpack.sh" ]; then
+  (export MODDIR; sh "$MODDIR/scripts/collect_bugpack.sh") >/dev/null 2>&1 || true
+fi
   rm -f "$BUGPACK_REQUEST"
 fi
 
