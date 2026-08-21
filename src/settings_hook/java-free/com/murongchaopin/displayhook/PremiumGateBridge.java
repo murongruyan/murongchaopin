@@ -12,16 +12,6 @@ public final class PremiumGateBridge {
     private PremiumGateBridge() {
     }
 
-    /**
-     * Resolve the system context once during module startup. Hooks that run
-     * while framework display locks are held must never reflect into
-     * ActivityThread.systemMain(), because that re-enters display code and can
-     * deadlock against DisplayManagerService during boot.
-     */
-    public static void warmSystemContext() {
-        systemContext();
-    }
-
     /** Whether the separately installed premium module owns a vendor MEMC session. */
     public static boolean isVendorMemcActive() {
         Context context = systemContext();
@@ -49,7 +39,10 @@ public final class PremiumGateBridge {
                 Class<?> activityThread = Class.forName("android.app.ActivityThread");
                 Object current = activityThread.getMethod("currentActivityThread").invoke(null);
                 if (current == null) {
-                    current = activityThread.getMethod("systemMain").invoke(null);
+                    // Never reflect into systemMain() from a hook: it re-enters
+                    // display code and can deadlock against DisplayManagerService
+                    // while framework display locks are held.
+                    return cachedContext;
                 }
                 Object value = activityThread.getMethod("getSystemContext").invoke(current);
                 if (value instanceof Context) {
