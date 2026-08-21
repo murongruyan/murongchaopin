@@ -1,5 +1,9 @@
 # 更新日志
 
+## v2.9.15
+
+1. 修复 system_server 开机阶段可能与 DisplayManagerService 产生锁死、导致死机热重启的问题：Hook 回调不再在显示锁内反射 `ActivityThread.systemMain()`，系统上下文改为模块启动早期预热并缓存。
+
 ## v2.9.14
 
 1. 显示付费资源机型支持扩展到 PLK110（一加 15）与 PJD110（一加 12）：这些机型可使用付费 Hook 的设置刷新率、游戏助手与 Scene 功能。
