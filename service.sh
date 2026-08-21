@@ -46,6 +46,17 @@ if [ -f "$LTPS_VOTE_HELPER" ]; then
     sh "$LTPS_VOTE_HELPER" mark-boot-success >/dev/null 2>&1 || true
 fi
 
+# A reboot was requested for a paid package/feature change. When the paid
+# package is not installed there is nothing left to apply on this boot, so
+# consume the marker here; otherwise premium_service.sh clears it after the
+# paid service stage runs.
+if [ -f "$GATE_HELPER" ]; then
+    . "$GATE_HELPER" 2>/dev/null || true
+    if ! pm path com.murongchaopin.displayhook.premium >/dev/null 2>&1; then
+        gate_state_write reboot_required "0" >/dev/null 2>&1 || true
+    fi
+fi
+
 # Paid package runtime (ADFR lock, LTPO activity observer, MEMC/SF boot
 # success markers, Pixelworks overlay and the premium Hook). Dispatched only
 # when the paid package is installed and not marked for removal.

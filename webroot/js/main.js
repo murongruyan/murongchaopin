@@ -2904,8 +2904,13 @@ function renderDisplayPolicy(policy, activePolicy = policy, busy = false, profil
 
     if (status) {
         const pending = policies.includes(activePolicy) && activePolicy !== selected;
-        status.innerText = busy ? '保存中' : `${labels[selected]}${pending ? ' · 待重启' : ''}`;
-        status.className = pending ? 'status-badge warning' : 'status-badge success';
+        const needsPremium = selected !== defaultPolicy && authState.package_installed !== 1;
+        status.innerText = busy
+            ? '保存中'
+            : needsPremium
+                ? `${labels[selected]} · 待安装付费组件`
+                : `${labels[selected]}${pending ? ' · 待重启' : ''}`;
+        status.className = pending || needsPremium ? 'status-badge warning' : 'status-badge success';
     }
 
     const selectedButtonId = (selected === 'stock_ltpo' || selected === 'stock_ltps')
