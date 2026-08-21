@@ -565,7 +565,7 @@ void init_display_modes() {
     char line[1024];
     
     // 直接读取 dumpsys SurfaceFlinger 输出，手动解析以提高兼容性
-    fp = popen("dumpsys SurfaceFlinger", "r");
+    fp = popen("timeout 4 dumpsys SurfaceFlinger", "r");
     if (fp == NULL) {
         log_msg("Failed to run dumpsys SurfaceFlinger / 执行 dumpsys SurfaceFlinger 失败");
         return;
@@ -808,7 +808,7 @@ int get_current_system_mode() {
      * daemon trust a stale cached target after LTPS/ADFR or a resolution
      * change had moved the panel elsewhere.
      */
-    FILE *fp = popen("dumpsys SurfaceFlinger 2>/dev/null", "r");
+    FILE *fp = popen("timeout 4 dumpsys SurfaceFlinger 2>/dev/null", "r");
     if (fp) {
         char line[1024];
         int fallback = -1;
@@ -845,7 +845,7 @@ int get_current_system_mode() {
  * composer configChanged callback, so use it for touch-rise completion and
  * never fall back to the pending SurfaceFlinger value here. */
 static int get_current_applied_mode(void) {
-    FILE *fp = popen("dumpsys display 2>/dev/null", "r");
+    FILE *fp = popen("timeout 4 dumpsys display 2>/dev/null", "r");
 
     if (fp) {
         char line[1024];
@@ -870,7 +870,7 @@ static int get_current_applied_mode(void) {
 // 获取屏幕状态
 // 返回: 1=ON(亮屏), 0=OFF/DOZE(息屏/待机), -1=未知(解析失败)
 int get_screen_state() {
-    FILE *fp = popen("dumpsys display 2>/dev/null", "r");
+    FILE *fp = popen("timeout 4 dumpsys display 2>/dev/null", "r");
     if (!fp) return -1;
 
     char line[256];
@@ -2549,7 +2549,7 @@ void smooth_switch(int target_id) {
 // 获取前台应用 (使用用户提供的优化逻辑)
 void get_foreground_app(char *buffer, int size) {
     // 优先尝试 dumpsys window | grep mCurrentFocus
-    FILE* fp = popen("dumpsys window | grep mCurrentFocus", "r");
+    FILE* fp = popen("timeout 4 dumpsys window | grep mCurrentFocus", "r");
     if (!fp) {
         log_msg("get_foreground_app: popen failed / popen 失败");
         strncpy(buffer, "unknown", size);
@@ -2655,7 +2655,7 @@ static int rmx5200_video_surface_probe(const char *foreground_package) {
 
         snprintf(needle, sizeof(needle), "SurfaceView[%s/",
                  foreground_package);
-        fp = popen("dumpsys SurfaceFlinger --list 2>/dev/null", "r");
+        fp = popen("timeout 4 dumpsys SurfaceFlinger --list 2>/dev/null", "r");
         if (fp) {
             char line[1024];
             while (fgets(line, sizeof(line), fp)) {
@@ -4747,17 +4747,24 @@ static void reconcile_boot_resolution(const char *base_path) {
         return;
     }
     if (target_width != active_width) {
-        log_msg("Boot resolution restore is unsettled: adjust=%d wants=%d "
-                "active=%d/%d; retaining active geometry",
+        /* The configured mode.txt is authoritative. Never overwrite it with
+         * the active geometry just because the boot transition is incomplete;
+         * that would silently downgrade the user's chosen resolution (and
+         * leave the density mismatched) on every restart. */
+        log_msg("Boot resolution restore unsettled: adjust=%d wants=%d "
+                "active=%d/%d; keeping configured geometry",
                 adjust, target_width, active_id, active_width);
-        target_width = active_width;
+        target_width = get_mode_width(configured_id);
     }
     if (configured_fps <= 0) configured_fps = mode_fps(active_id);
     target_id = mode_for_width_fps(target_width, configured_fps);
     if (!is_valid_mode(target_id)) target_id = active_id;
     if (!is_valid_mode(target_id)) return;
 
-    if (target_id != configured_id) {
+    if (target_id != configured_id && active_width == target_width) {
+        /* Only adopt a settled ColorOS-side change (active geometry already
+         * matches the requested width); otherwise the transition is still in
+         * flight and persisting would clobber the configured mode. */
         persisted = write_resolution_config(base_path, target_id, target_width);
         default_mode_id = target_id;
         if (persisted) load_config(base_path);
