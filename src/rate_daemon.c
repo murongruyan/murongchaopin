@@ -4782,9 +4782,11 @@ static void reconcile_boot_resolution(const char *base_path) {
          * the active geometry just because the boot transition is incomplete;
          * that would silently downgrade the user's chosen resolution (and
          * leave the density mismatched) on every restart. */
-        log_msg("Boot resolution restore unsettled: adjust=%d wants=%d "
+        log_msg("Boot resolution restore is unsettled: adjust=%d wants=%d "
                 "active=%d/%d; keeping configured geometry",
                 adjust, target_width, active_id, active_width);
+        /* target_width = active_width is intentionally not used here: a
+         * transient boot geometry must not overwrite the configured mode. */
         target_width = get_mode_width(configured_id);
     }
     if (configured_fps <= 0) configured_fps = mode_fps(active_id);
@@ -5866,7 +5868,56 @@ int main(int argc, char *argv[]) {
                     update_rmx5200_ltpo_controller(base_path, target_id,
                                                     screen_state);
                     if (rmx5200_ltpo.active) {
-                        force_reapply = 0;
+                        /* LTPO owns refresh-rate steps, but it must not mask
+                         * a ColorOS app/scene resolution vote.  Games and
+                         * video apps can move HWC to the FHD group while the
+                         * durable policy remains QHD; leaving the controller
+                         * idle here also leaves Android with a stale 560-dpi
+                         * layout.  Let the normal transaction restore the
+                         * configured geometry, then resume LTPO ownership. */
+                        int applied_id = get_current_applied_mode();
+                        int geometry_id = applied_id;
+                        int geometry_drift;
+
+                        /* DisplayManager can trail the physical mode while a
+                         * ColorOS app vote is settling. Prefer its coherent
+                         * applied snapshot, then confirm a mismatch against
+                         * SurfaceFlinger's live HWC mode before deciding that
+                         * the app changed resolution. */
+                        if (!is_valid_mode(geometry_id)
+                                || (is_valid_mode(target_id)
+                                && get_mode_width(geometry_id)
+                                != get_mode_width(target_id))) {
+                            int physical_id = get_current_system_mode();
+                            if (is_valid_mode(physical_id)) geometry_id = physical_id;
+                        }
+                        geometry_drift = is_valid_mode(geometry_id)
+                                && is_valid_mode(target_id)
+                                && get_mode_width(geometry_id)
+                                != get_mode_width(target_id);
+                        if (geometry_drift) {
+                            log_msg("LTPO geometry drift detected: applied=%d/%dpx "
+                                    "target=%d/%dpx; restoring resolution",
+                                    geometry_id, get_mode_width(geometry_id),
+                                    target_id, get_mode_width(target_id));
+                            /* A pending old-geometry drop/rise cannot be
+                             * replayed after the ColorOS resolution switch.
+                             * Clear only controller bookkeeping; the vendor
+                             * OTI pause remains owned by the active LTPO
+                             * session and is released normally if the new
+                             * geometry is not eligible. */
+                            rmx5200_ltpo.pending_ceiling_mode_id = -1;
+                            rmx5200_ltpo.touch_direct_request_ms = 0;
+                            rmx5200_ltpo.touch_direct_commit_count = 0;
+                            rmx5200_ltpo.touch_direct_retries = 0;
+                            rmx5200_ltpo_clear_pending_drop("geometry-drift");
+                            rmx5200_ltpo_clear_superseded_drop();
+                            current_mode_id = geometry_id;
+                            force_reapply = 1;
+                            smooth_switch(target_id);
+                        } else {
+                            force_reapply = 0;
+                        }
                     } else if (strcmp(device_model, "RMX5200") == 0 &&
                                screen_state == 0) {
                     /* Doze owns panel timing. Do not feed the generic

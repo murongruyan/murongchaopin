@@ -205,7 +205,8 @@ jobs:
             tests/check_backend_dispatch.sh \
             tests/check_dtbo_apply_lock.sh \
             tests/check_install_tool_permissions.sh \
-            tests/check_volume_key_parser.sh; do
+            tests/check_volume_key_parser.sh \
+            tests/check_module_update_preservation.sh; do
             sh -n "$script"
           done
           sh tests/check_drm_ko_profiles.sh
@@ -228,6 +229,7 @@ jobs:
           sh tests/check_mode_index_integrity.sh
           sh tests/check_install_tool_permissions.sh
           sh tests/check_volume_key_parser.sh
+          sh tests/check_module_update_preservation.sh
           sh tests/check_surfaceflinger_ltps_vote_patch.sh
           sh tests/check_premium_script_line_endings.sh
 

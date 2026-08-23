@@ -22,7 +22,7 @@ done
 scope_insert() {
   _pkg="$1"
   "$SQLITE_BIN" "$LSPD_DB" \
-    "INSERT OR IGNORE INTO modules_state(module_pkg_name,user_id,enabled,scope_request_blocked) VALUES('$_pkg',0,1,0);" \
+    "INSERT OR IGNORE INTO modules_state(module_pkg_name,user_id,enabled,scope_request_blocked) VALUES('$_pkg',0,1,0); UPDATE modules_state SET enabled=1,scope_request_blocked=0 WHERE module_pkg_name='$_pkg' AND user_id=0;" \
     >/dev/null 2>&1 || true
 }
 

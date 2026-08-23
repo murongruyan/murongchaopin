@@ -38,11 +38,20 @@ SETTINGS_BRIDGE_HELPER="$MOD_PATH/scripts/display_settings_bridge.sh"
 MODE_MANIFEST_HELPER="$MOD_PATH/scripts/mode_manifest.sh"
 COLOROS_CONFIG_HELPER="$MOD_PATH/scripts/coloros_config.sh"
 VIDEO_MEMC_APPS_FILE="$MOD_PATH/config/video_memc_apps.txt"
+GAME_ASSISTANT_APPS_FILE="$MOD_PATH/config/game_assistant_apps.txt"
+sync_game_assistant_property() {
+    local value=""
+    if [ -f "$GAME_ASSISTANT_APPS_FILE" ]; then
+        value=$(tr '\n' ',' < "$GAME_ASSISTANT_APPS_FILE" | sed 's/,$//')
+    fi
+    setprop sys.murong.game_assistant_apps "$value" 2>/dev/null || true
+}
 VIDEO_MOTION_TARGET_KEY="murong_video_motion_target_rate"
 BASE_API_URL="https://murongdiaodu.rl1.cc/api"
 STOCK_DTBO="$IMG_DIR/dtbo.img"
 STOCK_MANIFEST="$IMG_DIR/dtbo.img.sha256"
 STOCK_RECOVERY="$IMG_DIR/dtbo.img.gz"
+APPLIED_MANIFEST="$IMG_DIR/dtbo.applied.sha256"
 DTBO_APPLY_LOCK_DIR="$MOD_PATH/runtime/dtbo_apply.lock"
 
 [ -f "$AVB_HELPER" ] && . "$AVB_HELPER"
@@ -669,10 +678,19 @@ do_flash() {
         echo "错误：找不到 dtbo_final.img，请先执行合并步骤"
         return 1
     fi
-    SIZE=$(ls -l "$FINAL_DTBO" 2>/dev/null | awk '{print $5}')
+    IMAGE_SIZE=$(wc -c < "$FINAL_DTBO" 2>/dev/null | tr -d '[:space:]')
+    PARTITION_SIZE=$(blockdev --getsize64 "$DTBO_PARTITION" 2>/dev/null)
+    case "$PARTITION_SIZE" in
+        ''|*[!0-9]*|0)
+            echo "错误：无法读取 DTBO 分区容量，拒绝刷入"
+            return 1
+            ;;
+    esac
     echo "  目标分区: $DTBO_PARTITION"
-    echo "  写入镜像: $(basename "$FINAL_DTBO") ($SIZE 字节)"
+    echo "  写入镜像: $(basename "$FINAL_DTBO") ($IMAGE_SIZE 字节)"
     if dtbo_write_partition "$FINAL_DTBO" "$DTBO_PARTITION"; then
+        dtbo_write_device_manifest "$DTBO_PARTITION" "$PARTITION_SIZE" \
+            "$APPLIED_MANIFEST" >/dev/null 2>&1 || true
         echo "Success: 刷入成功！请重启生效。"
         return 0
     else
@@ -1344,6 +1362,41 @@ case "$1" in
         [ -f "$VIDEO_MEMC_APPS_FILE" ] && cat "$VIDEO_MEMC_APPS_FILE"
         ;;
 
+    "get_game_assistant_apps")
+        [ -f "$GAME_ASSISTANT_APPS_FILE" ] && cat "$GAME_ASSISTANT_APPS_FILE"
+        ;;
+
+    "add_game_assistant_app")
+        require_premium video_memc
+        GAME_PACKAGE="$2"
+        valid_video_package "$GAME_PACKAGE" || {
+            echo "Error: invalid package"
+            exit 1
+        }
+        mkdir -p "$(dirname "$GAME_ASSISTANT_APPS_FILE")" || exit 1
+        [ -f "$GAME_ASSISTANT_APPS_FILE" ] || : > "$GAME_ASSISTANT_APPS_FILE"
+        grep -Fqx "$GAME_PACKAGE" "$GAME_ASSISTANT_APPS_FILE" 2>/dev/null ||
+            printf '%s\n' "$GAME_PACKAGE" >> "$GAME_ASSISTANT_APPS_FILE"
+        sort -u "$GAME_ASSISTANT_APPS_FILE" > "$GAME_ASSISTANT_APPS_FILE.tmp.$$" || exit 1
+        mv -f "$GAME_ASSISTANT_APPS_FILE.tmp.$$" "$GAME_ASSISTANT_APPS_FILE" || exit 1
+        chmod 0644 "$GAME_ASSISTANT_APPS_FILE" 2>/dev/null
+        sync_game_assistant_property
+        echo "Success: game assistant enhancement app saved"
+        ;;
+
+    "remove_game_assistant_app")
+        require_premium video_memc
+        GAME_PACKAGE="$2"
+        valid_video_package "$GAME_PACKAGE" || exit 1
+        [ -f "$GAME_ASSISTANT_APPS_FILE" ] || exit 0
+        awk -v package="$GAME_PACKAGE" '$0 != package { print }' \
+            "$GAME_ASSISTANT_APPS_FILE" > "$GAME_ASSISTANT_APPS_FILE.tmp.$$" || exit 1
+        mv -f "$GAME_ASSISTANT_APPS_FILE.tmp.$$" "$GAME_ASSISTANT_APPS_FILE" || exit 1
+        chmod 0644 "$GAME_ASSISTANT_APPS_FILE" 2>/dev/null
+        sync_game_assistant_property
+        echo "Success: game assistant enhancement app removed"
+        ;;
+
     "add_video_motion_app")
         require_premium video_memc
         VIDEO_PACKAGE="$2"
@@ -1716,6 +1769,7 @@ case "$1" in
             RESTORE_RESULT=$?
         fi
         if [ "$RESTORE_RESULT" -eq 0 ]; then
+            dtbo_clear_device_manifest "$APPLIED_MANIFEST"
             write_dts_backend dtbo
             echo "Success: 恢复成功！"
             # 不要删除备份文件，防止用户再次误操作需要恢复
@@ -2051,6 +2105,7 @@ case "$1" in
             else
                 dd if="$BACKUP_FILE" of="$DTBO_PARTITION" bs=4096 conv=fsync || exit 1
             fi
+            dtbo_clear_device_manifest "$APPLIED_MANIFEST"
         fi
 
         # Stop background observers before removing their bind mounts.

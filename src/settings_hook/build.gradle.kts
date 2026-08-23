@@ -1,5 +1,13 @@
+buildscript {
+    dependencies {
+        // AGP 9.5's built-in Kotlin defaults to 2.2.10; use the current
+        // Kotlin compiler so Java 26 bytecode is available to Android tasks.
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.10")
+    }
+}
+
 plugins {
-    id("com.android.application") version "9.2.1"
+    id("com.android.application") version "9.5.0-alpha02"
 }
 
 val hookVersionCode = 69
@@ -96,8 +104,8 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_21
-        targetCompatibility = JavaVersion.VERSION_21
+        sourceCompatibility = JavaVersion.VERSION_26
+        targetCompatibility = JavaVersion.VERSION_26
     }
 
     packaging {

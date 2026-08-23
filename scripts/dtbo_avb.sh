@@ -93,6 +93,31 @@ dtbo_write_stock_manifest() {
     chmod 0444 "$dtbo_manifest_file" 2>/dev/null
 }
 
+# Record the exact image currently present in the active DTBO partition. This
+# is deliberately separate from img/dtbo.img.sha256: the latter is the
+# immutable factory baseline, while this manifest identifies the last module
+# image actually written and lets the installer distinguish a normal update
+# from an unknown third-party DTBO.
+dtbo_write_device_manifest() {
+    dtbo_device_manifest_partition="$1"
+    dtbo_device_manifest_size="$2"
+    dtbo_device_manifest_file="$3"
+    dtbo_is_number "$dtbo_device_manifest_size" || return 1
+    [ "$dtbo_device_manifest_size" -gt 0 ] || return 1
+    dtbo_device_manifest_hash=$(dtbo_hash_device_prefix \
+        "$dtbo_device_manifest_partition" "$dtbo_device_manifest_size") || return 1
+    [ "${#dtbo_device_manifest_hash}" -eq 64 ] || return 1
+    dtbo_device_manifest_tmp="$dtbo_device_manifest_file.tmp.$$"
+    printf '%s  dtbo.active\n' "$dtbo_device_manifest_hash" > \
+        "$dtbo_device_manifest_tmp" || return 1
+    mv -f "$dtbo_device_manifest_tmp" "$dtbo_device_manifest_file" || return 1
+    chmod 0444 "$dtbo_device_manifest_file" 2>/dev/null
+}
+
+dtbo_clear_device_manifest() {
+    rm -f "$1" "$1.tmp.$$" 2>/dev/null
+}
+
 dtbo_read_stock_manifest_hash() {
     dtbo_read_manifest_file="$1"
     dtbo_read_manifest_hash=$(awk 'NR == 1 {print $1}' "$dtbo_read_manifest_file" 2>/dev/null)

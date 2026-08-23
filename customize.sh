@@ -1,6 +1,25 @@
 #!/system/bin/sh
 SKIPUNZIP=0
 
+MODULE_ID="murongchaopin"
+INSTALLED_MOD_PATH="/data/adb/modules/$MODULE_ID"
+
+# Magisk/KernelSU extracts an update into a temporary modules_update path while
+# the currently active module remains in modules/. Detect that state before any
+# install-time prompt so a software-only update never asks the user to confirm
+# or rewrite the active DTBO.
+MODULE_UPDATE=0
+if [ -n "${MODPATH:-}" ] &&
+   [ "$MODPATH" != "$INSTALLED_MOD_PATH" ] &&
+   [ -d "$INSTALLED_MOD_PATH" ]; then
+  MODULE_UPDATE=1
+fi
+UPDATE_BACKEND="${MURONGCHAOPIN_UPDATE_BACKEND:-}"
+case "$UPDATE_BACKEND" in
+  ""|dtbo|drm) ;;
+  *) abort "MURONGCHAOPIN_UPDATE_BACKEND 必须是 dtbo 或 drm" ;;
+esac
+
 # 延迟输出函数（带错误流重定向）
 Outputs() {
   echo "$@" >&2
@@ -103,13 +122,21 @@ install_module() {
     fi
 }
 
-# 1. 提示确认
+# 1. 提示确认。模块更新默认只替换软件层，不要求再次确认原厂 DTBO。
 ui_print "=============================="
 ui_print "    真我GT8 Pro DTBO 超频模块    "
 ui_print "=============================="
 
+# 首次安装需要音量键确认；普通模块更新不触碰当前 DTBO。
+if [ "$MODULE_UPDATE" = 1 ]; then
+  if [ -n "$UPDATE_BACKEND" ]; then
+    ui_print "检测到已有模块安装目录：将按要求重新处理显示后端 $UPDATE_BACKEND"
+  else
+    ui_print "检测到已有模块安装目录：将根据当前 DTBO 哈希决定安装路径"
+  fi
+else
 # 按键确认
-ui_print "- 请按 音量+ 确认当前是官方原版 DTBO（这里只确认基线，不会单独修改）"
+ui_print "- 请按 音量+ 继续，安装器会自动校验当前 DTBO（不会单独修改）"
 ui_print "- 请按 音量- 退出安装"
 
 # 使用新的音量键检测函数
@@ -122,53 +149,63 @@ fi
 ui_print "确认继续安装..."
 # 第一次按键只负责确认原厂基线。等待抬起事件结束后，再进入第二次选择。
 sleep 1
-
-# 2. 检测当前 Slot
-SLOT=$(getprop ro.boot.slot_suffix)
-if [ -z "$SLOT" ]; then
-  ui_print "错误: 无法获取当前 Slot 分区信息"
-  abort
 fi
-ui_print "检测到当前分区槽位: $SLOT"
 
-# 3. 准备路径
+# 2. 准备路径
 MOD_PATH="$MODPATH"
 BIN_DIR="$MOD_PATH/bin"
 IMG_DIR="$MOD_PATH/img"
 WORK_DIR="$MOD_PATH/workspace"
-MODULE_ID="murongchaopin"
-INSTALLED_MOD_PATH="/data/adb/modules/$MODULE_ID"
 STOCK_DTBO="$IMG_DIR/dtbo.img"
 STOCK_MANIFEST="$IMG_DIR/dtbo.img.sha256"
 STOCK_RECOVERY="$IMG_DIR/dtbo.img.gz"
-DTBO_PARTITION="/dev/block/by-name/dtbo$SLOT"
-
-[ -f "$MODPATH/scripts/dtbo_avb.sh" ] && . "$MODPATH/scripts/dtbo_avb.sh" || abort "缺少 DTBO AVB 处理脚本"
+APPLIED_MANIFEST="$IMG_DIR/dtbo.applied.sha256"
 
 # KernelSU/Magisk updates are extracted into modules_update while the current
-# module is still available below modules/. Preserve only user-owned state;
-# runtime/ is intentionally regenerated on the next boot.
-preserve_installed_file() {
+# module is still available below modules/. Preserve user-owned state before
+# the new payload is allowed to replace it. runtime/ is intentionally not
+# copied wholesale because it contains transient locks and boot markers.
+preserve_installed_path() {
   _relative_path="$1"
-  _source_file="$INSTALLED_MOD_PATH/$_relative_path"
-  _target_file="$MODPATH/$_relative_path"
+  _source_path="$INSTALLED_MOD_PATH/$_relative_path"
+  _target_path="$MODPATH/$_relative_path"
   [ "$INSTALLED_MOD_PATH" != "$MODPATH" ] || return 0
-  [ -f "$_source_file" ] && [ ! -L "$_source_file" ] || return 0
-  mkdir -p "$(dirname "$_target_file")" || abort "无法创建更新迁移目录"
-  cp -p "$_source_file" "$_target_file" || abort "无法保留用户配置: $_relative_path"
+  [ -L "$_source_path" ] && return 0
+  [ -e "$_source_path" ] || return 0
+  [ ! -L "$_target_path" ] || abort "更新目标路径是符号链接: $_relative_path"
+  if [ -d "$_source_path" ]; then
+    mkdir -p "$_target_path" || abort "无法创建更新迁移目录: $_relative_path"
+    cp -a "$_source_path/." "$_target_path/" || \
+      abort "无法保留用户目录: $_relative_path"
+    return 0
+  fi
+  mkdir -p "$(dirname "$_target_path")" || abort "无法创建更新迁移目录"
+  cp -p "$_source_path" "$_target_path" || abort "无法保留用户配置: $_relative_path"
 }
 
-for USER_STATE_FILE in \
+for USER_STATE_PATH in \
   config/mode.txt \
+  config/custom_refresh_rates.txt \
+  config/game_assistant_apps.txt \
+  config/video_memc_apps.txt \
   config/drm_phy_profile.txt \
   config/rmx5200_adfr_mode.txt \
   config/rmx5200_display_policy.txt \
+  config/dts_backend.txt \
+  config/adfr_lock \
+  config/surfaceflinger_ltps_vote_patch \
   config/auth/account.json \
   config/auth/lease.json \
   config/auth/package.json \
   config/auth/state.json \
-  config/auth/device_id.txt; do
-  preserve_installed_file "$USER_STATE_FILE"
+  config/auth/device_id.txt \
+  config/install_system_fingerprint.txt \
+  runtime/drm_modes.txt \
+  img/dtbo.img \
+  img/dtbo.img.sha256 \
+  img/dtbo.img.gz \
+  img/dtbo.applied.sha256; do
+  preserve_installed_path "$USER_STATE_PATH"
 done
 
 # The paid package is downloaded and verified independently of the public base
@@ -184,90 +221,208 @@ if [ "$INSTALLED_MOD_PATH" != "$MODPATH" ] && \
     abort "无法保留已安装的付费资源包"
 fi
 
+CURRENT_SYSTEM_FINGERPRINT=$(getprop ro.build.fingerprint 2>/dev/null | tr -d '\r\n')
+SYSTEM_STATE_FILE="$MODPATH/config/install_system_fingerprint.txt"
+PREVIOUS_SYSTEM_FINGERPRINT=$(sed -n '1p' "$SYSTEM_STATE_FILE" 2>/dev/null |
+  tr -d '\r\n')
+SYSTEM_VERSION_CHANGED=0
+if [ -n "$CURRENT_SYSTEM_FINGERPRINT" ] &&
+   [ -n "$PREVIOUS_SYSTEM_FINGERPRINT" ] &&
+   [ "$CURRENT_SYSTEM_FINGERPRINT" != "$PREVIOUS_SYSTEM_FINGERPRINT" ]; then
+  SYSTEM_VERSION_CHANGED=1
+fi
+
+SLOT=$(getprop ro.boot.slot_suffix 2>/dev/null)
+DTBO_PARTITION="/dev/block/by-name/dtbo$SLOT"
 DTBO_PARTITION_IMAGE_SIZE=$(blockdev --getsize64 "$DTBO_PARTITION" 2>/dev/null)
-case "$DTBO_PARTITION_IMAGE_SIZE" in
-  ""|*[!0-9]*|0)
-    abort "无法读取 DTBO 分区大小"
-    ;;
-esac
+DTBO_ROUTE="unavailable"
+SKIP_DISPLAY_BACKEND=1
+CURRENT_DTBO_HASH=""
+STOCK_HASH=""
+APPLIED_HASH=""
 
-mkdir -p "$IMG_DIR"
-mkdir -p "$WORK_DIR"
-mkdir -p "$BIN_DIR/dtbo_dts"
-Prepare_install_tools || abort "显示后端工具缺失或无法设置执行权限"
+if [ -f "$MODPATH/scripts/dtbo_avb.sh" ]; then
+  . "$MODPATH/scripts/dtbo_avb.sh" || true
+fi
+if [ -n "$SLOT" ] &&
+   [ -f "$MODPATH/scripts/dtbo_avb.sh" ] &&
+   [ -f "$DTBO_PARTITION" -o -b "$DTBO_PARTITION" ]; then
+  case "$DTBO_PARTITION_IMAGE_SIZE" in
+    ''|*[!0-9]*|0) ;;
+    *)
+      CURRENT_DTBO_HASH=$(dtbo_hash_device_prefix "$DTBO_PARTITION" \
+        "$DTBO_PARTITION_IMAGE_SIZE" 2>/dev/null)
+      STOCK_HASH=$(dtbo_read_stock_manifest_hash "$STOCK_MANIFEST" 2>/dev/null || true)
+      APPLIED_HASH=$(dtbo_read_stock_manifest_hash "$APPLIED_MANIFEST" 2>/dev/null || true)
+      ;;
+  esac
+fi
 
-# 4. 原厂备份只创建一次；更新安装时必须保留已验证的原厂基线。
-# 当前分区可能已经被测试修改，不能无条件写回 img/dtbo.img。
-VALID_STOCK_SOURCE=""
-for STOCK_CANDIDATE in "$INSTALLED_MOD_PATH/img/dtbo.img" "$STOCK_DTBO"; do
-  [ -f "$STOCK_CANDIDATE" ] || continue
-  CANDIDATE_MANIFEST="$STOCK_CANDIDATE.sha256"
-  CANDIDATE_RECOVERY="$STOCK_CANDIDATE.gz"
-  if [ -f "$CANDIDATE_MANIFEST" ]; then
-    if ! dtbo_validate_stock_backup "$STOCK_CANDIDATE" "$CANDIDATE_MANIFEST" \
-        "$DTBO_PARTITION_IMAGE_SIZE" "$BIN_DIR" >/dev/null 2>&1; then
-      dtbo_recover_stock_backup "$STOCK_CANDIDATE" "$CANDIDATE_MANIFEST" \
-        "$CANDIDATE_RECOVERY" "$DTBO_PARTITION_IMAGE_SIZE" "$BIN_DIR" \
-        >/dev/null 2>&1
+# Older module releases did not persist an applied-hash manifest, but they may
+# still have a complete signed image in workspace/*-final.img. If one of those
+# images exactly matches the live partition, migrate only its fact (the hash),
+# never the raw new_dtbo.img intermediate. This keeps the first update after
+# the state-machine change software-only without trusting an unrelated image.
+recover_legacy_applied_manifest() {
+  [ -n "$APPLIED_HASH" ] && return 0
+  [ -n "$CURRENT_DTBO_HASH" ] || return 0
+  [ -n "$STOCK_HASH" ] &&
+    [ "$CURRENT_DTBO_HASH" = "$STOCK_HASH" ] && return 0
+  case "$DTBO_PARTITION_IMAGE_SIZE" in
+    ''|*[!0-9]*|0) return 0 ;;
+  esac
+  [ -d "$INSTALLED_MOD_PATH" ] || return 0
+  for _legacy_candidate in \
+    "$INSTALLED_MOD_PATH/bin/dtbo_final.img" \
+    "$INSTALLED_MOD_PATH/workspace/dtbo_final.img" \
+    "$INSTALLED_MOD_PATH/workspace/"*-final.img; do
+    [ -f "$_legacy_candidate" ] || continue
+    [ -L "$_legacy_candidate" ] && continue
+    _legacy_size=$(wc -c < "$_legacy_candidate" 2>/dev/null |
+      tr -d '[:space:]')
+    [ "$_legacy_size" = "$DTBO_PARTITION_IMAGE_SIZE" ] || continue
+    _legacy_hash=$(dtbo_hash_file "$_legacy_candidate" 2>/dev/null || true)
+    [ "$_legacy_hash" = "$CURRENT_DTBO_HASH" ] || continue
+    # Keep the official-current route ahead of legacy migration. A complete
+    # artifact that still passes AVB is a stock/system image, not proof that a
+    # module modification is active.
+    if Prepare_install_tools >/dev/null 2>&1 &&
+       dtbo_verify_official_image "$_legacy_candidate" \
+         "$DTBO_PARTITION_IMAGE_SIZE" "$BIN_DIR" >/dev/null 2>&1; then
+      continue
     fi
-    if dtbo_validate_stock_backup "$STOCK_CANDIDATE" "$CANDIDATE_MANIFEST" \
-        "$DTBO_PARTITION_IMAGE_SIZE" "$BIN_DIR" >/dev/null 2>&1; then
-      VALID_STOCK_SOURCE="$STOCK_CANDIDATE"
-      break
+    mkdir -p "$IMG_DIR" 2>/dev/null || return 0
+    dtbo_write_device_manifest "$DTBO_PARTITION" \
+      "$DTBO_PARTITION_IMAGE_SIZE" "$APPLIED_MANIFEST" >/dev/null 2>&1 ||
+      return 0
+    APPLIED_HASH=$(dtbo_read_stock_manifest_hash "$APPLIED_MANIFEST" \
+      2>/dev/null || true)
+    if [ "$APPLIED_HASH" = "$CURRENT_DTBO_HASH" ]; then
+      ui_print "已从旧版完整 DTBO 产物迁移最近应用版本哈希"
+      return 0
     fi
-  elif dtbo_verify_official_image "$STOCK_CANDIDATE" \
-      "$DTBO_PARTITION_IMAGE_SIZE" "$BIN_DIR" >/dev/null 2>&1; then
-    # 没有哈希清单的候选只能在官方 AVB 完整性通过时使用。
-    VALID_STOCK_SOURCE="$STOCK_CANDIDATE"
-    break
-  fi
-  ui_print "警告: 已安装模块的 DTBO 备份无效，不会继续使用"
-done
+  done
+  return 0
+}
 
-if [ -n "$VALID_STOCK_SOURCE" ]; then
-  ui_print "已验证并保留现有原厂 DTBO 备份"
-  if [ "$VALID_STOCK_SOURCE" != "$STOCK_DTBO" ]; then
-    cp "$VALID_STOCK_SOURCE" "$STOCK_DTBO" || abort "无法保留原厂 DTBO 备份"
+recover_legacy_applied_manifest
+
+if [ -n "$CURRENT_DTBO_HASH" ] &&
+   [ -n "$APPLIED_HASH" ] &&
+   [ "$CURRENT_DTBO_HASH" = "$APPLIED_HASH" ]; then
+  if [ -n "$UPDATE_BACKEND" ]; then
+    DTBO_ROUTE="applied_force"
+    ui_print "当前 DTBO 与模块最近一次应用版本一致：按显式要求重做底层后端"
+  else
+    DTBO_ROUTE="module_update"
+    ui_print "当前 DTBO 与模块最近一次应用版本一致：走软件更新路径"
   fi
+elif [ -n "$CURRENT_DTBO_HASH" ] &&
+     [ -n "$STOCK_HASH" ] &&
+     [ "$CURRENT_DTBO_HASH" = "$STOCK_HASH" ]; then
+  DTBO_ROUTE="stock"
+  ui_print "当前 DTBO 与模块原厂备份一致：走正常安装路径"
 else
+  # A hash that matches neither known image must be classified by AVB. An
+  # invalid image is not fatal: leave the unknown DTBO untouched and continue
+  # with software installation, so users are not forced to overwrite it.
   CURRENT_DTBO="$WORK_DIR/install-current.img"
-  ui_print "首次建立原厂 DTBO 备份..."
-  if ! dd if="$DTBO_PARTITION" of="$CURRENT_DTBO" bs=1 \
-      count="$DTBO_PARTITION_IMAGE_SIZE" 2>/dev/null; then
-    abort "DTBO 提取失败"
+  if [ -n "$DTBO_PARTITION_IMAGE_SIZE" ] &&
+     [ -n "$SLOT" ] &&
+     mkdir -p "$WORK_DIR" "$BIN_DIR/dtbo_dts" 2>/dev/null &&
+     dd if="$DTBO_PARTITION" of="$CURRENT_DTBO" bs=1 \
+       count="$DTBO_PARTITION_IMAGE_SIZE" 2>/dev/null; then
+    if Prepare_install_tools >/dev/null 2>&1 &&
+       dtbo_verify_official_image "$CURRENT_DTBO" \
+         "$DTBO_PARTITION_IMAGE_SIZE" "$BIN_DIR" >/dev/null 2>&1; then
+      if [ -n "$STOCK_HASH" ]; then
+        DTBO_ROUTE="stock_changed"
+        if [ "$SYSTEM_VERSION_CHANGED" = 1 ]; then
+          ui_print "当前 DTBO 是官方签名，系统版本和模块备份版本均已变化：重建当前原厂基线"
+        else
+          ui_print "当前 DTBO 是官方签名，但与模块备份不一致：重建当前系统原厂基线"
+        fi
+      else
+        DTBO_ROUTE="first_stock"
+        ui_print "首次安装：当前 DTBO 通过官方签名校验"
+      fi
+    else
+      DTBO_ROUTE="foreign"
+      ui_print "警告：当前 DTBO 不是原厂签名，且不是模块最近应用版本"
+    fi
+  else
+    ui_print "警告：无法读取当前 DTBO，拒绝底层刷写，继续软件层安装"
   fi
-  if ! dtbo_verify_official_image "$CURRENT_DTBO" "$DTBO_PARTITION_IMAGE_SIZE" \
-      "$BIN_DIR"; then
-    abort "当前 DTBO 不是可验证的官方原版，已拒绝覆盖原厂备份"
-  fi
-  mv -f "$CURRENT_DTBO" "$STOCK_DTBO" || abort "无法保存原厂 DTBO 备份"
 fi
 
-dtbo_write_stock_manifest "$STOCK_DTBO" "$STOCK_MANIFEST" || \
-  abort "无法写入原厂 DTBO 哈希清单"
-if ! dtbo_validate_stock_backup "$STOCK_DTBO" "$STOCK_MANIFEST" \
-    "$DTBO_PARTITION_IMAGE_SIZE" "$BIN_DIR"; then
-  abort "原厂 DTBO 备份完整性校验失败"
-fi
-dtbo_write_stock_recovery "$STOCK_DTBO" "$STOCK_MANIFEST" "$STOCK_RECOVERY" || \
-  abort "无法创建原厂 DTBO 压缩恢复副本"
-ui_print "原厂 DTBO 备份: $(dtbo_hash_file "$STOCK_DTBO")"
+case "$DTBO_ROUTE" in
+  module_update)
+    INSTALL_BACKEND=$(sed -n '1p' "$MODPATH/config/dts_backend.txt" 2>/dev/null |
+      tr -d '[:space:]')
+    case "$INSTALL_BACKEND" in dtbo|drm) ;; *) INSTALL_BACKEND=dtbo ;; esac
+    ui_print "保留应用后端: $INSTALL_BACKEND"
+    ui_print "DTBO、DRM-KO、原厂备份和用户刷新率设置均未改动"
+    ;;
+  foreign|unavailable)
+    INSTALL_BACKEND=$(sed -n '1p' "$MODPATH/config/dts_backend.txt" 2>/dev/null |
+      tr -d '[:space:]')
+    case "$INSTALL_BACKEND" in dtbo|drm) ;; *) INSTALL_BACKEND=dtbo ;; esac
+    ui_print "已跳过未知 DTBO 的底层刷写，仅继续安装软件组件"
+    ;;
+  *)
+    SKIP_DISPLAY_BACKEND=0
+    mkdir -p "$IMG_DIR" "$WORK_DIR" "$BIN_DIR/dtbo_dts" || \
+      abort "无法创建 DTBO 工作目录"
+    Prepare_install_tools || abort "显示后端工具缺失或无法设置执行权限"
+    if [ "$DTBO_ROUTE" = stock ] &&
+       ! dtbo_validate_stock_backup "$STOCK_DTBO" "$STOCK_MANIFEST" \
+         "$DTBO_PARTITION_IMAGE_SIZE" "$BIN_DIR" >/dev/null 2>&1; then
+      DTBO_ROUTE=stock_changed
+      ui_print "警告：模块原厂备份校验失败，改用当前官方 DTBO 重建基线"
+    fi
+    if [ "$DTBO_ROUTE" = first_stock ] || [ "$DTBO_ROUTE" = stock_changed ]; then
+      [ -s "${CURRENT_DTBO:-}" ] || {
+        CURRENT_DTBO="$WORK_DIR/install-current.img"
+        dd if="$DTBO_PARTITION" of="$CURRENT_DTBO" bs=1 \
+          count="$DTBO_PARTITION_IMAGE_SIZE" 2>/dev/null || abort "DTBO 提取失败"
+      }
+      mv -f "$CURRENT_DTBO" "$STOCK_DTBO" || abort "无法保存原厂 DTBO 备份"
+      dtbo_write_stock_manifest "$STOCK_DTBO" "$STOCK_MANIFEST" || \
+        abort "无法写入原厂 DTBO 哈希清单"
+      dtbo_write_stock_recovery "$STOCK_DTBO" "$STOCK_MANIFEST" "$STOCK_RECOVERY" || \
+        abort "无法创建原厂 DTBO 压缩恢复副本"
+    fi
+    if ! dtbo_validate_stock_backup "$STOCK_DTBO" "$STOCK_MANIFEST" \
+        "$DTBO_PARTITION_IMAGE_SIZE" "$BIN_DIR"; then
+      abort "原厂 DTBO 备份完整性校验失败"
+    fi
+    ui_print "原厂 DTBO 备份: $(dtbo_hash_file "$STOCK_DTBO")"
 
-INSTALL_BACKEND=""
-Install_backend_selection
-case "$INSTALL_BACKEND" in
-  dtbo|drm) ;;
-  *) abort "安装后端选择返回了无效值" ;;
-esac
-mkdir -p "$MODPATH/config"
-printf '%s\n' "$INSTALL_BACKEND" > "$MODPATH/config/dts_backend.txt" || \
-  abort "无法保存应用后端选择"
-ui_print "安装应用后端: $INSTALL_BACKEND"
+    INSTALL_BACKEND=""
+    if [ "$MODULE_UPDATE" = 1 ] || [ -n "$UPDATE_BACKEND" ]; then
+      if [ -n "$UPDATE_BACKEND" ]; then
+        INSTALL_BACKEND="$UPDATE_BACKEND"
+      else
+        INSTALL_BACKEND=$(sed -n '1p' "$MODPATH/config/dts_backend.txt" 2>/dev/null |
+          tr -d '[:space:]')
+      fi
+    else
+      Install_backend_selection
+    fi
+    case "$INSTALL_BACKEND" in
+      dtbo|drm) ;;
+      *) abort "安装后端选择返回了无效值" ;;
+    esac
+    mkdir -p "$MODPATH/config"
+    printf '%s\n' "$INSTALL_BACKEND" > "$MODPATH/config/dts_backend.txt" || \
+      abort "无法保存应用后端选择"
+    ui_print "安装应用后端: $INSTALL_BACKEND"
 
-# 4.1 AVB 信息由 scripts/dtbo_avb.sh 和 unpack_dtbo 共同处理。
+    # 4.1 AVB 信息由 scripts/dtbo_avb.sh 和 unpack_dtbo 共同处理。
 
-# 5. 执行选择的显示后端流程（DRM-KO 不向 DTBO 写高刷 timing）
-if [ "$INSTALL_BACKEND" = "dtbo" ]; then
+    # 5. 执行选择的显示后端流程（DRM-KO 不向 DTBO 写高刷 timing）
+    if [ "$SKIP_DISPLAY_BACKEND" = 0 ]; then
+    if [ "$INSTALL_BACKEND" = "dtbo" ]; then
   # 切换到 bin 目录以确保工具能找到相对路径资源
   cd "$BIN_DIR" || abort "无法进入 bin 目录"
 
@@ -341,6 +496,23 @@ else
   else
     abort "KO 配套 DTBO 生成或写入失败"
   fi
+fi
+    fi
+  ;;
+esac
+
+if [ "$SKIP_DISPLAY_BACKEND" = 0 ] &&
+   ! dtbo_write_device_manifest "$DTBO_PARTITION" \
+      "$DTBO_PARTITION_IMAGE_SIZE" "$APPLIED_MANIFEST"; then
+  ui_print "警告：底层写入成功，但无法保存本次 DTBO 版本哈希"
+fi
+
+# Record the current system fingerprint as auxiliary information only. The
+# DTBO hash state above, not this value, decides the next installation route.
+if [ -n "$CURRENT_SYSTEM_FINGERPRINT" ]; then
+  mkdir -p "$(dirname "$SYSTEM_STATE_FILE")" || abort "无法创建系统版本状态目录"
+  printf '%s\n' "$CURRENT_SYSTEM_FINGERPRINT" > "$SYSTEM_STATE_FILE" || \
+    abort "无法保存系统版本状态"
 fi
 
 # 7. AVB 处理已在 DTBO 应用分支完成。
@@ -467,6 +639,6 @@ if [ -d "$MODPATH/premium" ]; then
   [ ! -d "$MODPATH/premium/scripts" ] || \
     set_perm_recursive "$MODPATH/premium/scripts" 0 0 0755 0755
 fi
-set_perm "$STOCK_DTBO" 0 0 0444
-set_perm "$STOCK_MANIFEST" 0 0 0444
-set_perm "$STOCK_RECOVERY" 0 0 0444
+[ ! -f "$STOCK_DTBO" ] || set_perm "$STOCK_DTBO" 0 0 0444
+[ ! -f "$STOCK_MANIFEST" ] || set_perm "$STOCK_MANIFEST" 0 0 0444
+[ ! -f "$STOCK_RECOVERY" ] || set_perm "$STOCK_RECOVERY" 0 0 0444

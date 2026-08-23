@@ -36,6 +36,7 @@ let dtsBackendBusy = false;
 let adfrPolicyBusy = false;
 let displayPolicyProfile = 'rmx5200';
 let videoMotionEntries = [];
+let gameAssistantEntries = [];
 let ocNodes = [];
 const nativeMemcRates = new Set([60, 90, 120, 144]);
 const labelQueue = [];
@@ -2434,9 +2435,10 @@ async function loadVideoMotionConfig() {
     if (!isPremium()) return;
     const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
     try {
-        const [result, appsResult] = await Promise.all([
+        const [result, appsResult, gameAssistantResult] = await Promise.all([
             ksuExec(`sh "${scriptPath}" get_video_motion_config`, true),
-            ksuExec(`sh "${scriptPath}" get_video_motion_apps`, true)
+            ksuExec(`sh "${scriptPath}" get_video_motion_apps`, true),
+            ksuExec(`sh "${scriptPath}" get_game_assistant_apps`, true)
         ]);
         const values = {};
         result.split(/\r?\n/).forEach(line => {
@@ -2472,10 +2474,126 @@ async function loadVideoMotionConfig() {
         else setVideoMotionStatus('已启用', 'success');
         refreshVideoMotionTargetDetail();
         parseVideoMotionApps(appsResult);
+        parseGameAssistantApps(gameAssistantResult);
     } catch (error) {
         setVideoMotionStatus('读取失败', 'error');
         debugLog(`Video motion load failed: ${error.message}`);
     }
+}
+
+function parseGameAssistantApps(result) {
+    gameAssistantEntries = String(result || '').split(/\r?\n/)
+        .map(value => value.trim())
+        .filter(value => /^[A-Za-z0-9._]+\.[A-Za-z0-9._]+$/.test(value));
+    renderGameAssistantApps();
+}
+
+function renderGameAssistantApps() {
+    const list = document.getElementById('game-assistant-app-list');
+    if (!list) return;
+    list.innerHTML = '';
+    if (!gameAssistantEntries.length) {
+        list.innerHTML = '<div class="empty-state">没有授权游戏增强应用</div>';
+        return;
+    }
+    gameAssistantEntries.forEach(packageName => {
+        const row = document.createElement('div');
+        row.className = 'video-app-item';
+        const info = document.createElement('div');
+        const name = document.createElement('div');
+        name.className = 'video-app-name';
+        name.innerText = appLabels[packageName] || packageName;
+        const meta = document.createElement('div');
+        meta.className = 'video-app-meta';
+        meta.innerText = packageName;
+        info.append(name, meta);
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'icon-btn danger';
+        remove.innerHTML = ICON.trash();
+        remove.title = '取消授权';
+        remove.onclick = () => removeGameAssistantApp(packageName);
+        row.append(info, remove);
+        list.appendChild(row);
+    });
+}
+
+function setGameAssistantPickerValue(packageName) {
+    const picker = document.getElementById('game-assistant-picker');
+    const label = document.getElementById('game-assistant-picker-label');
+    if (!picker || !label) return;
+    picker.dataset.value = packageName || '';
+    label.innerText = packageName
+        ? `${appLabels[packageName] || packageName} · ${packageName}` : '选择应用';
+}
+
+async function openGameAssistantAppPicker() {
+    if (!appListLoaded) {
+        showToast('正在读取已安装应用…');
+        await ensureAppListLoaded({ renderRates: false });
+    }
+    const body = document.createElement('div');
+    body.className = 'selection-dialog';
+    const search = document.createElement('input');
+    search.className = 'form-input selection-search';
+    search.type = 'search';
+    search.placeholder = '搜索应用名或包名';
+    search.autocomplete = 'off';
+    const list = document.createElement('div');
+    list.className = 'selection-list';
+    body.append(search, list);
+    const render = () => {
+        const term = search.value.trim().toLowerCase();
+        const packages = allPackages.filter(pkg => !term
+            || pkg.toLowerCase().includes(term)
+            || String(appLabels[pkg] || '').toLowerCase().includes(term));
+        list.innerHTML = packages.length ? packages.map(pkg => `
+            <button class="selection-row" type="button" data-package="${esc(pkg)}">
+                <img class="selection-app-icon" src="ksu://icon/${encodeURIComponent(pkg)}" alt="" loading="lazy">
+                <span class="selection-app-copy"><strong class="selection-app-name">${esc(appLabels[pkg] || pkg)}</strong><small>${esc(pkg)}</small></span>
+            </button>`).join('') : '<div class="empty-state">未找到匹配的应用</div>';
+        list.querySelectorAll('[data-package]').forEach(button => {
+            button.onclick = () => finishModal(button.dataset.package);
+        });
+    };
+    search.addEventListener('input', render);
+    render();
+    const result = await showModalRaw('选择游戏增强应用', body, [
+        { label: '取消', className: 'btn-secondary', value: null }
+    ]);
+    if (result) setGameAssistantPickerValue(result);
+}
+
+async function saveGameAssistantApp() {
+    if (!isPremium()) { openAuthPanel(); return; }
+    const picker = document.getElementById('game-assistant-picker');
+    const packageName = picker?.dataset.value || '';
+    if (!/^[A-Za-z0-9._]+\.[A-Za-z0-9._]+$/.test(packageName)) {
+        showToast('请先选择已安装应用');
+        return;
+    }
+    const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
+    const result = await ksuExec(`sh "${scriptPath}" add_game_assistant_app ${shellQuote(packageName)}`);
+    if (!result.includes('Success:')) {
+        showToast(result || '授权游戏增强失败');
+        return;
+    }
+    setGameAssistantPickerValue('');
+    await loadVideoMotionConfig();
+    showToast('游戏增强已授权，重新打开游戏助手后生效');
+}
+
+async function removeGameAssistantApp(packageName) {
+    const confirmed = await showConfirm('取消游戏增强授权', appLabels[packageName] || packageName, { danger: true });
+    if (!confirmed) return;
+    const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
+    const result = await ksuExec(`sh "${scriptPath}" remove_game_assistant_app ${shellQuote(packageName)}`);
+    if (!result.includes('Success:')) {
+        showToast(result || '取消授权失败');
+        return;
+    }
+    await loadVideoMotionConfig();
+    showToast('游戏增强授权已取消');
 }
 
 function refreshVideoMotionTargetDetail() {
@@ -4189,6 +4307,8 @@ function bindStaticEvents() {
     safeBind('btn-save-video-target', 'onclick', saveVideoMotionTarget);
     safeBind('btn-read-video-activity', 'onclick', readForegroundVideoActivity);
     safeBind('video-app-picker', 'onclick', openVideoAppPicker);
+    safeBind('game-assistant-picker', 'onclick', openGameAssistantAppPicker);
+    safeBind('btn-save-game-assistant-app', 'onclick', saveGameAssistantApp);
     safeBind('video-app-rate', 'onclick', openVideoRatePicker);
     safeBind('btn-save-video-app', 'onclick', saveVideoMotionApp);
     safeBind('btn-reboot-video-config', 'onclick', rebootForVideoMotionConfig);

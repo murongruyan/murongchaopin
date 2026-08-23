@@ -117,6 +117,9 @@ prepare_hmbird_dtbo() {
         echo "Error: unable to write $DTBO_PROFILE DTBO" >&2
         return 1
     }
+    dtbo_write_device_manifest "$HMBIRD_PARTITION" "$HMBIRD_PARTITION_SIZE" \
+        "$IMG_DIR/dtbo.applied.sha256" >/dev/null 2>&1 ||
+        echo "Warning: unable to record applied DTBO hash" >&2
     if [ "$DEVICE_MODEL" = PJD110 ]; then
         printf 'Success: PJD110 KO companion DTBO applied (capacity=6000mAh, vbat=2800mV, reserve_soc=1, type=%s, display modes unchanged)\n' \
             "$HMBIRD_TYPE"

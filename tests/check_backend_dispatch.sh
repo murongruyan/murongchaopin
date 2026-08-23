@@ -35,7 +35,7 @@ if grep -q 'INSTALL_BACKEND=$(Install_backend_selection)' "$CUSTOMIZE"; then
     echo "FAIL: backend prompt is still hidden inside command substitution" >&2
     exit 1
 fi
-grep -q '^Install_backend_selection$' "$CUSTOMIZE"
+grep -q '^[[:space:]]*Install_backend_selection$' "$CUSTOMIZE"
 if grep -q '第二次确认：请选择首次应用后端:.*>&2' "$CUSTOMIZE"; then
     echo "FAIL: backend prompt is still redirected away from live stdout" >&2
     exit 1
