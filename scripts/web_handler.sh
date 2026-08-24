@@ -77,6 +77,31 @@ require_premium() {
     return 0
 }
 
+# A valid lease is not enough to apply a display policy: the corresponding
+# signed runtime component must also be present.  Older package builds silently
+# omitted these files, which left the WebUI persisting a policy that could never
+# become active after reboot.
+premium_payload_ready() {
+    case "$1" in
+        custom_ltpo)
+            [ -r "$PREMIUM_PATH/bin/rmx5200_ltpo_modes.ko" ] &&
+                [ -r "$PREMIUM_PATH/config/rmx5200_ltpo_modes.sha256" ] &&
+                [ -x "$PREMIUM_PATH/scripts/rmx5200_ltpo_experiment.sh" ]
+            ;;
+        adfr_disable)
+            [ -r "$PREMIUM_PATH/bin/rmx5200_adfr_lock.ko" ] &&
+                [ -x "$PREMIUM_PATH/scripts/adfr_lock.sh" ]
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+require_premium_payload() {
+    premium_payload_ready "$1" && return 0
+    echo "Error: premium runtime component is missing; reinstall the paid package"
+    return 1
+}
+
 mkdir -p "$(dirname "$CONFIG_FILE")"
 [ ! -f "$CONFIG_FILE" ] && echo "1" > "$CONFIG_FILE"
 [ ! -f "$DTS_BACKEND_FILE" ] && echo "dtbo" > "$DTS_BACKEND_FILE"
@@ -1367,7 +1392,7 @@ case "$1" in
         ;;
 
     "add_game_assistant_app")
-        require_premium video_memc
+        require_premium game_assistant
         GAME_PACKAGE="$2"
         valid_video_package "$GAME_PACKAGE" || {
             echo "Error: invalid package"
@@ -1385,7 +1410,7 @@ case "$1" in
         ;;
 
     "remove_game_assistant_app")
-        require_premium video_memc
+        require_premium game_assistant
         GAME_PACKAGE="$2"
         valid_video_package "$GAME_PACKAGE" || exit 1
         [ -f "$GAME_ASSISTANT_APPS_FILE" ] || exit 0
@@ -1792,7 +1817,9 @@ case "$1" in
         echo "supported=1"
         echo "profile=$DISPLAY_PROFILE"
         echo "policy=$(display_policy_for_model "$MODEL")"
-        if [ "$MODEL" = RMX5200 ] && [ -d /sys/module/rmx5200_ltpo_modes ]; then
+        if [ "$MODEL" = RMX5200 ] && [ -d /sys/module/rmx5200_ltpo_modes ] &&
+           { [ "$(cat /sys/module/rmx5200_ltpo_modes/parameters/applied 2>/dev/null)" = Y ] ||
+             [ "$(cat /sys/module/rmx5200_ltpo_modes/parameters/applied 2>/dev/null)" = 1 ]; }; then
             echo "active=custom_ltpo"
         else
             case "$MODEL" in
@@ -1830,8 +1857,14 @@ case "$1" in
                 echo "Error: display policy is unsupported on $MODEL"; exit 1 ;;
         esac
         case "$TARGET_DISPLAY_POLICY" in
-            custom_ltpo) require_premium custom_ltpo || exit 1 ;;
-            adfr_off) require_premium adfr_disable || exit 1 ;;
+            custom_ltpo)
+                require_premium custom_ltpo || exit 1
+                require_premium_payload custom_ltpo || exit 1
+                ;;
+            adfr_off)
+                require_premium adfr_disable || exit 1
+                require_premium_payload adfr_disable || exit 1
+                ;;
         esac
         PREVIOUS_DISPLAY_POLICY=$(read_display_policy)
         PREVIOUS_ADFR_POLICY=$(read_adfr_policy)
@@ -1882,7 +1915,10 @@ case "$1" in
                 ;;
         esac
         # Disabling ADFR is the premium action; restoring the stock policy is free.
-        [ "$TARGET_ADFR_POLICY" = off ] && require_premium adfr_disable
+        if [ "$TARGET_ADFR_POLICY" = off ]; then
+            require_premium adfr_disable || exit 1
+            require_premium_payload adfr_disable || exit 1
+        fi
         [ -f "$ADFR_LOCK_HELPER" ] || {
             echo "Error: ADFR lock helper is missing"
             exit 1

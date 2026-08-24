@@ -48,14 +48,24 @@ require_text "$JS" '付费组件更新日志'
 require_text "$JS" 'result.paid.release_notes'
 require_text "$JS" 'authState.package_version_code'
 require_text "$JS" 'result.paid.version_code'
+require_text "$JS" "deviceInfo?.device_model || ''"
+require_text "$JS" "querySelectorAll('.video-memc-only')"
 
 require_text "$CUSTOMIZE" 'auth_install_latest'
 require_text "$CUSTOMIZE" '付费组件自动更新暂不可用，已保留现有组件并继续安装'
 require_text "$HANDLER" 'install_latest_paid_package()'
 require_text "$HANDLER" 'gate_lease_verify'
+require_text "$HANDLER" 'require_premium game_assistant'
 require_text "$HANDLER" 'gate_package_commit "$REMOTE_SHA" "$REMOTE_ID" "$REMOTE_VERSION" "$REMOTE_VERSION_CODE"'
 require_text "$GATE" 'package_version_code='
 require_text "$GATE" '_version_code="${4:-}"'
+require_text "$GATE" 'video_memc game_assistant'
+
+memc_group_count="$(grep -c 'class="group video-memc-only"' "$HTML")"
+[ "$memc_group_count" = 2 ] || {
+    echo "expected exactly two RMX5200-only MEMC groups, got $memc_group_count" >&2
+    exit 1
+}
 
 if grep -Eq '购买说明|无内嵌支付|请前往.*App.*购买' "$JS"; then
     echo 'legacy external-purchase guide leaked into WebUI' >&2

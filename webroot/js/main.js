@@ -2434,12 +2434,18 @@ function setVideoMotionStatus(text, state = '') {
 async function loadVideoMotionConfig() {
     if (!isPremium()) return;
     const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
+    const memcSupported = String(deviceInfo?.device_model || '').toUpperCase() === 'RMX5200';
+    document.querySelectorAll('.video-memc-only').forEach(element => {
+        element.hidden = !memcSupported;
+    });
     try {
         const [result, appsResult, gameAssistantResult] = await Promise.all([
-            ksuExec(`sh "${scriptPath}" get_video_motion_config`, true),
-            ksuExec(`sh "${scriptPath}" get_video_motion_apps`, true),
+            memcSupported ? ksuExec(`sh "${scriptPath}" get_video_motion_config`, true) : Promise.resolve(''),
+            memcSupported ? ksuExec(`sh "${scriptPath}" get_video_motion_apps`, true) : Promise.resolve(''),
             ksuExec(`sh "${scriptPath}" get_game_assistant_apps`, true)
         ]);
+        parseGameAssistantApps(gameAssistantResult);
+        if (!memcSupported) return;
         const values = {};
         result.split(/\r?\n/).forEach(line => {
             const separator = line.indexOf('=');
@@ -2474,7 +2480,6 @@ async function loadVideoMotionConfig() {
         else setVideoMotionStatus('已启用', 'success');
         refreshVideoMotionTargetDetail();
         parseVideoMotionApps(appsResult);
-        parseGameAssistantApps(gameAssistantResult);
     } catch (error) {
         setVideoMotionStatus('读取失败', 'error');
         debugLog(`Video motion load failed: ${error.message}`);

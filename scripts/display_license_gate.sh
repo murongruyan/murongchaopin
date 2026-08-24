@@ -42,7 +42,7 @@ GATE_VERIFY_BIN="$GATE_MOD_PATH/bin/verify_lease_sig"
 GATE_PREMIUM_DIR="$GATE_MOD_PATH/premium"
 GATE_MAX_PACKAGE_BYTES=536870912
 GATE_MAX_CHUNK_BYTES=131072
-GATE_FEATURES="custom_ltpo adfr_disable video_memc"
+GATE_FEATURES="custom_ltpo adfr_disable video_memc game_assistant"
 
 GATE_MODE="unknown"
 GATE_REASON=""
