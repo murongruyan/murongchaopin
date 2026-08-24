@@ -135,11 +135,11 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Set up JDK 21 for Hook APK build
+      - name: Set up JDK 26 for Hook APK build
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '26'
           cache: gradle
 
       - name: Install Android NDK and SDK 37
