@@ -262,6 +262,11 @@ jobs:
           chmod +x gradlew
           ./gradlew exportFreeApk --no-daemon
 
+      - name: Sign free Hook APK with v1-v4
+        if: steps.hook_signing.outputs.signed == 'true'
+        shell: pwsh
+        run: ./scripts/sign_hook_apk.ps1 -ApkPath bin/display_settings_hook.apk -KeystorePath $env:MURONG_HOOK_KEYSTORE -KeyAlias $env:MURONG_HOOK_KEY_ALIAS
+
       - name: Require Hook signing for release
         if: steps.release_meta.outputs.is_release == 'true'
         shell: bash
@@ -271,6 +276,11 @@ jobs:
             echo "Release requires MURONG_HOOK_KEYSTORE_BASE64 / MURONG_HOOK_STORE_PASSWORD / MURONG_HOOK_KEY_ALIAS / MURONG_HOOK_KEY_PASSWORD secrets" >&2
             exit 1
           fi
+
+      - name: Verify Hook v1-v4 signatures
+        if: steps.hook_signing.outputs.signed == 'true'
+        shell: pwsh
+        run: ./scripts/sign_hook_apk.ps1 -ApkPath bin/display_settings_hook.apk -VerifyOnly
 
       - name: Read module metadata
         id: meta
@@ -344,7 +354,6 @@ jobs:
             "libsdmclient.rmx5200.ltpo-timeline.so"
             "ltpo.ko"
             "hmbird.ko"
-            "display_settings_hook.apk.idsig"
             "*_probe.ko"
             "*qhd144*"
             "*_test"
@@ -407,6 +416,7 @@ jobs:
 
           # Hook 类级泄漏检查：免费 Hook APK 的 dex 中不得出现付费/研究类名
           HOOK_APK="$STAGE_DIR/bin/display_settings_hook.apk"
+          HOOK_IDSIG="${HOOK_APK}.idsig"
           if [ -f "$HOOK_APK" ]; then
             for probe in NotificationLtpoHooks VideoMotion ColorosVideoPlayback BilibiliStory; do
               if unzip -p "$HOOK_APK" 'classes*.dex' 2>/dev/null | strings | grep -q "$probe"; then
@@ -415,6 +425,10 @@ jobs:
               fi
             done
             echo "Public Hook APK class leak check passed"
+          fi
+          if [ "${{ steps.release_meta.outputs.is_release }}" = 'true' ]; then
+            test -s "$HOOK_APK"
+            test -s "$HOOK_IDSIG"
           fi
 
           install -m 0755 build/bin/process_dts "$STAGE_DIR/bin/process_dts"
@@ -460,6 +474,7 @@ jobs:
           echo "checksum_path=$CHECKSUM_PATH" >> "$GITHUB_OUTPUT"
 
       - name: Upload build artifact
+        if: steps.release_meta.outputs.is_release != 'true'
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
@@ -468,6 +483,7 @@ jobs:
             ${{ steps.package.outputs.zip_path }}
             ${{ steps.package.outputs.checksum_path }}
             bin/display_settings_hook.apk
+            bin/display_settings_hook.apk.idsig
           if-no-files-found: error
           retention-days: 1
 

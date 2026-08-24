@@ -87,6 +87,10 @@ android {
                 storePassword = releaseStorePassword.get()
                 keyAlias = releaseKeyAlias.get()
                 keyPassword = releaseKeyPassword.get()
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+                enableV4Signing = true
             }
         }
     }
@@ -131,22 +135,48 @@ tasks.withType<org.gradle.api.tasks.compile.JavaCompile>().configureEach {
     exclude("**/BilibiliStoryHooks.java")
 }
 
+val cleanFreeApkOutput = tasks.register<Delete>("cleanFreeApkOutput") {
+    delete(layout.buildDirectory.dir("outputs/apk/free/release"))
+}
+tasks.configureEach {
+    if (name == "assembleFreeRelease") dependsOn(cleanFreeApkOutput)
+}
 tasks.register<Copy>("exportFreeApk") {
     dependsOn("assembleFreeRelease")
     from(layout.buildDirectory.dir("outputs/apk/free/release")) {
-        include("*.apk")
-        rename { "display_settings_hook.apk" }
+        include("*.apk", "*.idsig")
+        exclude("*-unaligned.apk")
     }
     into(rootDir.resolve("../../bin"))
+    rename { fileName ->
+        if (fileName.endsWith(".idsig")) {
+            "display_settings_hook.apk.idsig"
+        } else {
+            "display_settings_hook.apk"
+        }
+    }
 }
 
+val cleanPremiumApkOutput = tasks.register<Delete>("cleanPremiumApkOutput") {
+    delete(layout.buildDirectory.dir("outputs/apk/premium/release"))
+}
+tasks.configureEach {
+    if (name == "assemblePremiumRelease") dependsOn(cleanPremiumApkOutput)
+}
 tasks.register<Copy>("exportPremiumApk") {
     dependsOn("assemblePremiumRelease")
     from(layout.buildDirectory.dir("outputs/apk/premium/release")) {
-        include("*.apk")
-        rename { "display_premium_hook.apk" }
+        include("*.apk", "*.idsig")
+        exclude("*-unaligned.apk")
     }
     into(rootDir.resolve("../../packaging/paid-payload/hooks"))
+    rename { fileName ->
+        if (fileName.endsWith(".idsig")) {
+            "display_premium_hook.apk.idsig"
+        } else {
+            "display_premium_hook.apk"
+        }
+    }
 }
 
 tasks.named("exportPremiumApk") {

@@ -68,7 +68,6 @@ config/ltpo.ko.sha256
 src/ko/rmx5200_native_adfr.c
 src/ko/*probe*.c
 src/ko/*qhd144*.c
-bin/display_settings_hook.apk.idsig
 
 # Internal planning and paid-package assembly stay outside the public repository.
 docs/任务规划.md

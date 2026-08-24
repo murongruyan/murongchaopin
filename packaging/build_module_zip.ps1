@@ -46,8 +46,6 @@ $exactExcludes = @(
     "config/coloros/multimedia_pixelworks_apps.xml",
     "config/iris_page_i7p.stock.sha256",
     "system/odm/etc/iris_page_i7p.json",
-    # stale/optional Android V4 sidecar; the installer consumes only the APK
-    "bin/display_settings_hook.apk.idsig",
     # research_only
     "bin/ltpo.ko",
     # HMBIRD is DTBO-only in the current release; never ship the retired sidecar.
@@ -90,6 +88,15 @@ $base = (Resolve-Path $staging).Path
 Get-ChildItem $staging -Recurse -File | ForEach-Object {
     $rel = $_.FullName.Substring($base.Length + 1).Replace('\', '/')
     if (Test-Excluded $rel) { Remove-Item $_.FullName -Force }
+}
+
+foreach ($requiredHookFile in @(
+    "bin/display_settings_hook.apk",
+    "bin/display_settings_hook.apk.idsig"
+)) {
+    if (-not (Test-Path -LiteralPath (Join-Path $staging $requiredHookFile) -PathType Leaf)) {
+        throw "PUBLIC MODULE ASSERTION FAILED - missing signed Hook product: $requiredHookFile"
+    }
 }
 
 # ---- zip with forward-slash entry names ----

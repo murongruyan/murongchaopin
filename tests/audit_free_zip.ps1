@@ -53,6 +53,8 @@ try {
         "bin/rmx5200_drm_modes.ko",
         "bin/plk110_drm_modes.ko",
         "bin/pjd110_drm_modes.ko",
+        "bin/display_settings_hook.apk",
+        "bin/display_settings_hook.apk.idsig",
         "config/display_mode_manifest.txt",
         "scripts/display_backend.sh",
         "scripts/hmbird_backend.sh",
