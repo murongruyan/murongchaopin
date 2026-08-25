@@ -36,7 +36,7 @@ build_one() {
 	cp "$SCRIPT_DIR/$source" "$tmp/source.c"
 	printf 'obj-m += %s.o\n%s-y := source.o\n' "$module" "$module" > "$tmp/Makefile"
 	PATH="$LLVM_TOOLS:$PATH" make -C "$KERNEL_TREE" O="$KERNEL_OUT" M="$tmp" \
-		ARCH=arm64 LLVM=1 LLVM_IAS=1 modules
+		ARCH=arm64 LLVM=1 LLVM_IAS=1 KBUILD_MODPOST_WARN="${KBUILD_MODPOST_WARN:-1}" modules
 	install -m 0600 "$tmp/$module.ko" "$OUT_DIR/$module.ko"
 	rm -rf "$tmp"
 }
@@ -50,7 +50,7 @@ build_with_shared_source() {
 	cp "$SCRIPT_DIR/$shared" "$tmp/$shared"
 	printf 'obj-m += %s.o\n%s-y := source.o\n' "$module" "$module" > "$tmp/Makefile"
 	PATH="$LLVM_TOOLS:$PATH" make -C "$KERNEL_TREE" O="$KERNEL_OUT" M="$tmp" \
-		ARCH=arm64 LLVM=1 LLVM_IAS=1 modules
+		ARCH=arm64 LLVM=1 LLVM_IAS=1 KBUILD_MODPOST_WARN="${KBUILD_MODPOST_WARN:-1}" modules
 	install -m 0600 "$tmp/$module.ko" "$OUT_DIR/$module.ko"
 	rm -rf "$tmp"
 }

@@ -129,13 +129,13 @@ rm -f "$root/bin/rmx5200_drm_modes.ko" "$root/bin/plk110_drm_modes.ko" "$root/bi
 mkdir -p "$root/bin"
 
 prepare_rmx "$work/rmx-tree" "$work/rmx-out" "$work/clang19/bin" "$work/build-tools19/bin" "$root/config/kernel/rmx5200-6.12.23-android16-5-gb2a876903b49-ab14541642-4k.config"
-export KERNEL_TREE="$work/rmx-tree" KERNEL_OUT="$work/rmx-out" KERNEL_SYMVERS="$work/rmx-out/Module.symvers" LLVM_TOOLS="$work/clang19/bin" OUT_DIR="$root/bin"
+export KERNEL_TREE="$work/rmx-tree" KERNEL_OUT="$work/rmx-out" KERNEL_SYMVERS="$work/rmx-out/Module.symvers" LLVM_TOOLS="$work/clang19/bin" KBUILD_MODPOST_WARN=1 OUT_DIR="$root/bin"
 sh "$root/src/ko/build.sh" rmx5200
 sh "$root/src/ko/build.sh" plk110
 
 prepare_pjd_layout "$work/pjd-tree" "$work/pjd-vendor"
 prepare_pjd "$work/pjd-tree" "$work/pjd-out" "$work/clang20/bin" "$work/build-tools20/bin" "$root/config/kernel/pjd110-6.1.141-gd86625c3830b.config"
-export KERNEL_TREE="$work/pjd-tree" KERNEL_OUT="$work/pjd-out" KERNEL_SYMVERS="$work/pjd-out/Module.symvers" LLVM_TOOLS="$work/clang20/bin" PJD_KERNEL_TREE="$work/pjd-tree" PJD_KERNEL_OUT="$work/pjd-out" PJD_DISPLAY_ROOT="$work/pjd-vendor/vendor/vendor/qcom/opensource/display-drivers" OUT_DIR="$root/bin"
+export KERNEL_TREE="$work/pjd-tree" KERNEL_OUT="$work/pjd-out" KERNEL_SYMVERS="$work/pjd-out/Module.symvers" LLVM_TOOLS="$work/clang20/bin" KBUILD_MODPOST_WARN=1 PJD_KERNEL_TREE="$work/pjd-tree" PJD_KERNEL_OUT="$work/pjd-out" PJD_DISPLAY_ROOT="$work/pjd-vendor/vendor/vendor/qcom/opensource/display-drivers" OUT_DIR="$root/bin"
 sh "$root/src/ko/build.sh" pjd110
 
 for ko in "$root/bin/rmx5200_drm_modes.ko" "$root/bin/plk110_drm_modes.ko" "$root/bin/pjd110_drm_modes.ko"; do
