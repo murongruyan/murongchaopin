@@ -633,6 +633,29 @@ gate_account_save() {
     return 0
 }
 
+gate_account_update_token() {
+    # $1 = freshly issued access token; keep the existing account identity.
+    gate_init
+    [ -f "$GATE_ACCOUNT_FILE" ] || { echo "Error: account is missing"; return 1; }
+    _token=$(printf '%s' "$1" | tr -d '[:space:]')
+    case "$_token" in
+        ''|*[!A-Za-z0-9._~-]*) echo "Error: token format is invalid"; return 1 ;;
+    esac
+    _username=$(gate_json_field "$GATE_ACCOUNT_FILE" username)
+    _user_id=$(gate_json_number "$GATE_ACCOUNT_FILE" user_id)
+    [ -n "$_username" ] && [ -n "$_user_id" ] || {
+        echo "Error: account identity is invalid"
+        return 1
+    }
+    _tmp="$GATE_ACCOUNT_FILE.tmp.$$"
+    printf '{"username":"%s","user_id":%s,"token":"%s"}\n' \
+        "$_username" "$_user_id" "$_token" > "$_tmp" || return 1
+    mv -f "$_tmp" "$GATE_ACCOUNT_FILE" || return 1
+    chmod 600 "$GATE_ACCOUNT_FILE" 2>/dev/null
+    echo "Success: account token refreshed"
+    return 0
+}
+
 gate_account_clear() {
     gate_init
     rm -f "$GATE_ACCOUNT_FILE"

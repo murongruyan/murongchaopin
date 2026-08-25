@@ -3,11 +3,18 @@ set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 JS="$ROOT/webroot/js/main.js"
+HANDLER="$ROOT/scripts/web_handler.sh"
 
 grep -Fq 'let leaseRefreshPromise = null;' "$JS"
 grep -Fq 'if (leaseRefreshPromise) return leaseRefreshPromise;' "$JS"
 grep -Fq 'post-login authorization sync failed' "$JS"
 grep -Fq "showToast('登录成功，但授权同步失败：' + e.message)" "$JS"
+grep -Fq 'function persistAuthToken(token)' "$JS"
+grep -Fq "resp.headers.get('X-Refresh-Token')" "$JS"
+grep -Fq "proxied.refresh_token" "$JS"
+grep -Fq "handlerCmd('auth_update_token', authToken)" "$JS"
+grep -Fq 'auth_update_token' "$HANDLER"
+grep -Fq 'X-Refresh-Token' "$HANDLER"
 
 node - "$JS" <<'NODE'
 const fs = require('fs');
@@ -15,7 +22,7 @@ const vm = require('vm');
 
 const source = fs.readFileSync(process.argv[2], 'utf8');
 const start = source.indexOf('async function ksuExec(');
-const end = source.indexOf('// ============================================================\n// 工具函数', start);
+const end = source.indexOf('// ============================================================\r\n// 工具函数', start);
 if (start < 0 || end < 0) throw new Error('ksuExec source boundary missing');
 const functionSource = source.slice(start, end);
 

@@ -1308,8 +1308,13 @@ async function apiFetch(path, opts = {}) {
             throw new Error('服务响应格式错误');
         }
         if (proxied.success === false || proxied.error) {
-            throw new Error(proxied.message || proxied.error || '请求失败');
+            const message = proxied.message || proxied.error || '请求失败';
+            if (/访问令牌无效或已过期|令牌无效或已过期/.test(String(message))) {
+                await clearExpiredAuthSession();
+            }
+            throw new Error(message);
         }
+        if (proxied.refresh_token) await persistAuthToken(proxied.refresh_token);
         return proxied;
     }
 
@@ -1322,10 +1327,41 @@ async function apiFetch(path, opts = {}) {
     let json = null;
     try { json = await resp.json(); } catch (e) { json = null; }
     if (!json) throw new Error(`服务响应异常 HTTP ${resp.status}`);
+    const refreshedToken = resp.headers.get('X-Refresh-Token');
+    if (refreshedToken) await persistAuthToken(refreshedToken);
     if (json.success === false || json.error) {
+        if (resp.status === 401 || /访问令牌无效或已过期|令牌无效或已过期/.test(String(json.message || json.error))) {
+            await clearExpiredAuthSession();
+        }
         throw new Error(json.message || json.error || `请求失败 HTTP ${resp.status}`);
     }
     return json;
+}
+
+async function persistAuthToken(token) {
+    const nextToken = String(token || '').trim();
+    if (!nextToken || nextToken === authToken) return;
+    authToken = nextToken;
+    try { sessionStorage.setItem(TOKEN_KEY, authToken); } catch (e) { /* ignore */ }
+    try {
+        const result = await ksuExec(handlerCmd('auth_update_token', authToken), true);
+        if (!result.includes('Success')) debugLog(`token persistence failed: ${result}`);
+    } catch (error) {
+        debugLog(`token persistence failed: ${error.message}`);
+    }
+}
+
+async function clearExpiredAuthSession() {
+    authToken = null;
+    try { sessionStorage.removeItem(TOKEN_KEY); } catch (e) { /* ignore */ }
+    try {
+        const result = await ksuExec(handlerCmd('auth_clear_account'), true);
+        if (!result.includes('Success')) debugLog(`expired token cleanup failed: ${result}`);
+    } catch (error) {
+        debugLog(`expired token cleanup failed: ${error.message}`);
+    }
+    authState = { ...authState, account: 'none' };
+    renderCurrentAuthorizationPage();
 }
 
 // ============================================================

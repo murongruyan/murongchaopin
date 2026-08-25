@@ -1022,19 +1022,33 @@ api_request_proxy() {
         echo "Error: 无法创建 API 临时文件"
         return 1
     }
-    if ! curl "$@" "$BASE_API_URL/$API_PATH" -o "$API_RESPONSE"; then
+    API_HEADERS_FILE=$(mktemp) || {
         rm -f "$API_RESPONSE" "$API_BODY_FILE"
+        echo "Error: 无法创建 API 响应头临时文件"
+        return 1
+    }
+    if ! curl "$@" -D "$API_HEADERS_FILE" "$BASE_API_URL/$API_PATH" -o "$API_RESPONSE"; then
+        rm -f "$API_RESPONSE" "$API_HEADERS_FILE" "$API_BODY_FILE"
         echo "Error: 服务器网络请求失败"
         return 1
     fi
     [ -z "$API_BODY_FILE" ] || rm -f "$API_BODY_FILE"
     [ -s "$API_RESPONSE" ] || {
-        rm -f "$API_RESPONSE"
+        rm -f "$API_RESPONSE" "$API_HEADERS_FILE"
         echo "Error: 服务器返回空响应"
         return 1
     }
+    API_REFRESH_TOKEN=$(grep -i '^X-Refresh-Token:' "$API_HEADERS_FILE" 2>/dev/null | \
+        tail -n 1 | sed 's/^[^:]*:[[:space:]]*//; s/\r$//' | tr -d '[:space:]')
+    case "$API_REFRESH_TOKEN" in
+        ''|*[!A-Za-z0-9._~-]*) API_REFRESH_TOKEN="" ;;
+    esac
+    if [ -n "$API_REFRESH_TOKEN" ]; then
+        sed -i 's/}[[:space:]]*$/,"refresh_token":"'"$API_REFRESH_TOKEN"'"}/' \
+            "$API_RESPONSE" 2>/dev/null || true
+    fi
     cat "$API_RESPONSE"
-    rm -f "$API_RESPONSE"
+    rm -f "$API_RESPONSE" "$API_HEADERS_FILE"
 }
 
 api_get_proxy() {
@@ -2202,6 +2216,11 @@ case "$1" in
     "auth_save_account")
         [ -f "$GATE_HELPER" ] || { echo "Error: authorization gate is missing"; exit 1; }
         gate_account_save "$2" "$3" "$4"
+        ;;
+
+    "auth_update_token")
+        [ -f "$GATE_HELPER" ] || { echo "Error: authorization gate is missing"; exit 1; }
+        gate_account_update_token "$2"
         ;;
 
     "auth_clear_account")
