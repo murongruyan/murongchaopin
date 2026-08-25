@@ -37,6 +37,16 @@ download_toolchain() {
   rm -f "$work/$archive"
 }
 
+ensure_module_protect_list() {
+  local tree="$1" config="$2" protect_list
+  protect_list=$(sed -n 's/^CONFIG_MODULE_SIG_PROTECT_LIST="\([^" ]*\)"$/\1/p' "$config")
+  [ -n "$protect_list" ] || return 0
+  case "$protect_list" in
+    */*|*..*) echo "unsafe CONFIG_MODULE_SIG_PROTECT_LIST: $protect_list" >&2; exit 1 ;;
+  esac
+  : > "$tree/$protect_list"
+}
+
 download_tree "${rmx_repo%.git}/archive/$rmx_commit.zip" rmx.zip "$work/rmx-tree"
 download_toolchain 'https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/clang-r536225.zip' clang19.zip "$work/clang19"
 download_toolchain 'https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/build-tools.zip' build-tools19.zip "$work/build-tools19"
@@ -58,6 +68,7 @@ prepare_rmx() {
   grep -q '^CONFIG_LOCALVERSION=' "$out/.config" && sed -i "s|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=\"$target\"|" "$out/.config" || printf 'CONFIG_LOCALVERSION="%s"\n' "$target" >> "$out/.config"
   grep -q '^CONFIG_LOCALVERSION_AUTO=' "$out/.config" && sed -i 's|^CONFIG_LOCALVERSION_AUTO=.*|CONFIG_LOCALVERSION_AUTO=n|' "$out/.config" || printf 'CONFIG_LOCALVERSION_AUTO=n\n' >> "$out/.config"
   make -C "$tree" O="$out" CC=clang HOSTCC=clang olddefconfig
+  ensure_module_protect_list "$tree" "$out/.config"
   make -C "$tree" O="$out" CC=clang HOSTCC=clang modules_prepare
   local release
   release=$(make -s -C "$tree" O="$out" LOCALVERSION= kernelrelease)
@@ -105,6 +116,7 @@ prepare_pjd() {
   grep -q '^CONFIG_LOCALVERSION=' "$out/.config" && sed -i 's|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION="-gd86625c3830b"|' "$out/.config" || printf 'CONFIG_LOCALVERSION="-gd86625c3830b"\n' >> "$out/.config"
   grep -q '^CONFIG_LOCALVERSION_AUTO=' "$out/.config" && sed -i 's|^CONFIG_LOCALVERSION_AUTO=.*|CONFIG_LOCALVERSION_AUTO=n|' "$out/.config" || printf 'CONFIG_LOCALVERSION_AUTO=n\n' >> "$out/.config"
   make -C "$tree" O="$out" CC=clang HOSTCC=clang olddefconfig
+  ensure_module_protect_list "$tree" "$out/.config"
   make -C "$tree" O="$out" CC=clang HOSTCC=clang modules_prepare
   local release
   release=$(make -s -C "$tree" O="$out" LOCALVERSION= kernelrelease)
