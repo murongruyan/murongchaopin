@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "model": "PJD110",
+  "kernel_release": "6.1.141-gd86625c3830b",
+  "source": {
+    "repository": "https://github.com/OnePlusOSS/android_kernel_common_oneplus_sm8650.git",
+    "ref": "oneplus/sm8650_b_16.0.0_oneplus12",
+    "commit": "d86625c3830b59553b4db6b1b383fddd9655cabf"
+  },
+  "vendor_source": {
+    "repository": "https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8650.git",
+    "ref": "oneplus/sm8650_b_16.0.0_oneplus12",
+    "commit": "c1ec0629b3f9bb245577e65f1ed70d5a371e4b9b",
+    "layout": "vendor/oplus/kernel/cpu -> kernel/oplus_cpu"
+  },
+  "config_fragment": "config/kernel/pjd110-6.1.141-gd86625c3830b.config",
+  "modules": {
+    "pjd110_adfr_lock": {
+      "imports": ["__stack_chk_fail", "_printk", "kstrtobool", "mutex_lock", "mutex_unlock", "param_get_bool", "param_ops_bool", "param_ops_uint", "param_ops_ulong", "register_kprobe", "unregister_kprobe"],
+      "versions": {
+        "__stack_chk_fail": "0xd293c1c2",
+        "_printk": "0xd87e9992",
+        "kstrtobool": "0x4dad4b12",
+        "module_layout": "0xb1ed6ba2",
+        "mutex_lock": "0xfb7b97d5",
+        "mutex_unlock": "0xbdca55ed",
+        "param_get_bool": "0x2821af57",
+        "param_ops_bool": "0xe9e074e2",
+        "param_ops_uint": "0xc9060696",
+        "param_ops_ulong": "0x26a497d5",
+        "register_kprobe": "0x3bcf7204",
+        "unregister_kprobe": "0xedb178eb"
+      }
+    }
+  }
+}
+
+
+
+

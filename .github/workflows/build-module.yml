@@ -150,6 +150,22 @@ jobs:
           sdkmanager --channel=1 --install "ndk;${NDK_PACKAGE}"
           sdkmanager --install "platforms;android-37.0" "build-tools;37.0.0"
 
+      - name: Install kernel build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential flex dwarves libdw-dev libelf-dev libssl-dev \
+            python3 python-is-python3 zip unzip cpio rsync aria2 ccache zstd
+
+      - name: Build free DRM kernel modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build_free_kernel_kos.sh
+          node tools/check_free_drm_ko.mjs
+
       - name: Build native binaries
         shell: bash
         run: |
@@ -199,6 +215,7 @@ jobs:
             scripts/display_license_gate.sh \
             scripts/surfaceflinger_ltps_vote_patch.sh \
             scripts/web_handler.sh \
+            scripts/build_free_kernel_kos.sh \
             tests/device_stock_backup_guard.sh \
             tests/device_invalid_backup_refusal.sh \
             tests/check_web_stock_isolation.sh \
@@ -209,6 +226,7 @@ jobs:
             tests/check_module_update_preservation.sh; do
             sh -n "$script"
           done
+          bash -n scripts/build_free_kernel_kos.sh
           sh tests/check_drm_ko_profiles.sh
           sh tests/check_pjd110_drm_ko.sh
           sh tests/check_pjd110_ko_support_dtbo.sh

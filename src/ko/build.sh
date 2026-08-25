@@ -2,10 +2,10 @@
 
 set -eu
 
-KERNEL_TREE=${KERNEL_TREE:-/home/murongruyan/android16-kernel-rmx5200}
-KERNEL_OUT=${KERNEL_OUT:-/home/murongruyan/rmx5200-kernel-out}
+KERNEL_TREE=${KERNEL_TREE:?KERNEL_TREE must name the exact target kernel tree}
+KERNEL_OUT=${KERNEL_OUT:?KERNEL_OUT must name the prepared target kernel output}
 LLVM_TOOLS=${LLVM_TOOLS:-/home/murongruyan/localtools/usr/bin}
-KERNEL_SYMVERS=${KERNEL_SYMVERS:-}
+KERNEL_SYMVERS=${KERNEL_SYMVERS:?KERNEL_SYMVERS must name the exact target Module.symvers}
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 OUT_DIR=${OUT_DIR:-"$SCRIPT_DIR/../../bin"}
 
@@ -17,7 +17,13 @@ OUT_DIR=${OUT_DIR:-"$SCRIPT_DIR/../../bin"}
 	printf 'prepared kernel output not found: %s\n' "$KERNEL_OUT" >&2
 	exit 1
 }
-if [ -n "$KERNEL_SYMVERS" ] && [ -r "$KERNEL_SYMVERS" ]; then
+
+[ -s "$KERNEL_SYMVERS" ] || {
+	printf 'kernel Module.symvers is missing or empty: %s\n' "$KERNEL_SYMVERS" >&2
+	exit 1
+}
+
+if [ "$KERNEL_SYMVERS" != "$KERNEL_OUT/Module.symvers" ]; then
 	cp "$KERNEL_SYMVERS" "$KERNEL_OUT/Module.symvers"
 fi
 
@@ -30,7 +36,7 @@ build_one() {
 	cp "$SCRIPT_DIR/$source" "$tmp/source.c"
 	printf 'obj-m += %s.o\n%s-y := source.o\n' "$module" "$module" > "$tmp/Makefile"
 	PATH="$LLVM_TOOLS:$PATH" make -C "$KERNEL_TREE" O="$KERNEL_OUT" M="$tmp" \
-		ARCH=arm64 LLVM=1 LLVM_IAS=1 KBUILD_MODPOST_WARN=1 modules
+		ARCH=arm64 LLVM=1 LLVM_IAS=1 modules
 	install -m 0600 "$tmp/$module.ko" "$OUT_DIR/$module.ko"
 	rm -rf "$tmp"
 }
@@ -44,10 +50,12 @@ build_with_shared_source() {
 	cp "$SCRIPT_DIR/$shared" "$tmp/$shared"
 	printf 'obj-m += %s.o\n%s-y := source.o\n' "$module" "$module" > "$tmp/Makefile"
 	PATH="$LLVM_TOOLS:$PATH" make -C "$KERNEL_TREE" O="$KERNEL_OUT" M="$tmp" \
-		ARCH=arm64 LLVM=1 LLVM_IAS=1 KBUILD_MODPOST_WARN=1 modules
+		ARCH=arm64 LLVM=1 LLVM_IAS=1 modules
 	install -m 0600 "$tmp/$module.ko" "$OUT_DIR/$module.ko"
 	rm -rf "$tmp"
 }
+
+
 
 build_pjd110() {
 	pjd_kernel_tree=${PJD_KERNEL_TREE:-/home/murongruyan/oneplus12-kernel-6.1/common}
