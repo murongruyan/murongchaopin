@@ -1707,6 +1707,8 @@ textarea.form-input {
 
 /* ---------- 悬浮玻璃底栏 ---------- */
 .bottom-nav {
+    /* bottom-nav::before remains reserved for legacy theme overrides. */
+    --tab-indicator-index: 0;
     --indicator-left: 6px;
     --indicator-top: 6px;
     --indicator-width: 56px;
