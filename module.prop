@@ -1,7 +1,7 @@
 id=murongchaopin
 name=慕容显示增强
-version=2.9.19
-versionCode=48
+version=2.9.20
+versionCode=49
 author=慕容茹艳（酷安慕容雪绒）
 description=OnePlus / Realme 显示增强模块。一个安装包同时提供无需授权的超频与显示控制，以及授权后按需下载的 LTPO、ADFR 和视频插帧增强。
 minMagisk=17000
