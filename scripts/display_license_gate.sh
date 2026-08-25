@@ -73,13 +73,57 @@ gate_pkg_soc_supported() {
     grep -q "\"$_soc\"" "$1" 2>/dev/null
 }
 
+gate_json_array_values() {
+    # $1 = manifest.json, $2 = field name -> whitespace-separated string values.
+    # Strip the field name and opening bracket before splitting. This handles
+    # both compact JSON (["a","b"]) and pretty JSON (["a", "b"]).
+    grep -o "\"$2\"[[:space:]]*:[[:space:]]*\[[^]]*\]" "$1" 2>/dev/null |
+        head -n 1 |
+        sed 's/^[^[]*\[//; s/]$//; s/,/ /g' |
+        tr -d '"'
+}
+
 gate_list_contains() {
     # $1 = manifest.json, $2 = field name, $3 = value -> 0 when value is an
-    # exact entry of the JSON string array
-    # Keep commas as separators. Removing them before word-splitting turns
-    # ["drm","dtbo"] into one token and incorrectly rejects the second item.
-    for _entry in $(grep -o "\"$2\"[^]]*]" "$1" 2>/dev/null | sed 's/,/ /g' | tr -d '"[]'); do
-        [ "$_entry" = "$3" ] && return 0
+    # exact entry of the JSON string array.
+    for _gate_entry in $(gate_json_array_values "$1" "$2"); do
+        [ "$_gate_entry" = "$3" ] && return 0
+    done
+    return 1
+}
+
+gate_pattern_matches() {
+    # Match the server contract: exact, shell wildcard, or a prefix followed by
+    # a non-alphanumeric version boundary. Thus 6.12 accepts 6.12.23-... but
+    # never accepts 6.126....
+    _gate_pattern=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+    _gate_actual=$(printf '%s' "$2" | tr 'A-Z' 'a-z')
+    [ -n "$_gate_pattern" ] && [ -n "$_gate_actual" ] || return 1
+    [ "$_gate_pattern" = "*" ] && return 0
+    [ "$_gate_pattern" = "$_gate_actual" ] && return 0
+    case "$_gate_pattern" in
+        *'*'*|*'?'*|*'['*)
+            case "$_gate_actual" in $_gate_pattern) return 0 ;; esac
+            return 1
+            ;;
+    esac
+    case "$_gate_actual" in
+        "$_gate_pattern"*)
+            _gate_suffix=${_gate_actual#"$_gate_pattern"}
+            _gate_boundary=$(printf '%.1s' "$_gate_suffix")
+            case "$_gate_boundary" in
+                [0-9a-z]) return 1 ;;
+                *) return 0 ;;
+            esac
+            ;;
+    esac
+    return 1
+}
+
+gate_list_matches_pattern() {
+    # $1 = manifest.json, $2 = field name, $3 = actual value.
+    for _gate_entry in $(gate_json_array_values "$1" "$2"); do
+        gate_pattern_matches "$_gate_entry" "$3" && return 0
     done
     return 1
 }
@@ -839,13 +883,11 @@ gate_package_commit() {
             rm -rf "$_staging"; echo "Error: device SoC not supported"; return 1
         }
     fi
-    # kernel entries are prefixes; each entry must appear inside uname -r
-    _kernel_ok=0
-    for _k in $(grep -o '"supported_kernels"[^]]*]' "$_staging/manifest.json" | tr -d '"[],'); do
-        case "$_kernel" in *"$_k"*) _kernel_ok=1; break ;; esac
-    done
-    [ "$_kernel_ok" = 1 ] || {
-        rm -rf "$_staging"; echo "Error: kernel not supported"; return 1
+    _kernel_allowed=$(gate_json_array_values "$_staging/manifest.json" supported_kernels)
+    gate_list_matches_pattern "$_staging/manifest.json" supported_kernels "$_kernel" || {
+        rm -rf "$_staging"
+        echo "Error: kernel not supported (have: ${_kernel:-unknown}; allowed: ${_kernel_allowed:-none})"
+        return 1
     }
     [ -n "$_backend" ] || _backend=dtbo
     if ! gate_list_contains "$_staging/manifest.json" supported_backends "$_backend"; then

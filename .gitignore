@@ -29,7 +29,6 @@ src/settings_hook/resources-premium/
 src/settings_hook/res-premium/
 src/settings_hook/signing/
 src/settings_hook/java/com/murongchaopin/displayhook/BilibiliStoryHooks.java
-src/rmx5200_ltpo_drop_state.h
 src/ko/rmx5200_ltpo_modes.c
 src/ko/rmx5200_ltpo_activity.c
 src/ko/rmx5200_adfr_lock.c

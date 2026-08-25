@@ -193,6 +193,12 @@ int default_mode_id = 1;
 
 int current_mode_id = -1;
 int force_reapply = 0;  // 亮屏后强制重放目标模式（修复息屏后回 120Hz）
+/* ColorOS can restore the stock 144Hz timing after the first visible ON
+ * frame, even after the ordinary cache-based replay ran.  Keep this separate
+ * from force_reapply: it is cleared only after the LTPO ladder and framework
+ * settings mirror have both completed. */
+static int screen_on_reapply_pending = 0;
+static int screen_on_reapply_transaction_ok = 0;
 static volatile sig_atomic_t reapply_requested = 0;
 static int settings_uid = -1;
 static int games_uid = -1;
@@ -296,6 +302,8 @@ static int valid_package_name(const char *package_name);
 static int set_surface_flinger_mode(int mode_id);
 static int apply_refresh_ladder(int target_id);
 static int next_refresh_ladder_step(int active_id, int target_id);
+static int native_anchor_for_target(int target_id);
+static int prepare_screen_on_reapply_anchor(int target_id);
 static int complete_resolution_geometry(int target_id, int target_width);
 static int create_display_hook_server(void);
 static void handle_display_hook_client(int server_fd, const char *base_path);
@@ -1650,6 +1658,32 @@ static int next_refresh_ladder_step(int active_id, int target_id) {
     return immediate_lower_mode(active_id);
 }
 
+/* After DOZE, SurfaceFlinger can report the requested extension mode even
+ * though the panel is still running at its stock fallback timing. Re-issuing
+ * the extension directly then leaves the panel at that fallback rate. Seed a
+ * known native mode first; the normal refresh ladder will perform the
+ * adjacent 144 -> 155 -> 165 (or equivalent) steps from there. */
+static int prepare_screen_on_reapply_anchor(int target_id) {
+    int anchor_id;
+
+    if (!is_valid_mode(target_id)) return 0;
+    anchor_id = native_anchor_for_target(target_id);
+    if (!is_valid_mode(anchor_id) || anchor_id == target_id) return 1;
+
+    log_msg("Screen ON reapply seeded native anchor: target=%d/%dHz "
+            "anchor=%d/%dHz", target_id, mode_fps(target_id),
+            anchor_id, mode_fps(anchor_id));
+    if (!set_surface_flinger_mode(anchor_id) ||
+            !wait_for_active_mode(anchor_id, 1500)) {
+        log_msg("Screen ON reapply anchor failed: target=%d/%dHz "
+                "anchor=%d/%dHz", target_id, mode_fps(target_id),
+                anchor_id, mode_fps(anchor_id));
+        return 0;
+    }
+    current_mode_id = anchor_id;
+    return 1;
+}
+
 static int apply_refresh_ladder(int target_id) {
     int active_id = current_mode_id;
     int target_fps = mode_fps(target_id);
@@ -2489,6 +2523,9 @@ static int stop_video_override(const char *base_path, const char *reason) {
 void smooth_switch(int target_id) {
     int observed_id;
     int target_density = -1;
+    int screen_on_attempt = screen_on_reapply_pending;
+
+    if (screen_on_attempt) screen_on_reapply_transaction_ok = 0;
     if (pending_density_mode_id == target_id) {
         target_density = pending_density;
         pending_density_mode_id = -1;
@@ -2518,12 +2555,14 @@ void smooth_switch(int target_id) {
     if (force_reapply) {
         force_reapply = 0;
         if (current_mode_id == target_id || current_mode_id == -1) {
-            // 息屏后面板被重置，但缓存仍为目标模式：直接重新下发
-            log_msg("Forced reapply after screen-on / 亮屏后强制重放: -> %d", target_id);
-            if (apply_mode_transaction(target_id, 0, target_density)) {
-                current_mode_id = target_id;
+            /* SurfaceFlinger may expose the desired target while the panel
+             * is still at its post-DOZE stock fallback. Never submit the
+             * extension directly here; seed a native anchor and let the
+             * normal ladder restore every intermediate timing. */
+            if (!prepare_screen_on_reapply_anchor(target_id)) {
+                force_reapply = 1;
+                return;
             }
-            return;
         }
         log_msg("Forced reapply after screen-on, switching to target / 亮屏后强制重放，切换到目标");
     }
@@ -2548,6 +2587,7 @@ void smooth_switch(int target_id) {
         if (target_density > 0) {
             apply_density_override(target_density);
         }
+        if (screen_on_attempt) screen_on_reapply_transaction_ok = 1;
         return;
     }
 
@@ -2559,6 +2599,7 @@ void smooth_switch(int target_id) {
         log_msg("Invalid width / 无效宽度 (curr=%d, target=%d). Direct switch / 直接切换.", current_width, target_width);
         if (apply_mode_transaction(target_id, 0, target_density)) {
             current_mode_id = target_id;
+            if (screen_on_attempt) screen_on_reapply_transaction_ok = 1;
         }
         return;
     }
@@ -2567,6 +2608,7 @@ void smooth_switch(int target_id) {
         log_msg("Resolution change / 分辨率变更: %d -> %d. Direct switch / 直接切换.", current_mode_id, target_id);
         if (apply_mode_transaction(target_id, 1, target_density)) {
             current_mode_id = target_id;
+            if (screen_on_attempt) screen_on_reapply_transaction_ok = 1;
         }
         return;
     }
@@ -2574,6 +2616,7 @@ void smooth_switch(int target_id) {
     log_msg("Ordered refresh switch / 阶梯刷新率切换: %d -> %d", current_mode_id, target_id);
     if (apply_mode_transaction(target_id, 0, target_density)) {
         current_mode_id = target_id;
+        if (screen_on_attempt) screen_on_reapply_transaction_ok = 1;
     }
 }
 
@@ -5763,6 +5806,9 @@ int main(int argc, char *argv[]) {
                     usleep(300000);
                     sync_oti_pause_policy(base_path, 1);
                     force_reapply = 1;
+                    screen_on_reapply_pending = 1;
+                    log_msg("Screen ON reapply queued: physical mode and "
+                            "framework mirror will be restored together");
                 }
             } else if (screen_state == 0) {
                 log_msg("Screen state -> OFF/DOZE / 屏幕状态 -> 息屏/待机");
@@ -5915,8 +5961,60 @@ int main(int argc, char *argv[]) {
                             current_mode_id = geometry_id;
                             force_reapply = 1;
                             smooth_switch(target_id);
+                        } else if (screen_on_reapply_pending &&
+                                   is_valid_mode(target_id)) {
+                            /* Refresh current_mode_id from DisplayManager's
+                             * applied snapshot before the LTPO ladder. The
+                             * cached ceiling can still be 165 while ColorOS
+                             * has physically fallen back to 144 after DOZE. */
+                            int observed_id = get_current_applied_mode();
+
+                            if (!is_valid_mode(observed_id) ||
+                                    !same_mode_geometry(observed_id, target_id)) {
+                                observed_id = get_current_system_mode();
+                            }
+                            int screen_on_anchor_ready = 1;
+                            if (is_valid_mode(observed_id) &&
+                                    same_mode_geometry(observed_id, target_id)) {
+                                current_mode_id = observed_id;
+                                if (!is_valid_mode(current_mode_id) ||
+                                        current_mode_id == target_id) {
+                                    screen_on_anchor_ready =
+                                        prepare_screen_on_reapply_anchor(
+                                            target_id);
+                                }
+                            }
+                            if (screen_on_anchor_ready &&
+                                    is_valid_mode(observed_id) &&
+                                    same_mode_geometry(observed_id, target_id) &&
+                                    rmx5200_ltpo_switch_runtime_mode(
+                                        target_id, "screen-on-reapply")) {
+                                /* ColorOS may have reset its stock enum and
+                                 * peak-rate settings alongside the physical
+                                 * fallback. Publish them only after the exact
+                                 * target timing has been restored. */
+                                sync_android_settings(target_id);
+                                screen_on_reapply_pending = 0;
+                                force_reapply = 0;
+                                log_msg("Screen ON LTPO reapply completed: "
+                                        "mode=%d/%dHz", target_id,
+                                        mode_fps(target_id));
+                            } else {
+                                /* An unknown current mode must not be treated
+                                 * as a successful no-op at the cached ceiling.
+                                 * Preserve both flags for the next main-loop
+                                 * tick. Clearing either one reintroduces the
+                                 * 165Hz -> 144Hz-after-screen-off regression. */
+                                force_reapply = 1;
+                                log_msg("Screen ON LTPO reapply retry pending: "
+                                        "target=%d/%dHz observed=%d", target_id,
+                                        mode_fps(target_id), observed_id);
+                            }
                         } else {
-                            force_reapply = 0;
+                            /* The normal LTPO policy owns its own steps. Do
+                             * not consume a screen-on recovery transaction
+                             * until it has restored both timing and settings. */
+                            if (!screen_on_reapply_pending) force_reapply = 0;
                         }
                     } else if (strcmp(device_model, "RMX5200") == 0 &&
                                screen_state == 0) {
@@ -5926,7 +6024,26 @@ int main(int argc, char *argv[]) {
                      * already sets force_reapply after display init. */
                     } else if (is_valid_mode(target_id) &&
                                (target_id != current_mode_id || force_reapply)) {
+                        int completing_screen_on = screen_on_reapply_pending;
+
                         smooth_switch(target_id);
+                        if (completing_screen_on) {
+                            int observed_id = get_current_applied_mode();
+
+                            if (screen_on_reapply_transaction_ok &&
+                                    observed_id == target_id) {
+                                screen_on_reapply_pending = 0;
+                                force_reapply = 0;
+                                log_msg("Screen ON generic reapply completed: "
+                                        "mode=%d/%dHz", target_id,
+                                        mode_fps(target_id));
+                            } else {
+                                force_reapply = 1;
+                                log_msg("Screen ON generic reapply retry pending: "
+                                        "target=%d/%dHz observed=%d", target_id,
+                                        mode_fps(target_id), observed_id);
+                            }
+                        }
                     }
                 }
 #else
@@ -5934,9 +6051,28 @@ int main(int argc, char *argv[]) {
                         screen_state == 0) {
                     /* Doze owns panel timing. The OFF/DOZE -> ON path already
                      * sets force_reapply after display init. */
-                } else if (is_valid_mode(target_id) &&
+                    } else if (is_valid_mode(target_id) &&
                            (target_id != current_mode_id || force_reapply)) {
+                    int completing_screen_on = screen_on_reapply_pending;
+
                     smooth_switch(target_id);
+                    if (completing_screen_on) {
+                        int observed_id = get_current_applied_mode();
+
+                        if (screen_on_reapply_transaction_ok &&
+                                observed_id == target_id) {
+                            screen_on_reapply_pending = 0;
+                            force_reapply = 0;
+                            log_msg("Screen ON generic reapply completed: "
+                                    "mode=%d/%dHz", target_id,
+                                    mode_fps(target_id));
+                        } else {
+                            force_reapply = 1;
+                            log_msg("Screen ON generic reapply retry pending: "
+                                    "target=%d/%dHz observed=%d", target_id,
+                                    mode_fps(target_id), observed_id);
+                        }
+                    }
                 }
 #endif
             

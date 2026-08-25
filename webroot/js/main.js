@@ -49,6 +49,9 @@ let paymentClosing = false;
 const tabScrollPositions = new Map();
 let tabHistory = [];
 let predictiveBackState = null;
+let bottomNavInteraction = null;
+let bottomNavResizeObserver = null;
+let bottomNavSuppressClickUntil = 0;
 
 // 授权相关运行时状态
 let authToken = null;
@@ -745,13 +748,205 @@ function setupTheme() {
 // ============================================================
 const TAB_ORDER = ['tab-oc', 'tab-rates', 'tab-video', 'tab-logs', 'tab-mine'];
 
+function bottomNavClamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+}
+
+function bottomNavNow() {
+    return typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+}
+
+function bottomNavGeometry() {
+    const nav = document.querySelector('.bottom-nav');
+    if (!nav) return null;
+    const buttons = Array.from(nav.querySelectorAll('.tab-btn'));
+    if (!buttons.length) return null;
+    const navRect = nav.getBoundingClientRect();
+    const originX = navRect.left + nav.clientLeft;
+    const originY = navRect.top + nav.clientTop;
+    const rects = buttons.map(button => button.getBoundingClientRect());
+    const centers = rects.map(rect => rect.left + rect.width / 2);
+    const widths = rects.map(rect => rect.width);
+    const heights = rects.map(rect => Math.max(40, Math.min(56, rect.height - 4)));
+    return { nav, rects, centers, widths, heights, originX, originY };
+}
+
+function bottomNavInterpolatedGeometry(index, geometry = bottomNavGeometry()) {
+    if (!geometry) return null;
+    const maxIndex = geometry.centers.length - 1;
+    const bounded = bottomNavClamp(Number(index) || 0, 0, maxIndex);
+    const lower = Math.floor(bounded);
+    const upper = Math.min(maxIndex, lower + 1);
+    const fraction = bounded - lower;
+    const center = geometry.centers[lower] +
+        (geometry.centers[upper] - geometry.centers[lower]) * fraction;
+    const width = geometry.widths[lower] +
+        (geometry.widths[upper] - geometry.widths[lower]) * fraction;
+    const height = geometry.heights[lower] +
+        (geometry.heights[upper] - geometry.heights[lower]) * fraction;
+    return {
+        left: center - geometry.originX - width / 2,
+        top: geometry.rects[lower].top - geometry.originY +
+            (geometry.rects[lower].height - height) / 2,
+        width,
+        height,
+        centers: geometry.centers
+    };
+}
+
 function setBottomNavIndicator(index, animate = true) {
     const nav = document.querySelector('.bottom-nav');
-    if (!nav || index < 0) return;
+    const geometry = bottomNavGeometry();
+    if (!nav || !geometry || index < 0) return;
+    const indicator = bottomNavInterpolatedGeometry(index, geometry);
+    if (!indicator) return;
     const immediate = !animate && !nav.classList.contains('predictive-back-settle');
     nav.classList.toggle('indicator-immediate', immediate);
     nav.style.setProperty('--tab-indicator-index', String(index));
+    nav.style.setProperty('--indicator-left', `${indicator.left}px`);
+    nav.style.setProperty('--indicator-top', `${indicator.top}px`);
+    nav.style.setProperty('--indicator-width', `${indicator.width}px`);
+    nav.style.setProperty('--indicator-height', `${indicator.height}px`);
     if (immediate) requestAnimationFrame(() => nav.classList.remove('indicator-immediate'));
+}
+
+function setBottomNavDragWeights(index) {
+    const bounded = bottomNavClamp(index, 0, TAB_ORDER.length - 1);
+    document.querySelectorAll('.bottom-nav .tab-btn').forEach((button, tabIndex) => {
+        const weight = bottomNavClamp(1 - Math.abs(tabIndex - bounded), 0, 1);
+        button.style.setProperty('--drag-tab-weight', String(weight));
+    });
+}
+
+function clearBottomNavDragWeights() {
+    document.querySelectorAll('.bottom-nav .tab-btn').forEach(button => {
+        button.style.removeProperty('--drag-tab-weight');
+    });
+}
+
+function finishBottomNavLiquidGesture(state, cancelled = false) {
+    if (!state || bottomNavInteraction !== state) return;
+    if (state.longPressTimer) clearTimeout(state.longPressTimer);
+    const nav = state.nav;
+    if (state.held && !cancelled) {
+        const targetIndex = bottomNavClamp(Math.round(state.index), 0, TAB_ORDER.length - 1);
+        const targetId = TAB_ORDER[targetIndex];
+        bottomNavSuppressClickUntil = bottomNavNow() + 520;
+        nav.classList.remove('is-dragging', 'is-pressed');
+        nav.classList.add('nav-settling');
+        nav.style.setProperty('--indicator-scale-x', '1');
+        nav.style.setProperty('--indicator-scale-y', '1');
+        clearBottomNavDragWeights();
+        if (targetId && targetId !== activeTabId) {
+            activateTab(targetId, { push: true });
+        } else {
+            setBottomNavIndicator(targetIndex, true);
+        }
+        setTimeout(() => nav.classList.remove('nav-settling'), 540);
+    } else {
+        nav.classList.remove('is-dragging', 'is-pressed');
+        nav.style.setProperty('--indicator-scale-x', '1');
+        nav.style.setProperty('--indicator-scale-y', '1');
+        clearBottomNavDragWeights();
+    }
+    try {
+        if (nav.hasPointerCapture(state.pointerId)) nav.releasePointerCapture(state.pointerId);
+    } catch (_) { /* WebView may release capture during teardown. */ }
+    bottomNavInteraction = null;
+}
+
+function setupBottomNavLiquidGesture() {
+    const nav = document.querySelector('.bottom-nav');
+    if (!nav || nav.dataset.liquidGestureReady === '1') return;
+    nav.dataset.liquidGestureReady = '1';
+
+    const start = event => {
+        if (event.pointerType === 'mouse' && event.button !== 0) return;
+        if (bottomNavInteraction) finishBottomNavLiquidGesture(bottomNavInteraction, true);
+        const button = event.target.closest?.('.tab-btn');
+        if (!button || !nav.contains(button)) return;
+        const startIndex = TAB_ORDER.indexOf(button.getAttribute('data-tab'));
+        if (startIndex < 0) return;
+        const state = {
+            nav,
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            lastX: event.clientX,
+            lastTime: bottomNavNow(),
+            index: startIndex,
+            held: false,
+            moved: false,
+            longPressTimer: null
+        };
+        bottomNavInteraction = state;
+        try { nav.setPointerCapture(event.pointerId); } catch (_) { /* optional */ }
+        state.longPressTimer = setTimeout(() => {
+            if (bottomNavInteraction !== state || state.moved) return;
+            state.held = true;
+            nav.classList.add('is-pressed', 'is-dragging');
+            setBottomNavIndicator(state.index, false);
+            setBottomNavDragWeights(state.index);
+            nav.style.setProperty('--indicator-scale-x', '1.34');
+            nav.style.setProperty('--indicator-scale-y', '1.34');
+        }, 155);
+    };
+
+    const move = event => {
+        const state = bottomNavInteraction;
+        if (!state || state.pointerId !== event.pointerId) return;
+        const dx = event.clientX - state.startX;
+        const dy = event.clientY - state.startY;
+        if (!state.held) {
+            if (Math.abs(dx) > 9 || Math.abs(dy) > 12) {
+                state.moved = true;
+                if (state.longPressTimer) clearTimeout(state.longPressTimer);
+            }
+            return;
+        }
+        event.preventDefault();
+        const geometry = bottomNavGeometry();
+        if (!geometry || geometry.centers.length < 2) return;
+        const first = geometry.centers[0];
+        const last = geometry.centers[geometry.centers.length - 1];
+        state.index = bottomNavClamp(
+            (event.clientX - first) / (last - first) * (geometry.centers.length - 1),
+            0,
+            geometry.centers.length - 1
+        );
+        const now = bottomNavNow();
+        const dt = Math.max(1, now - state.lastTime);
+        const velocity = bottomNavClamp((event.clientX - state.lastX) / dt * 0.9, -1, 1);
+        const speed = Math.abs(velocity);
+        state.lastX = event.clientX;
+        state.lastTime = now;
+        setBottomNavIndicator(state.index, false);
+        setBottomNavDragWeights(state.index);
+        nav.style.setProperty('--indicator-scale-x', String(1.34 + speed * 0.32));
+        nav.style.setProperty('--indicator-scale-y', String(1.34 - speed * 0.1));
+    };
+
+    const end = event => {
+        const state = bottomNavInteraction;
+        if (!state || state.pointerId !== event.pointerId) return;
+        finishBottomNavLiquidGesture(state);
+    };
+
+    nav.addEventListener('pointerdown', start, { passive: true });
+    nav.addEventListener('pointermove', move, { passive: false });
+    nav.addEventListener('pointerup', end, { passive: true });
+    nav.addEventListener('pointercancel', event => {
+        const state = bottomNavInteraction;
+        if (state && state.pointerId === event.pointerId) finishBottomNavLiquidGesture(state, true);
+    }, { passive: true });
+    const refresh = () => {
+        if (!bottomNavInteraction) setBottomNavIndicator(TAB_ORDER.indexOf(activeTabId), false);
+    };
+    if (typeof ResizeObserver !== 'undefined') {
+        bottomNavResizeObserver = new ResizeObserver(refresh);
+        bottomNavResizeObserver.observe(nav);
+    }
+    window.addEventListener('resize', refresh, { passive: true });
 }
 
 function setPredictiveTabWeight(index, weight) {
@@ -897,8 +1092,14 @@ function setupTabs() {
     tabHistory = [initial];
     history.replaceState({ kind: 'tab', tab: initial }, '', `#${initial}`);
     setBottomNavIndicator(TAB_ORDER.indexOf(initial), false);
+    setupBottomNavLiquidGesture();
     tabs.forEach(tab => {
-        tab.addEventListener('click', () => {
+        tab.addEventListener('click', event => {
+            if (bottomNavSuppressClickUntil > bottomNavNow()) {
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+            }
             const targetId = tab.getAttribute('data-tab');
             activateTab(targetId, { push: true });
         });

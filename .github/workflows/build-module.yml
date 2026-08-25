@@ -232,6 +232,8 @@ jobs:
           sh tests/check_module_update_preservation.sh
           sh tests/check_surfaceflinger_ltps_vote_patch.sh
           sh tests/check_premium_script_line_endings.sh
+          sh tests/check_package_kernel_compat.sh
+          sh tests/check_screen_on_reapply.sh
 
       - name: Configure Hook signing
         id: hook_signing

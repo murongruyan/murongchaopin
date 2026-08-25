@@ -1004,6 +1004,7 @@ textarea.form-input {
     padding: 12px 0;
     border-bottom: 1px solid var(--border);
     content-visibility: auto;
+    contain: paint;
     contain-intrinsic-size: 76px;
 }
 
@@ -1706,14 +1707,20 @@ textarea.form-input {
 
 /* ---------- 悬浮玻璃底栏 ---------- */
 .bottom-nav {
-    --tab-indicator-index: 0;
+    --indicator-left: 6px;
+    --indicator-top: 6px;
+    --indicator-width: 56px;
+    --indicator-height: 56px;
+    --indicator-scale-x: 1;
+    --indicator-scale-y: 1;
+    --nav-scale: 1;
     position: fixed;
     left: 50%;
     bottom: calc(10px + env(safe-area-inset-bottom));
     display: flex;
     width: 88%;
     max-width: 620px;
-    transform: translate3d(-50%, 0, 0);
+    transform: translate3d(-50%, 0, 0) scale(var(--nav-scale));
     border-radius: var(--radius-lg);
     background: var(--nav-bg);
     border: 1px solid var(--nav-border);
@@ -1722,36 +1729,101 @@ textarea.form-input {
     -webkit-backdrop-filter: blur(22px) saturate(175%);
     backdrop-filter: blur(22px) saturate(175%);
     z-index: 1000;
-    overflow: hidden;
-    contain: paint;
+    overflow: visible;
     backface-visibility: hidden;
 }
 
-.bottom-nav::before {
-    content: "";
+.nav-indicator {
     position: absolute;
-    top: 6px;
-    bottom: 6px;
-    left: 6px;
-    width: calc((100% - 12px) / 5);
-    border: 1px solid rgba(255, 255, 255, 0.46);
-    border-radius: 34px;
-    background: rgba(231, 71, 145, 0.28);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.34);
-    transform: translate3d(calc(var(--tab-indicator-index) * 100%), 0, 0);
-    transition: transform 320ms cubic-bezier(0.2, 0.8, 0.2, 1);
-    will-change: transform;
+    left: 0;
+    top: 0;
+    width: var(--indicator-width);
+    height: var(--indicator-height);
+    transform: translate3d(var(--indicator-left), var(--indicator-top), 0);
+    transition:
+        transform 320ms cubic-bezier(0.2, 0.8, 0.2, 1),
+        width 320ms cubic-bezier(0.2, 0.8, 0.2, 1),
+        height 320ms cubic-bezier(0.2, 0.8, 0.2, 1);
+    will-change: transform, width, height;
     pointer-events: none;
+    z-index: 0;
 }
 
-.bottom-nav.indicator-immediate::before,
-.bottom-nav.predictive-back-nav::before {
+.nav-indicator-surface {
+    position: absolute;
+    inset: 0;
+    border: 1px solid rgba(255, 255, 255, 0.52);
+    border-radius: 999px;
+    background: rgba(231, 71, 145, 0.27);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.42),
+        0 5px 18px rgba(126, 67, 100, 0.12);
+    -webkit-backdrop-filter: blur(18px) saturate(185%);
+    backdrop-filter: blur(18px) saturate(185%);
+    transform: scaleX(var(--indicator-scale-x)) scaleY(var(--indicator-scale-y));
+    transform-origin: center;
+    transition:
+        transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
+        box-shadow 220ms ease, background 220ms ease;
+    will-change: transform;
+}
+
+.bottom-nav.indicator-immediate .nav-indicator,
+.bottom-nav.predictive-back-nav .nav-indicator,
+.bottom-nav.is-dragging .nav-indicator {
     transition: none;
 }
 
-.bottom-nav.predictive-back-settle::before {
-    transition: transform var(--predictive-settle-duration, 180ms)
-        var(--predictive-settle-easing, linear);
+.bottom-nav.indicator-immediate .nav-indicator-surface,
+.bottom-nav.predictive-back-nav .nav-indicator-surface,
+.bottom-nav.is-dragging .nav-indicator-surface {
+    transition: none;
+}
+
+.bottom-nav.is-pressed {
+    --indicator-scale-x: 1.34;
+    --indicator-scale-y: 1.34;
+}
+
+.bottom-nav.is-pressed .nav-indicator-surface {
+    background: rgba(231, 71, 145, 0.34);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.58),
+        0 8px 24px rgba(126, 67, 100, 0.2);
+}
+
+.bottom-nav.predictive-back-settle .nav-indicator {
+    transition:
+        transform var(--predictive-settle-duration, 180ms)
+            var(--predictive-settle-easing, linear),
+        width var(--predictive-settle-duration, 180ms)
+            var(--predictive-settle-easing, linear),
+        height var(--predictive-settle-duration, 180ms)
+            var(--predictive-settle-easing, linear);
+}
+
+.bottom-nav.predictive-back-settle .nav-indicator-surface {
+    transition:
+        transform var(--predictive-settle-duration, 180ms)
+            var(--predictive-settle-easing, linear),
+        box-shadow var(--predictive-settle-duration, 180ms)
+            var(--predictive-settle-easing, linear),
+        background var(--predictive-settle-duration, 180ms)
+            var(--predictive-settle-easing, linear);
+}
+
+.bottom-nav.nav-settling .nav-indicator {
+    transition:
+        transform 520ms cubic-bezier(0.16, 1.18, 0.3, 1),
+        width 520ms cubic-bezier(0.16, 1.18, 0.3, 1),
+        height 520ms cubic-bezier(0.16, 1.18, 0.3, 1);
+}
+
+.bottom-nav.nav-settling .nav-indicator-surface {
+    transition:
+        transform 360ms cubic-bezier(0.16, 1.18, 0.3, 1),
+        box-shadow 360ms ease,
+        background 360ms ease;
 }
 
 .tab-btn {
@@ -1770,10 +1842,16 @@ textarea.form-input {
     cursor: pointer;
     border-radius: 34px;
     isolation: isolate;
-    transition: color 0.2s, transform 0.2s;
+    transition: color 0.2s, transform 0.2s, opacity 0.2s;
     outline: none;
     -webkit-tap-highlight-color: transparent;
     z-index: 1;
+}
+
+.bottom-nav.is-dragging .tab-btn {
+    opacity: calc(0.68 + 0.32 * var(--drag-tab-weight, 0));
+    transform: scale(calc(1 + 0.08 * var(--drag-tab-weight, 0)));
+    transition: none;
 }
 
 .tab-btn:focus-visible {
