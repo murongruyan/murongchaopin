@@ -102,7 +102,7 @@ prepare_pjd_layout() {
   normalize_link "$tree/drivers/soc/oplus/oplus_resctrl" "../../../vendor/oplus/kernel/oplus_performance_5.10/oplus_resctrl"
   normalize_link "$tree/drivers/soc/oplus/storage" "../../../vendor/oplus/kernel/storage"
   test -f "$tree/kernel/oplus_cpu/sched/Kconfig"
-  test -f "$vendor/vendor/vendor/qcom/opensource/display-drivers/msm/dsi/dsi_display.h"
+  test -f "$vendor/vendor/qcom/opensource/display-drivers/msm/dsi/dsi_display.h"
 }
 
 prepare_pjd() {
@@ -135,7 +135,7 @@ sh "$root/src/ko/build.sh" plk110
 
 prepare_pjd_layout "$work/pjd-tree" "$work/pjd-vendor"
 prepare_pjd "$work/pjd-tree" "$work/pjd-out" "$work/clang20/bin" "$work/build-tools20/bin" "$root/config/kernel/pjd110-6.1.141-gd86625c3830b.config"
-export KERNEL_TREE="$work/pjd-tree" KERNEL_OUT="$work/pjd-out" KERNEL_SYMVERS="$work/pjd-out/Module.symvers" LLVM_TOOLS="$work/clang20/bin" KBUILD_MODPOST_WARN=1 PJD_KERNEL_TREE="$work/pjd-tree" PJD_KERNEL_OUT="$work/pjd-out" PJD_DISPLAY_ROOT="$work/pjd-vendor/vendor/vendor/qcom/opensource/display-drivers" OUT_DIR="$root/bin"
+export KERNEL_TREE="$work/pjd-tree" KERNEL_OUT="$work/pjd-out" KERNEL_SYMVERS="$work/pjd-out/Module.symvers" LLVM_TOOLS="$work/clang20/bin" KBUILD_MODPOST_WARN=1 PJD_KERNEL_TREE="$work/pjd-tree" PJD_KERNEL_OUT="$work/pjd-out" PJD_DISPLAY_ROOT="$work/pjd-vendor/vendor/qcom/opensource/display-drivers" OUT_DIR="$root/bin"
 sh "$root/src/ko/build.sh" pjd110
 
 for ko in "$root/bin/rmx5200_drm_modes.ko" "$root/bin/plk110_drm_modes.ko" "$root/bin/pjd110_drm_modes.ko"; do
