@@ -113,4 +113,12 @@ if printf '%s\n' "$SET_CONFIG_BODY" | grep -q 'SETTINGS_BRIDGE_HELPER.*sync-glob
     exit 1
 fi
 
+grep -q 'begin_coloros_resolution_change "$NEW_MODE" "$NEW_SPEC"' \
+    "$ROOT/scripts/web_handler.sh"
+grep -q 'ADOPTRES.*TARGET_MODE_ID.*RESOLUTION_GENERATION' \
+    "$ROOT/scripts/web_handler.sh"
+grep -q 'wm density "$TARGET_DENSITY"' "$ROOT/scripts/web_handler.sh"
+grep -q "resolutionChange ? 'set_resolution_config' : 'set_config'" \
+    "$ROOT/webroot/js/main.js"
+
 echo 'PASS: display settings bridge synchronizes Web, Settings app overrides, and Game Assistant reapply signals'

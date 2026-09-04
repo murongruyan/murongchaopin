@@ -96,6 +96,13 @@ int main(void) {
 
     load_test_modes("RMX5200", rmx_modes,
                     sizeof(rmx_modes) / sizeof(rmx_modes[0]));
+    if (mode_for_resolution_fps(1440, 3136, 165) != 8 ||
+            mode_for_resolution_fps(1440, 2352, 165) != -1 ||
+            mode_for_resolution_fps(1440, 3136, 121) != -1) {
+        fputs("FAIL: mode lookup does not require resolution and FPS together\n",
+              stderr);
+        return 1;
+    }
     expect_path("RMX5200 120->165", 0, 8, rmx_up,
                 sizeof(rmx_up) / sizeof(rmx_up[0]));
     expect_path("RMX5200 120->144", 0, 4, rmx_144_up,

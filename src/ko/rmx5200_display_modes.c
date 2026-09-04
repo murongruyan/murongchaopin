@@ -2285,6 +2285,10 @@ static bool oc_multiset_matches(const u8 *records, u32 stride, u32 count,
 				break;
 			}
 		}
+		if (!found && width == OC_WQHD_WIDTH &&
+		    height == OC_WQHD_HEIGHT &&
+		    oc_clock_sane(clock, oc_dt.source_clock))
+			found = true;
 		if (!found)
 			return false;
 	}
@@ -2292,13 +2296,14 @@ static bool oc_multiset_matches(const u8 *records, u32 stride, u32 count,
 }
 
 static bool oc_validate_mode_candidate(const u8 *records, u32 stride,
-						u32 width_offset, u32 height_offset,
+					 u32 count, u32 width_offset,
+						u32 height_offset,
 						u32 refresh_offset, u32 clock_offset,
 						u32 source_index)
 {
 	u32 i;
 
-	for (i = 0; i < oc_dt.count; i++) {
+	for (i = 0; i < count; i++) {
 		const u8 *record = records + i * OC_MAX_MODE_STRIDE;
 		u32 width = oc_buf_u32(record, width_offset);
 		u32 height = oc_buf_u32(record, height_offset);
@@ -2317,7 +2322,7 @@ static bool oc_validate_mode_candidate(const u8 *records, u32 stride,
 	    oc_buf_u32(records + source_index * OC_MAX_MODE_STRIDE,
 			       refresh_offset) != OC_SOURCE_FPS)
 		return false;
-	return oc_multiset_matches(records, stride, oc_dt.count,
+	return oc_multiset_matches(records, stride, count,
 					   width_offset, height_offset,
 					   refresh_offset, clock_offset);
 }
@@ -2415,6 +2420,11 @@ static bool oc_expected_transfer_time(const u8 *record, u32 width_offset,
 			return false;
 		expected = oc_dt.transfer_time_us[i];
 		found = true;
+	}
+	if (!found && width == OC_WQHD_WIDTH &&
+	    height == OC_WQHD_HEIGHT && oc_clock_sane(clock, oc_dt.source_clock)) {
+		*transfer_time_us = 0;
+		return true;
 	}
 	if (!found || !expected)
 		return false;
@@ -2515,6 +2525,23 @@ static bool oc_private_phy_layout_matches(const u8 *records, u32 count,
 	return true;
 }
 
+static u32 oc_live_mode_count(void)
+{
+	void *panel;
+	u32 count;
+	u32 next_count;
+
+	if (!oc_layout.display ||
+	    !oc_read_pointer(oc_layout.display, 0x108, &panel) ||
+	    !panel ||
+	    !oc_read_mem((u8 *)panel + 0x5a0, &count, sizeof(count)) ||
+	    !oc_read_mem((u8 *)panel + 0x5a4, &next_count, sizeof(next_count)) ||
+	    count != next_count || count < oc_dt.count ||
+	    count > OC_MAX_RUNTIME_MODES)
+		return oc_dt.count;
+	return count;
+}
+
 static bool oc_find_private_layout(const u8 *records, u32 stride, u32 count,
 					   u32 source_index, u32 width_offset,
 					   u32 height_offset, u32 refresh_offset,
@@ -2603,8 +2630,9 @@ static noinline int oc_find_mode_layout(struct oc_mode_layout *layout)
 {
 	u8 *records;
 	u32 display_offset;
+	u32 live_count = oc_live_mode_count();
 
-	records = kmalloc(OC_MAX_DT_MODES * OC_MAX_MODE_STRIDE, GFP_KERNEL);
+	records = kmalloc(OC_MAX_RUNTIME_MODES * OC_MAX_MODE_STRIDE, GFP_KERNEL);
 	if (!records)
 		return -ENOMEM;
 	for (display_offset = 0; display_offset <= OC_MAX_DISPLAY_SCAN;
@@ -2620,7 +2648,7 @@ static noinline int oc_find_mode_layout(struct oc_mode_layout *layout)
 			u32 source_index;
 			bool records_ok = true;
 
-			for (i = 0; i < oc_dt.count; i++) {
+			for (i = 0; i < live_count; i++) {
 				if (!oc_read_mem((u8 *)modes + i * stride,
 						 records + i * OC_MAX_MODE_STRIDE, stride)) {
 					records_ok = false;
@@ -2629,7 +2657,7 @@ static noinline int oc_find_mode_layout(struct oc_mode_layout *layout)
 			}
 			if (!records_ok)
 				continue;
-			for (source_index = 0; source_index < oc_dt.count;
+			for (source_index = 0; source_index < live_count;
 			     source_index++) {
 				u32 hpos[OC_MAX_FIELD_POSITIONS];
 				u32 vpos[OC_MAX_FIELD_POSITIONS];
@@ -2675,19 +2703,19 @@ static noinline int oc_find_mode_layout(struct oc_mode_layout *layout)
 								    vpos[vi] == cpos[ci] ||
 								    fpos[fi] == cpos[ci])
 									continue;
-								if (!oc_validate_mode_candidate(records, stride,
-										hpos[hi], vpos[vi], fpos[fi],
-										cpos[ci], source_index))
+				if (!oc_validate_mode_candidate(records, stride, live_count,
+						hpos[hi], vpos[vi], fpos[fi],
+						cpos[ci], source_index))
 									continue;
-								oc_find_index_offset(records, stride, oc_dt.count,
+				oc_find_index_offset(records, stride, live_count,
 										   &index_offset);
-								oc_find_pixel_offset(records, stride, oc_dt.count,
+				oc_find_pixel_offset(records, stride, live_count,
 										   source_index, hpos[hi],
 										   vpos[vi], cpos[ci],
 										   &pixel_offset,
 										   &source_pixel);
 								if (!oc_find_private_layout(records, stride,
-											 oc_dt.count, source_index,
+													 live_count, source_index,
 											 hpos[hi], vpos[vi], fpos[fi],
 											 cpos[ci],
 											 &priv_offset,
@@ -2696,11 +2724,11 @@ static noinline int oc_find_mode_layout(struct oc_mode_layout *layout)
 											 &source_priv))
 									continue;
 								if (!oc_private_phy_layout_matches(records,
-										oc_dt.count, priv_offset))
+														 live_count, priv_offset))
 									continue;
 								layout->modes = modes;
 								layout->stride = stride;
-								layout->count = oc_dt.count;
+								layout->count = live_count;
 								layout->width_offset = hpos[hi];
 								layout->height_offset = vpos[vi];
 								layout->refresh_offset = fpos[fi];
@@ -2749,6 +2777,7 @@ static noinline int oc_find_panel_layout(void)
 	void *known_panel;
 	u32 known_a;
 	u32 known_b;
+	u32 live_count = oc_layout.count;
 
 	/* RMX5200's 6.12 dsi_display keeps the parsed panel at +0x108.
 	 * Prefer this verified ABI over a blind scan; retain the scan below as a
@@ -2756,7 +2785,7 @@ static noinline int oc_find_panel_layout(void)
 	if (oc_read_pointer(oc_layout.display, 0x108, &known_panel) &&
 	    oc_read_mem((u8 *)known_panel + 0x5a0, &known_a, sizeof(known_a)) &&
 	    oc_read_mem((u8 *)known_panel + 0x5a4, &known_b, sizeof(known_b)) &&
-	    known_a == oc_dt.count && known_b == oc_dt.count) {
+	    known_a == live_count && known_b == live_count) {
 		oc_layout.panel = known_panel;
 		oc_layout.panel_count_offsets[0] = 0x5a0;
 		oc_layout.panel_count_offsets[1] = 0x5a4;
@@ -2784,16 +2813,16 @@ static noinline int oc_find_panel_layout(void)
 			int score;
 			if (display_offset == 0x108 && offset == 0x5a0)
 				pr_info("rmx5200_display_runtime_modes: panel_scan candidate=%px count=%u/%u expected=%u read=%d/%d\\n",
-					candidate, count, next_count, oc_dt.count,
+					candidate, count, next_count, live_count,
 					oc_read_mem((u8 *)candidate + offset, &count, sizeof(count)),
 					oc_read_mem((u8 *)candidate + offset + 4, &next_count, sizeof(next_count)));
 
 			if (!oc_read_mem((u8 *)candidate + offset, &count,
-					 sizeof(count)) || count != oc_dt.count)
+				 sizeof(count)) || count != live_count)
 				continue;
 			if (!oc_read_mem((u8 *)candidate + offset + 4,
 					 &next_count, sizeof(next_count)) ||
-			    next_count != oc_dt.count)
+			    next_count != live_count)
 				continue;
 			score = 1;
 			if (offset >= 0x500 && offset <= 0x700)

@@ -74,6 +74,8 @@ restore_runtime_state() {
   PREMIUM_SCRIPTS="$MODPATH/premium/scripts"
   [ ! -f "$PREMIUM_SCRIPTS/coloros_config_premium.sh" ] ||
     sh "$PREMIUM_SCRIPTS/coloros_config_premium.sh" remove-premium >/dev/null 2>&1 || true
+  [ ! -f "$PREMIUM_SCRIPTS/game_assistant_config_premium.sh" ] ||
+    sh "$PREMIUM_SCRIPTS/game_assistant_config_premium.sh" remove >/dev/null 2>&1 || true
   [ ! -f "$PREMIUM_SCRIPTS/libpwiris_memc_gate_patch.sh" ] ||
     sh "$PREMIUM_SCRIPTS/libpwiris_memc_gate_patch.sh" restore >/dev/null 2>&1 || true
   [ ! -f "$PREMIUM_SCRIPTS/premium_system_overlay.sh" ] ||

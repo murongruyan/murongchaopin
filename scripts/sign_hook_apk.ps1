@@ -10,17 +10,23 @@ param(
 $ErrorActionPreference = "Stop"
 
 function Resolve-ApkSigner {
-    $sdkRoot = if (-not [string]::IsNullOrWhiteSpace($env:ANDROID_HOME)) {
-        $env:ANDROID_HOME
-    } elseif (-not [string]::IsNullOrWhiteSpace($env:ANDROID_SDK_ROOT)) {
-        $env:ANDROID_SDK_ROOT
-    } else {
-        ""
-    }
     $candidates = @()
-    if ($sdkRoot) {
-        $candidates += Join-Path $sdkRoot "build-tools/37.0.0/apksigner"
-        $candidates += Join-Path $sdkRoot "build-tools/37.0.0/apksigner.bat"
+    $sdkRoots = @($env:ANDROID_HOME, $env:ANDROID_SDK_ROOT) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Select-Object -Unique
+    foreach ($sdkRoot in $sdkRoots) {
+        $buildToolsRoot = Join-Path $sdkRoot "build-tools"
+        if (-not (Test-Path -LiteralPath $buildToolsRoot -PathType Container)) {
+            continue
+        }
+        $buildTools = Get-ChildItem -LiteralPath $buildToolsRoot -Directory |
+            Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' } |
+            Sort-Object { [version]$_.Name } -Descending
+        foreach ($buildTool in $buildTools) {
+            $candidates += Join-Path $buildTool.FullName "apksigner.exe"
+            $candidates += Join-Path $buildTool.FullName "apksigner.bat"
+            $candidates += Join-Path $buildTool.FullName "apksigner"
+        }
     }
     $fromPath = Get-Command apksigner, apksigner.bat -ErrorAction SilentlyContinue |
         Select-Object -First 1
@@ -32,7 +38,7 @@ function Resolve-ApkSigner {
             return (Resolve-Path -LiteralPath $candidate).Path
         }
     }
-    throw "Android SDK build-tools 37.0.0 apksigner was not found"
+    throw "Android SDK apksigner was not found in the configured SDK or PATH"
 }
 
 $apk = (Resolve-Path -LiteralPath $ApkPath).Path

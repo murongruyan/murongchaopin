@@ -216,14 +216,14 @@ RMX5200 的 Qualcomm Android 16 `dumpsys SurfaceFlinger` 使用
 `mActiveModeId` 当成 HWC ID。首次启动和息屏亮屏重放不再依赖过期的目标缓存。
 
 刷新率切换改为单次 HWC 事务，不再逐档经过中间刷新率，减少厂商 LTPS/ADFR 策略与守护进程互相抢写的窗口。
-跨 2K/1080p 时，事务会先保存 `wm density` 和 `wm size` 覆盖，调用
-`cmd display set-user-preferred-display-mode` 对齐 framework 分辨率组，等待 HWC 稳定后恢复覆盖；普通
-刷新率切换不会执行 `wm density`/`wm size`。
+跨 2K/1080p 时，事务直接根据目标分辨率和刷新率选择完整 HWC mode ID，调用
+SurfaceFlinger 切换并等待活动 mode 与宽度确认；不会读取、计算、写入或恢复 `wm density`/`wm size`。
+普通刷新率切换同样只走 HWC mode ID 和有序刷新阶梯。
 
 2026-08-08 实机闭环：
 
-- 1440x3136@160 (mode 11) -> @170 (mode 13)：活动 mode 正确变化，密度 560、尺寸覆盖保持不变。
-- 1440x3136@170 (mode 13) -> 1080x2352 组 (请求 mode 4/@144) -> 1440x3136@170：两次跨分辨率事务完成，密度仍为 560，尺寸恢复为对应物理分辨率。等待 3 秒后的 FHD active mode 被厂商策略改为 160Hz，因此这次测试只证明分辨率和密度闭环，不把 FHD 144Hz 记为持续锁定成功。
+- 1440x3136@160 (mode 11) -> @170 (mode 13)：活动 mode 正确变化，逻辑显示参数保持不变。
+- 1440x3136@170 (mode 13) -> 1080x2352 组 (请求 mode 4/@144) -> 1440x3136@170：两次跨分辨率事务完成，均由目标宽高/FPS 选择 mode ID。等待 3 秒后的 FHD active mode 被厂商策略改为 160Hz，因此这次测试只证明分辨率切换闭环，不把 FHD 144Hz 记为持续锁定成功。
 - 设备空闲时出现的 60Hz/低 LTPS 是厂商 ADFR 的空闲策略；不能用 SurfaceFlinger 的逻辑目标 mode 代替屏幕调试层的物理刷新率结论。
 
 复核 Qualcomm v7.2 计算器后发现，既有 175/180 表的 clock-lane trail 值误写为

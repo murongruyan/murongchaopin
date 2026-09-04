@@ -15,6 +15,11 @@ if not defined FOUND_NDK_ROOT (
     )
 )
 if not defined FOUND_NDK_ROOT (
+    if exist "C:\android-ndk-r27d-windows\android-ndk-r30-beta2\toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe" (
+        set "FOUND_NDK_ROOT=C:\android-ndk-r27d-windows\android-ndk-r30-beta2"
+    )
+)
+if not defined FOUND_NDK_ROOT (
     if exist "C:\android-ndk-r27d-windows\huanjing\android-ndk-r30-beta1\toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe" (
         set "FOUND_NDK_ROOT=C:\android-ndk-r27d-windows\huanjing\android-ndk-r30-beta1"
     )
@@ -36,37 +41,40 @@ if not defined FOUND_NDK_ROOT (
 )
 set "NDK_ROOT=%FOUND_NDK_ROOT%"
 set "CLANG=%NDK_ROOT%\toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe"
+set "PREMIUM_SOURCE=%PREMIUM_SOURCE%"
+if not defined PREMIUM_SOURCE set "PREMIUM_SOURCE=..\murongchaopin-premium\src\rate_daemon.c"
+if not exist "%PREMIUM_SOURCE%" (
+    echo Build failed! Premium daemon source not found: %PREMIUM_SOURCE%
+    echo Set PREMIUM_SOURCE to the checked-out Premium src\rate_daemon.c.
+    exit /b 1
+)
+if not exist "bin" mkdir "bin"
+if not exist "packaging\paid-payload\bin" mkdir "packaging\paid-payload\bin"
+if errorlevel 1 goto build_failed
+
+set "COMMON_FLAGS=--target=aarch64-linux-android30 -O3 -static"
 
 echo Compiling rate_daemon (free core build)...
 
 "%CLANG%" ^
-    --target=aarch64-linux-android30 ^
-    -O3 ^
-    -static ^
+    %COMMON_FLAGS% ^
     -DMURONG_FREE_BUILD ^
     src\rate_daemon.c ^
     -o bin\rate_daemon
 if errorlevel 1 goto build_failed
 
-if not exist "packaging\paid-payload\bin" mkdir "packaging\paid-payload\bin"
-if errorlevel 1 goto build_failed
-
 echo Compiling rate_daemon_premium (full build)...
 
 "%CLANG%" ^
-    --target=aarch64-linux-android30 ^
-    -O3 ^
-    -static ^
-    src\rate_daemon.c ^
+    %COMMON_FLAGS% ^
+    "%PREMIUM_SOURCE%" ^
     -o packaging\paid-payload\bin\rate_daemon_premium
 if errorlevel 1 goto build_failed
 
 echo Compiling dts_tool...
 
 "%CLANG%" ^
-    --target=aarch64-linux-android30 ^
-    -O3 ^
-    -static ^
+    %COMMON_FLAGS% ^
     src\dts_tool.c ^
     -o bin\dts_tool
 if errorlevel 1 goto build_failed

@@ -31,14 +31,21 @@ let appConfigs = {};
 let allPackages = [];
 let appLabels = {};
 let currentResolutionWidth = 1080;
+let globalModeWriteBusy = false;
 let currentDtsBackend = 'dtbo';
 let dtsBackendBusy = false;
 let adfrPolicyBusy = false;
 let displayPolicyProfile = 'rmx5200';
 let videoMotionEntries = [];
 let gameAssistantEntries = [];
+let gameAssistantFeatureConfig = {};
 let ocNodes = [];
 const nativeMemcRates = new Set([60, 90, 120, 144]);
+const gameAssistantFeatures = [
+    { key: 'frame', label: '插帧' },
+    { key: 'sr', label: '超分' },
+    { key: 'hqv', label: '超级 HDR' }
+];
 const labelQueue = [];
 let processingQueue = false;
 let activeTabId = 'tab-oc';
@@ -264,17 +271,54 @@ function formatEpoch(epoch) {
 
 function resolutionWidth(token) {
     const value = String(token || '').toUpperCase();
-    if (value === 'FHD+' || value === 'FHD' || value === '1080P' || value === '1080') return 1080;
-    if (value === 'QHD+' || value === 'QHD' || value === '2K' || value === '1440') return 1440;
+    const widths = [...new Set(displayModes.map(mode => Number(mode.width)).filter(width => width > 0))].sort((left, right) => left - right);
+    if (value === 'FHD+' || value === 'FHD' || value === '1080P' || value === '1080') return widths[0] || 1080;
+    if (value === 'QHD+' || value === 'QHD' || value === '2K' || value === '1440') return widths[widths.length - 1] || 1440;
+    const match = value.match(/^(\d+)X(\d+)$/);
+    if (match) return Number(match[1]);
     return -1;
 }
 
-function resolutionLabel(width) {
-    return Number(width) >= 1200 ? '2K (QHD+)' : '1080P (FHD+)';
+function resolutionHeight(token) {
+    const value = String(token || '').toUpperCase();
+    const match = value.match(/^(\d+)X(\d+)$/);
+    if (match) return Number(match[2]);
+    const width = resolutionWidth(value);
+    const mode = displayModes.find(item => item.width === width);
+    return mode ? mode.height : -1;
 }
 
-function modeForChoice(width, fps) {
-    return displayModes.find(mode => mode.width === Number(width) && mode.fps === Number(fps));
+function resolutionLabel(width, height) {
+    const numericWidth = Number(width);
+    const numericHeight = Number(height) || (displayModes.find(mode => mode.width === numericWidth) || {}).height;
+    const widths = [...new Set(displayModes.map(mode => Number(mode.width)).filter(value => value > 0))].sort((left, right) => left - right);
+    if (numericHeight > 0 && numericWidth !== 1080 && numericWidth !== 1440 &&
+        numericWidth !== widths[0] && numericWidth !== widths[widths.length - 1]) {
+        return `${numericWidth}x${numericHeight}`;
+    }
+    if (numericWidth === widths[widths.length - 1] && widths.length > 1) return '2K (QHD+)';
+    if (numericWidth === widths[0] && widths.length > 1) return '1080P (FHD+)';
+    return numericWidth >= 1200 ? '2K (QHD+)' : '1080P (FHD+)';
+}
+
+function availableResolutionWidths() {
+    return [...new Set(displayModes.map(mode => Number(mode.width)).filter(width => width > 0))]
+        .sort((left, right) => left - right);
+}
+
+function effectiveResolutionWidth(value) {
+    const widths = availableResolutionWidths();
+    const numericWidth = Number(value);
+    if (widths.includes(numericWidth)) return numericWidth;
+    if (numericWidth === 1080) return widths[0] || numericWidth;
+    if (numericWidth === 1440) return widths[widths.length - 1] || numericWidth;
+    return numericWidth;
+}
+
+function modeForChoice(width, fps, height) {
+    const numericHeight = Number(height);
+    return displayModes.find(mode => mode.width === Number(width) &&
+        mode.fps === Number(fps) && (!numericHeight || mode.height === numericHeight));
 }
 
 function parseModeChoice(text, fallbackWidth) {
@@ -288,13 +332,14 @@ function parseModeChoice(text, fallbackWidth) {
     const fields = value.split(/\s+/);
     if (fields.length >= 2) {
         const width = resolutionWidth(fields[0]);
+        const height = resolutionHeight(fields[0]);
         const fps = Number(fields[1]);
-        const mode = modeForChoice(width, fps);
-        return { modeId: mode ? mode.id : -1, width, fps };
+        const mode = modeForChoice(width, fps, height);
+        return { modeId: mode ? mode.id : -1, width, height: mode ? mode.height : height, fps };
     }
     const fps = Number(fields[0]);
     const mode = modeForChoice(fallbackWidth, fps);
-    return { modeId: mode ? mode.id : -1, width: Number(fallbackWidth), fps };
+    return { modeId: mode ? mode.id : -1, width: Number(fallbackWidth), height: mode ? mode.height : -1, fps };
 }
 
 function isFlashSuccess(result) {
@@ -2676,12 +2721,13 @@ async function loadVideoMotionConfig() {
         element.hidden = !memcSupported;
     });
     try {
-        const [result, appsResult, gameAssistantResult] = await Promise.all([
+        const [result, appsResult, gameAssistantAppsResult, gameAssistantConfigResult] = await Promise.all([
             memcSupported ? ksuExec(`sh "${scriptPath}" get_video_motion_config`, true) : Promise.resolve(''),
             memcSupported ? ksuExec(`sh "${scriptPath}" get_video_motion_apps`, true) : Promise.resolve(''),
-            ksuExec(`sh "${scriptPath}" get_game_assistant_apps`, true)
+            ksuExec(`sh "${scriptPath}" get_game_assistant_apps`, true),
+            ksuExec(`sh "${scriptPath}" get_game_assistant_config`, true)
         ]);
-        parseGameAssistantApps(gameAssistantResult);
+        parseGameAssistantConfig(gameAssistantConfigResult, gameAssistantAppsResult);
         if (!memcSupported) return;
         const values = {};
         result.split(/\r?\n/).forEach(line => {
@@ -2723,11 +2769,73 @@ async function loadVideoMotionConfig() {
     }
 }
 
-function parseGameAssistantApps(result) {
-    gameAssistantEntries = String(result || '').split(/\r?\n/)
-        .map(value => value.trim())
-        .filter(value => /^[A-Za-z0-9._]+\.[A-Za-z0-9._]+$/.test(value));
+function gameAssistantPackageValid(packageName) {
+    return /^[A-Za-z0-9._]+\.[A-Za-z0-9._]+$/.test(packageName || '');
+}
+
+function normalizeGameAssistantFeatures(value) {
+    const validKeys = new Set(gameAssistantFeatures.map(feature => feature.key));
+    return [...new Set(String(value || '').split(',')
+        .map(feature => feature.trim())
+        .filter(feature => validKeys.has(feature)))];
+}
+
+function defaultGameAssistantFeatures(packageName) {
+    if (packageName === 'com.yyzy.nearme.gamecenter') return ['hqv'];
+    return gameAssistantFeatures.map(feature => feature.key);
+}
+
+function featuresForGameAssistantPackage(packageName) {
+    if (Object.prototype.hasOwnProperty.call(gameAssistantFeatureConfig, packageName)) {
+        return gameAssistantFeatureConfig[packageName].slice();
+    }
+    return defaultGameAssistantFeatures(packageName);
+}
+
+function gameAssistantFeatureLabels(features) {
+    const labels = new Map(gameAssistantFeatures.map(feature => [feature.key, feature.label]));
+    return features.map(feature => labels.get(feature) || feature);
+}
+
+function renderGameAssistantFeatureControls(packageName) {
+    const controls = document.getElementById('game-assistant-feature-controls');
+    if (!controls) return;
+    const selected = new Set(featuresForGameAssistantPackage(packageName));
+    controls.hidden = !gameAssistantPackageValid(packageName);
+    controls.querySelectorAll('[data-game-feature]').forEach(input => {
+        input.checked = selected.has(input.dataset.gameFeature);
+        input.disabled = !gameAssistantPackageValid(packageName);
+    });
+    const hint = document.getElementById('game-assistant-feature-hint');
+    if (hint && gameAssistantPackageValid(packageName)) {
+        const labels = gameAssistantFeatureLabels([...selected]);
+        hint.innerText = labels.length
+            ? `将接管：${labels.join('、')}。游戏自身已有的功能请关闭对应开关。`
+            : '当前不接管任何游戏助手增强功能。';
+    }
+}
+
+function parseGameAssistantConfig(result, fallbackResult = '') {
+    gameAssistantEntries = [];
+    gameAssistantFeatureConfig = {};
+    String(result || '').split(/\r?\n/).forEach(line => {
+        const separator = line.indexOf('|');
+        const packageName = (separator >= 0 ? line.slice(0, separator) : line).trim();
+        if (!gameAssistantPackageValid(packageName)) return;
+        const features = separator >= 0 ? line.slice(separator + 1).trim() : '';
+        gameAssistantEntries.push(packageName);
+        gameAssistantFeatureConfig[packageName] = normalizeGameAssistantFeatures(features);
+    });
+    String(fallbackResult || '').split(/\r?\n/).forEach(value => {
+        const packageName = value.trim();
+        if (!gameAssistantPackageValid(packageName) || gameAssistantEntries.includes(packageName)) return;
+        gameAssistantEntries.push(packageName);
+    });
     renderGameAssistantApps();
+}
+
+function parseGameAssistantApps(result) {
+    parseGameAssistantConfig('', result);
 }
 
 function renderGameAssistantApps() {
@@ -2748,7 +2856,13 @@ function renderGameAssistantApps() {
         const meta = document.createElement('div');
         meta.className = 'video-app-meta';
         meta.innerText = packageName;
-        info.append(name, meta);
+        const features = document.createElement('div');
+        features.className = 'game-assistant-feature-tags';
+        const selected = featuresForGameAssistantPackage(packageName);
+        features.innerText = selected.length
+            ? `接管：${gameAssistantFeatureLabels(selected).join('、')}`
+            : '未接管功能';
+        info.append(name, meta, features);
         const remove = document.createElement('button');
         remove.type = 'button';
         remove.className = 'icon-btn danger';
@@ -2767,6 +2881,7 @@ function setGameAssistantPickerValue(packageName) {
     picker.dataset.value = packageName || '';
     label.innerText = packageName
         ? `${appLabels[packageName] || packageName} · ${packageName}` : '选择应用';
+    renderGameAssistantFeatureControls(packageName);
 }
 
 async function openGameAssistantAppPicker() {
@@ -2810,12 +2925,15 @@ async function saveGameAssistantApp() {
     if (!isPremium()) { openAuthPanel(); return; }
     const picker = document.getElementById('game-assistant-picker');
     const packageName = picker?.dataset.value || '';
-    if (!/^[A-Za-z0-9._]+\.[A-Za-z0-9._]+$/.test(packageName)) {
+    if (!gameAssistantPackageValid(packageName)) {
         showToast('请先选择已安装应用');
         return;
     }
+    const selectedFeatures = [...document.querySelectorAll('[data-game-feature]:checked')]
+        .map(input => input.dataset.gameFeature)
+        .filter(Boolean);
     const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
-    const result = await ksuExec(`sh "${scriptPath}" add_game_assistant_app ${shellQuote(packageName)}`);
+    const result = await ksuExec(`sh "${scriptPath}" add_game_assistant_app ${shellQuote(packageName)} ${shellQuote(selectedFeatures.join(','))}`);
     if (!result.includes('Success:')) {
         showToast(result || '授权游戏增强失败');
         return;
@@ -3195,6 +3313,14 @@ async function rebootForVideoMotionConfig() {
 // ============================================================
 // 超频页：系统状态 / 显示策略 / 自定义超频
 // ============================================================
+function formatDisplayRefreshRate(value) {
+    const numeric = Number.parseFloat(String(value ?? '').trim());
+    if (!Number.isFinite(numeric)) return value || '未知';
+    const nearestInteger = Math.round(numeric);
+    if (Math.abs(numeric - nearestInteger) < 0.01) return String(nearestInteger);
+    return numeric.toFixed(1).replace(/\.0$/, '');
+}
+
 async function loadSystemStatus() {
     const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
     const backupBadge = document.getElementById('sys-backup');
@@ -3214,7 +3340,7 @@ async function loadSystemStatus() {
         const fpsEl = document.getElementById('sys-fps');
         const modelEl = document.getElementById('sys-model');
         if (slotEl) slotEl.innerText = values.slot || '未知';
-        if (fpsEl) fpsEl.innerText = values.fps || '未知';
+        if (fpsEl) fpsEl.innerText = formatDisplayRefreshRate(values.fps);
         if (modelEl) modelEl.innerText = values.model || 'Unknown';
         const checkBackup = values.backup || '';
         if (backupBadge && restoreBtn) {
@@ -3886,22 +4012,40 @@ async function uninstallModule() {
 // ============================================================
 // 刷新率页：分辨率 / 模式 / 应用独立配置
 // ============================================================
-function changeResolution(width) {
-    currentResolutionWidth = Number(width) === 1440 ? 1440 : 1080;
+async function changeResolution(width) {
+    if (globalModeWriteBusy) {
+        showToast("正在切换，请稍候");
+        return;
+    }
+    const numericWidth = Number(width);
+    if (!Number.isInteger(numericWidth) || numericWidth <= 0) return;
+    const previousWidth = currentResolutionWidth;
+    const previousMode = currentMode;
+    const previousModeObj = displayModes.find(mode => mode.id === previousMode);
+    const targetWidth = effectiveResolutionWidth(numericWidth);
+    currentResolutionWidth = targetWidth;
     renderResolutionSeg();
-    const current = displayModes.find(mode => mode.id === currentMode);
-    const preferred = current && current.width === currentResolutionWidth
-        ? current.fps : 120;
+    const preferred = previousModeObj && previousModeObj.fps >= 30
+        ? previousModeObj.fps : 120;
     const target = modeForChoice(currentResolutionWidth, preferred)
         || displayModes.find(mode => mode.width === currentResolutionWidth);
     currentMode = target ? target.id : -1;
     renderDisplayModes();
+    if (currentMode === -1) {
+        currentResolutionWidth = previousWidth;
+        currentMode = previousMode;
+        renderResolutionSeg();
+        renderDisplayModes();
+        showToast("该分辨率下无可用模式");
+        return;
+    }
+    await commitGlobalMode(previousMode, previousWidth, true);
 }
 
 function renderResolutionSeg() {
     ['1080', '1440'].forEach(w => {
         const btn = document.getElementById(`btn-res-${w}`);
-        if (btn) btn.classList.toggle('active', currentResolutionWidth === Number(w));
+        if (btn) btn.classList.toggle('active', currentResolutionWidth === effectiveResolutionWidth(Number(w)));
     });
 }
 
@@ -3930,9 +4074,11 @@ async function loadDisplayModes() {
                 if (!idMatch) return;
                 const id = parseInt(idMatch[1]);
                 const resMatch = line.match(/resolution=(\d+)x(\d+)/);
-                if (!resMatch) return;
-                const width = parseInt(resMatch[1]);
-                const height = parseInt(resMatch[2]);
+                const widthMatch = line.match(/width=(\d+)/);
+                const heightMatch = line.match(/height=(\d+)/);
+                if (!resMatch && (!widthMatch || !heightMatch)) return;
+                const width = parseInt(resMatch ? resMatch[1] : widthMatch[1]);
+                const height = parseInt(resMatch ? resMatch[2] : heightMatch[1]);
                 const fpsMatch = line.match(/vsyncRate=([0-9.]+)/);
                 if (!fpsMatch) return;
                 const rawFps = parseFloat(fpsMatch[1]);
@@ -3949,7 +4095,7 @@ async function loadDisplayModes() {
 
     const configRaw = await ksuExec(`cat "${CONFIG_FILE}"`);
     const configLines = configRaw.split('\n');
-    const globalChoice = parseModeChoice(configLines[0], 1440);
+    const globalChoice = parseModeChoice(configLines[0], displayModes.length ? displayModes[0].width : 1440);
     const globalModeId = globalChoice.modeId;
 
     appConfigs = {};
@@ -3960,7 +4106,7 @@ async function loadDisplayModes() {
             const eq = line.indexOf('=');
             const pkg = line.slice(0, eq);
             const choice = parseModeChoice(line.slice(eq + 1), globalChoice.width);
-            appConfigs[pkg] = { modeId: choice.modeId, width: choice.width, fps: choice.fps };
+            appConfigs[pkg] = { modeId: choice.modeId, width: choice.width, height: choice.height, fps: choice.fps };
             continue;
         }
         const fields = line.split(/\s+/);
@@ -3968,7 +4114,7 @@ async function loadDisplayModes() {
         const pkg = fields[0];
         const choice = parseModeChoice(fields.slice(1).join(' '), globalChoice.width);
         if (choice.fps >= 30) {
-            appConfigs[pkg] = { modeId: choice.modeId, width: choice.width, fps: choice.fps };
+            appConfigs[pkg] = { modeId: choice.modeId, width: choice.width, height: choice.height, fps: choice.fps };
         }
     }
 
@@ -4040,24 +4186,50 @@ function renderDisplayModes() {
 }
 
 function selectMode(id) {
+    if (globalModeWriteBusy) {
+        showToast("正在切换，请稍候");
+        return;
+    }
+    const previousMode = currentMode;
+    const previousWidth = currentResolutionWidth;
     currentMode = id;
     renderDisplayModes();
+    commitGlobalMode(previousMode, previousWidth, false);
 }
 
-async function saveGlobalMode() {
+async function commitGlobalMode(previousMode = currentMode,
+                               previousWidth = currentResolutionWidth,
+                               resolutionChange = false) {
     if (currentMode === -1) {
         showToast("请先选择一个模式");
         return;
     }
-    showToast("正在保存全局模式…");
+    if (globalModeWriteBusy) return;
+    globalModeWriteBusy = true;
+    const requestedMode = currentMode;
+    showToast(resolutionChange ? "正在切换分辨率…" : "正在切换刷新率…");
     const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
-    const result = await ksuExec(`sh "${scriptPath}" set_config "${currentMode}"`);
-    if (result.includes("Success")) {
-        showToast("保存成功！");
-        await loadDisplayModes();
-    } else {
-        showToast("保存失败：" + result);
+    try {
+        const command = resolutionChange ? 'set_resolution_config' : 'set_config';
+        const result = await ksuExec(`sh "${scriptPath}" ${command} "${requestedMode}"`);
+        if (result.includes("Success")) {
+            appliedMode = requestedMode;
+            showToast(resolutionChange ? "分辨率切换已提交" : "刷新率切换已提交");
+            await loadDisplayModes();
+        } else {
+            currentMode = previousMode;
+            currentResolutionWidth = previousWidth;
+            renderResolutionSeg();
+            renderDisplayModes();
+            showToast("切换失败：" + result);
+        }
+    } finally {
+        globalModeWriteBusy = false;
     }
+}
+
+async function saveGlobalMode() {
+    return commitGlobalMode();
 }
 
 async function refreshAppliedMode() {
@@ -4379,7 +4551,9 @@ async function openAppConfigDialog(pkg) {
     const body = document.createElement('div');
     body.className = 'app-mode-picker';
 
-    const effectiveWidth = () => resolution === 'default' ? currentResolutionWidth : Number(resolution);
+    const effectiveWidth = () => resolution === 'default'
+        ? currentResolutionWidth
+        : effectiveResolutionWidth(resolution);
     const availableRates = () => Array.from(new Set(displayModes
         .filter(mode => mode.width === effectiveWidth())
         .map(mode => Number(mode.fps))))
@@ -4389,14 +4563,21 @@ async function openAppConfigDialog(pkg) {
     const renderPicker = () => {
         const width = effectiveWidth();
         const rates = availableRates();
+        const resolutionWidths = availableResolutionWidths();
+        const minimumWidth = resolutionWidths[0];
+        const maximumWidth = resolutionWidths[resolutionWidths.length - 1];
         if (fps >= 30 && !rates.includes(fps)) fps = -1;
         body.innerHTML = `
             <div class="picker-section">
                 <div class="picker-title"><span>分辨率</span><small>${resolution === 'default' ? '继承全局' : '独立设置'}</small></div>
                 <div class="seg seg-3 app-resolution-seg">
                     <button class="seg-btn${resolution === 'default' ? ' active' : ''}" type="button" data-resolution="default">跟随全局</button>
-                    <button class="seg-btn${resolution === '1080' ? ' active' : ''}" type="button" data-resolution="1080">FHD+</button>
-                    <button class="seg-btn${resolution === '1440' ? ' active' : ''}" type="button" data-resolution="1440">QHD+</button>
+                    ${resolutionWidths.map(value => {
+                        const mode = displayModes.find(item => item.width === value);
+                        const label = value === minimumWidth && minimumWidth !== maximumWidth
+                            ? 'FHD+' : value === maximumWidth ? 'QHD+' : `${value}x${mode ? mode.height : ''}`;
+                        return `<button class="seg-btn${resolution === String(value) ? ' active' : ''}" type="button" data-resolution="${value}">${label}</button>`;
+                    }).join('')}
                 </div>
             </div>
             <div class="picker-section">
@@ -4449,8 +4630,8 @@ async function saveAppConfig(pkg, modeId, resolution) {
     showToast(`正在保存 ${pkg} 配置…`);
     const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
     const mode = displayModes.find(item => item.id === Number(modeId));
-    const resolutionArg = resolution && resolution !== 'default'
-        ? (resolutionLabel(Number(resolution)).startsWith('2K') ? 'QHD+' : 'FHD+')
+    const resolutionArg = resolution && resolution !== 'default' && mode
+        ? `${mode.width}x${mode.height}`
         : 'default';
     const result = await ksuExec(`sh "${scriptPath}" set_app_config "${pkg}" "${modeId}" "${resolutionArg}"`);
     if (result.includes("Success")) {
@@ -4460,7 +4641,8 @@ async function saveAppConfig(pkg, modeId, resolution) {
         } else {
             appConfigs[pkg] = {
                 modeId: Number(modeId),
-                width: resolutionArg === 'QHD+' ? 1440 : resolutionArg === 'FHD+' ? 1080 : null,
+                width: mode ? mode.width : null,
+                height: mode ? mode.height : null,
                 fps: mode ? mode.fps : -1
             };
         }
@@ -4543,7 +4725,6 @@ function bindStaticEvents() {
     safeBind('btn-add-rate', 'onclick', openAddRateDialog);
     safeBind('btn-res-1080', 'onclick', () => changeResolution(1080));
     safeBind('btn-res-1440', 'onclick', () => changeResolution(1440));
-    safeBind('btn-save-global', 'onclick', saveGlobalMode);
     safeBind('app-search', 'oninput', filterAppList);
     safeBind('show-system-apps', 'onchange', toggleSystemApps);
     safeBind('btn-save-video-target', 'onclick', saveVideoMotionTarget);

@@ -153,9 +153,6 @@
                         </div>
                     </div>
                 </div>
-                <button id="btn-save-global" class="fab-save" type="button" aria-label="保存全局模式" title="保存全局模式">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
-                </button>
             </section>
 
             <!-- ============ 插帧 ============ -->
@@ -258,6 +255,27 @@
                                         <span id="game-assistant-picker-label" class="selection-text">选择应用</span>
                                         <span class="selection-chevron" aria-hidden="true"></span>
                                     </button>
+                                </div>
+                                <div id="game-assistant-feature-controls" class="game-assistant-feature-controls" hidden>
+                                    <div class="form-label">游戏助手接管功能</div>
+                                    <div class="game-assistant-feature-grid" role="group" aria-label="游戏助手接管功能">
+                                        <label class="switch-control game-assistant-feature-option">
+                                            <input type="checkbox" data-game-feature="frame">
+                                            <span class="switch-track" aria-hidden="true"><span></span></span>
+                                            <span>插帧</span>
+                                        </label>
+                                        <label class="switch-control game-assistant-feature-option">
+                                            <input type="checkbox" data-game-feature="sr">
+                                            <span class="switch-track" aria-hidden="true"><span></span></span>
+                                            <span>超分</span>
+                                        </label>
+                                        <label class="switch-control game-assistant-feature-option">
+                                            <input type="checkbox" data-game-feature="hqv">
+                                            <span class="switch-track" aria-hidden="true"><span></span></span>
+                                            <span>超级 HDR</span>
+                                        </label>
+                                    </div>
+                                    <p id="game-assistant-feature-hint" class="text-hint">请选择要由游戏助手接管的功能。</p>
                                 </div>
                                 <button id="btn-save-game-assistant-app" class="btn btn-primary btn-block" type="button">授权游戏增强</button>
                                 <div id="game-assistant-app-list" class="video-app-list">

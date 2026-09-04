@@ -48,8 +48,13 @@ read_mode_id() {
     esac
     set -- $line
     [ "$#" -eq 2 ] || return 1
-    width=$(resolution_width_for_token "$1") || return 1
-    height=$(height_for_width "$width") || return 1
+    if printf '%s\n' "$1" | grep -q 'x'; then
+        width=$(printf '%s\n' "$1" | sed -n 's/^\([0-9][0-9]*\)x[0-9][0-9]*$/\1/p')
+        height=$(printf '%s\n' "$1" | sed -n 's/^[0-9][0-9]*x\([0-9][0-9]*\)$/\1/p')
+    else
+        width=$(resolution_width_for_token "$1") || return 1
+        height=$(height_for_width "$width") || return 1
+    fi
     mode_for_spec "$width" "$height" "$2"
 }
 
@@ -69,9 +74,9 @@ height_for_width() {
 
 resolution_width_for_token() {
     case "$1" in
-        FHD+|FHD|1080P|1080p)
+        FHD+|FHD|1080P|1080p|1080)
             display_widths | head -n 1 ;;
-        QHD+|QHD|2K|2k)
+        QHD+|QHD|2K|2k|1440)
             display_widths | tail -n 1 ;;
         *x*)
             printf '%s\n' "$1" | sed -n 's/^\([0-9][0-9]*\)x[0-9][0-9]*$/\1/p' ;;
@@ -116,6 +121,98 @@ mode_for_spec() {
             printf '%s\n' "$id"
             break
         fi
+    done
+}
+
+mode_config_line() {
+    target_id=$1
+    prefix=$2
+    spec=$(mode_spec "$target_id") || return 1
+    set -- $spec
+    if [ -n "$prefix" ]; then
+        printf '%s %sx%s %s\n' "$prefix" "$1" "$2" "$3"
+    else
+        printf '%sx%s %s\n' "$1" "$2" "$3"
+    fi
+}
+
+app_mode_id() {
+    package_name=$1
+    valid_package "$package_name" || return 1
+    line=$(awk -v package="$package_name" \
+        '$1 == package || $0 ~ ("^" package "=") { print; exit }' \
+        "$CONFIG_FILE" 2>/dev/null)
+    [ -n "$line" ] || return 1
+    line=$(printf '%s\n' "$line" | tr -d '\r' | sed 's/=/ /')
+    set -- $line
+    [ "$#" -ge 2 ] || return 1
+    if [ "$#" -ge 3 ]; then
+        if printf '%s\n' "$2" | grep -q 'x'; then
+            width=$(printf '%s\n' "$2" | sed -n 's/^\([0-9][0-9]*\)x[0-9][0-9]*$/\1/p')
+            height=$(printf '%s\n' "$2" | sed -n 's/^[0-9][0-9]*x\([0-9][0-9]*\)$/\1/p')
+        else
+            width=$(resolution_width_for_token "$2") || return 1
+            height=$(height_for_width "$width") || return 1
+        fi
+        mode_for_spec "$width" "$height" "$3"
+        return $?
+    fi
+    valid_number "$2" || return 1
+    app_fps=$2
+    if [ "$app_fps" -ge 30 ] 2>/dev/null; then
+        global_spec=$(mode_config_line "$(read_mode_id)") || return 1
+        set -- $global_spec
+        width=$(printf '%s\n' "$1" | sed 's/x[0-9][0-9]*$//')
+        height=$(printf '%s\n' "$1" | sed 's/^[0-9][0-9]*x//')
+        mode_for_spec "$width" "$height" "$app_fps"
+        return $?
+    fi
+    printf '%s\n' "$2"
+}
+
+canonical_app_line() {
+    line=$(printf '%s\n' "$1" | tr -d '\r' | sed 's/=/ /')
+    set -- $line
+    [ "$#" -ge 2 ] || return 1
+    package_name=$1
+    valid_package "$package_name" || return 1
+    if [ "$#" -ge 3 ]; then
+        if printf '%s\n' "$2" | grep -q 'x'; then
+            width=$(printf '%s\n' "$2" | sed -n 's/^\([0-9][0-9]*\)x[0-9][0-9]*$/\1/p')
+            height=$(printf '%s\n' "$2" | sed -n 's/^[0-9][0-9]*x\([0-9][0-9]*\)$/\1/p')
+        else
+            width=$(resolution_width_for_token "$2") || return 1
+            height=$(height_for_width "$width") || return 1
+        fi
+        target_id=$(mode_for_spec "$width" "$height" "$3") || return 1
+    else
+        valid_number "$2" || return 1
+        app_fps=$2
+        if [ "$app_fps" -ge 30 ] 2>/dev/null; then
+            global_spec=$(mode_config_line "$(read_mode_id)") || return 1
+            set -- $global_spec
+            width=$(printf '%s\n' "$1" | sed 's/x[0-9][0-9]*$//')
+            height=$(printf '%s\n' "$1" | sed 's/^[0-9][0-9]*x//')
+            target_id=$(mode_for_spec "$width" "$height" "$app_fps") || return 1
+        else
+            target_id=$2
+        fi
+    fi
+    mode_config_line "$target_id" "$package_name"
+}
+
+canonical_app_configs() {
+    excluded_package=$1
+    [ -f "$CONFIG_FILE" ] || return 0
+    tail -n +2 "$CONFIG_FILE" 2>/dev/null | while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ''|'#*') continue ;;
+        esac
+        canonical=$(canonical_app_line "$line") || continue
+        case "$canonical" in
+            "$excluded_package "*) continue ;;
+        esac
+        printf '%s\n' "$canonical"
     done
 }
 
@@ -166,31 +263,13 @@ resolution_adjust_for_width() {
     return 1
 }
 
-resolution_token_for_width() {
-    min_width=$(display_widths | head -n 1)
-    max_width=$(display_widths | tail -n 1)
-    [ -n "$min_width" ] && [ -n "$max_width" ] || return 1
-    if [ "$min_width" != "$max_width" ] && [ "$1" = "$min_width" ]; then
-        printf '%s\n' FHD+
-    elif [ "$1" = "$max_width" ]; then
-        printf '%s\n' QHD+
-    else
-        height_for_width "$1" | sed "s/^/${1}x/"
-    fi
-}
-
 write_global_mode() {
     target_id=$1
     valid_number "$target_id" || return 1
-    current=$(read_mode_id)
-    [ "$current" = "$target_id" ] && return 0
     tmp="$CONFIG_FILE.settings-bridge.$$"
-    spec=$(mode_spec "$target_id") || return 1
-    set -- $spec
-    token=$(resolution_token_for_width "$1") || return 1
     {
-        printf '%s %s\n' "$token" "$3"
-        tail -n +2 "$CONFIG_FILE" 2>/dev/null
+        mode_config_line "$target_id"
+        canonical_app_configs
     } > "$tmp" || return 1
     mv "$tmp" "$CONFIG_FILE" || return 1
     chmod 0666 "$CONFIG_FILE" 2>/dev/null || true
@@ -201,15 +280,13 @@ write_app_mode() {
     package_name=$1
     target_id=$2
     valid_package "$package_name" && valid_number "$target_id" || return 1
-    current=$(sed -n "s/^$package_name=\([0-9][0-9]*\)$/\1/p" "$CONFIG_FILE" 2>/dev/null | head -n 1)
-    [ "$current" = "$target_id" ] && return 0
     global_mode=$(read_mode_id)
     valid_number "$global_mode" || return 1
     tmp="$CONFIG_FILE.settings-bridge.$$"
     {
-        printf '%s\n' "$global_mode"
-        tail -n +2 "$CONFIG_FILE" 2>/dev/null | grep -v "^$package_name="
-        printf '%s=%s\n' "$package_name" "$target_id"
+        mode_config_line "$global_mode"
+        canonical_app_configs "$package_name"
+        mode_config_line "$target_id" "$package_name"
     } > "$tmp" || return 1
     mv "$tmp" "$CONFIG_FILE" || return 1
     chmod 0666 "$CONFIG_FILE" 2>/dev/null || true
@@ -304,7 +381,7 @@ pull_apps_from_settings() {
     run_api dump 2>/dev/null | while IFS='=' read -r package_name setting_mode; do
         valid_package "$package_name" || continue
         desired_fps=$(fps_for_settings_mode "$setting_mode") || continue
-        existing_id=$(sed -n "s/^$package_name=\([0-9][0-9]*\)$/\1/p" "$CONFIG_FILE" 2>/dev/null | head -n 1)
+        existing_id=$(app_mode_id "$package_name" 2>/dev/null)
         preserved_fps=$(preserved_fps_for_settings_mode "$existing_id" "$setting_mode" 2>/dev/null) || preserved_fps=
         if valid_number "$preserved_fps"; then
             target_id=$existing_id

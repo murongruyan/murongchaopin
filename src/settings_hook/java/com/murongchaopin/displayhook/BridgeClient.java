@@ -4,7 +4,6 @@ import android.content.Context;
 import android.hardware.display.DisplayManager;
 import android.os.Looper;
 import android.os.SystemClock;
-import android.provider.Settings;
 import android.view.Display;
 
 import java.io.BufferedReader;
@@ -174,11 +173,11 @@ final class BridgeClient {
         return request("SETGLOBAL " + fps, MODE_TIMEOUT_MS).startsWith("OK ");
     }
 
-    static boolean setGlobalResolution(int width, int density) {
-        if (!validDisplayGeometry(width, density)) {
+    static boolean setGlobalResolution(int width) {
+        if (!validDisplayWidth(width)) {
             return false;
         }
-        return request("SETRES " + width + " " + density, RESOLUTION_TIMEOUT_MS)
+        return request("SETRES " + width, RESOLUTION_TIMEOUT_MS)
                 .startsWith("OK ");
     }
 
@@ -190,22 +189,22 @@ final class BridgeClient {
     }
 
     static boolean adoptGlobalResolution(int targetWidth, int sourceWidth,
-                                         int sourceDensity, long generation) {
-        if (!validDisplayGeometry(targetWidth, sourceDensity)
-                || sourceWidth < 480 || sourceWidth > 10000
+                                         long generation) {
+        if (!validDisplayWidth(targetWidth)
+                || !validDisplayWidth(sourceWidth)
                 || generation <= 0) {
             return false;
         }
         return request("ADOPTRES " + targetWidth + " " + sourceWidth + " "
-                        + sourceDensity + " " + generation,
+                        + generation,
                 RESOLUTION_TIMEOUT_MS).startsWith("OK ");
     }
 
-    static boolean setGlobalMode(int width, int fps, int density) {
-        if (!validDisplayGeometry(width, density) || fps < 30 || fps > 1000) {
+    static boolean setGlobalMode(int width, int fps) {
+        if (!validDisplayWidth(width) || fps < 30 || fps > 1000) {
             return false;
         }
-        return request("SETMODE " + width + " " + fps + " " + density,
+        return request("SETMODE " + width + " " + fps,
                 RESOLUTION_TIMEOUT_MS)
                 .startsWith("OK ");
     }
@@ -242,15 +241,6 @@ final class BridgeClient {
     static int displayWidth(Context context) {
         Display display = defaultDisplay(context);
         return display == null ? -1 : display.getMode().getPhysicalWidth();
-    }
-
-    static int displayDensity(Context context) {
-        if (context == null) {
-            return -1;
-        }
-        int resourceDensity = context.getResources().getDisplayMetrics().densityDpi;
-        return Settings.Secure.getInt(context.getContentResolver(),
-                "display_density_forced", resourceDensity);
     }
 
     static boolean setGlobalAuto() {
@@ -484,7 +474,7 @@ final class BridgeClient {
         return manager == null ? null : manager.getDisplay(Display.DEFAULT_DISPLAY);
     }
 
-    private static boolean validDisplayGeometry(int width, int density) {
-        return width >= 480 && width <= 10000 && density >= 72 && density <= 2000;
+    private static boolean validDisplayWidth(int width) {
+        return width >= 480 && width <= 10000;
     }
 }

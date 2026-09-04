@@ -26,6 +26,10 @@
 #define MAX_APPS 200
 #define MAX_PKG_LEN 128
 #define MAX_EXTENSION_RATES 256
+#define RATE_DAEMON_VERSION "2.9.22"
+#define BOOT_RESOLUTION_SETTLE_TIMEOUT_MS 8000
+#define BOOT_RESOLUTION_SETTLE_SAMPLE_MS 150
+#define BOOT_RESOLUTION_SETTLE_SAMPLES 4
 #define DISPLAY_HOOK_PORT 49721
 #define NATIVE_RESOLUTION_PHYSICAL_FALLBACK_MS 250
 #define RMX5200_IRIS_ESD_CTRL_PATH "/sys/kernel/iris/esd"
@@ -106,42 +110,17 @@ typedef struct {
 } AppConfig;
 
 typedef struct {
-    int density;
-    int density_valid;
-    int size_width;
-    int size_height;
-    int size_valid;
-} DisplayOverrideState;
-
-typedef struct {
-    int resolution_adjust;
-    int resolution_adjust_valid;
-    int screen_index;
-    int screen_index_valid;
-    int preferred_width;
-    int preferred_height;
-    int preferred_resolution_valid;
-    int refresh_rate_mode;
-    int refresh_rate_mode_valid;
-} ColorOsSettingsState;
-
-typedef struct {
     int valid;
     int target_width;
-    int target_density;
     int previous_mode_id;
     int previous_width;
     long long expires_at_ms;
-    DisplayOverrideState display_before;
-    ColorOsSettingsState coloros_before;
 } PreparedResolutionState;
 
 typedef struct {
     int valid;
     int target_width;
     int source_width;
-    int source_density;
-    int target_density;
     long long generation;
     long long queued_at_ms;
     long long target_observed_at_ms;
@@ -206,8 +185,6 @@ static int scene_uid = -1;
 static int bilibili_uid = -1;
 static int system_uid = -1;
 static char device_model[32] = "unknown";
-static int pending_density_mode_id = -1;
-static int pending_density = -1;
 static PreparedResolutionState prepared_resolution;
 static NativeResolutionAdoption native_resolution_adoption;
 static int video_override_active = 0;
@@ -258,6 +235,7 @@ static int extension_rate_count = 0;
 
 // Function Prototypes
 void sync_android_settings(int id);
+static void sync_android_resolution_settings(int id);
 void smooth_switch(int target_id);
 int get_mode_width(int id);
 static int mode_height(int mode_id);
@@ -268,25 +246,18 @@ int get_current_system_mode(void);
 static int get_current_applied_mode(void);
 
 static int apply_mode_transaction(int target_id, int resolution_change,
-                                  int target_density);
-static void snapshot_display_overrides(DisplayOverrideState *state);
-static void restore_size_override(const DisplayOverrideState *state);
-static void snapshot_coloros_settings(ColorOsSettingsState *state);
-static int request_coloros_resolution_change(int width, int density,
-                                             ColorOsSettingsState *before);
-static int finalize_coloros_resolution_settings(int width, int height);
+                                  int target_height);
 static int coloros_refresh_mode_index(int fps);
 static int clear_display_preference(void);
 static int prepare_resolution_transaction(int width);
 static int queue_native_resolution_adoption(int target_width, int source_width,
-                                            int source_density,
                                             long long generation);
 static void process_native_resolution_adoption(const char *base_path);
 static int wait_for_active_width(int target_width, int timeout_ms);
-static int wait_for_override_density(int target_density, int timeout_ms);
-static void apply_density_override(int density);
-static int ensure_density_override(int target_density, int timeout_ms);
+static int mode_height_for_width(int width);
 static int mode_for_width_fps(int width, int fps);
+static int mode_for_resolution_fps(int width, int height, int fps);
+static int wait_for_boot_resolution_stable(int *active_id, int *active_width);
 static int mode_fps(int mode_id);
 static void load_extension_rates(const char *base_path);
 static int adfr_lock_test_bypassed(const char *base_path);
@@ -651,10 +622,9 @@ void init_display_modes() {
     }
 }
 
-/* mode.txt stores durable, human-readable display choices. HWC IDs are runtime
- * details: the first data line is <FHD+|QHD+> <fps>; app lines are either
- * <package> <fps> (inherit the global resolution) or
- * <package> <FHD+|QHD+> <fps>. Existing numeric-ID files remain readable. */
+/* mode.txt has one durable grammar: <width>x<height> <fps> for the global
+ * mode and <package> <width>x<height> <fps> for an app mode. HWC IDs and the
+ * old FHD+/QHD+ aliases remain read-only compatibility formats. */
 static int minimum_mode_width(void) {
     int minimum = 0;
     for (int i = 0; i < mode_count; i++) {
@@ -683,65 +653,66 @@ static int resolution_adjust_for_width(int width) {
     return -1;
 }
 
-static int resolution_width_for_token(const char *token) {
-    int width;
-    int height;
+static int resolution_dimensions_for_token(const char *token, int *width,
+                                           int *height) {
+    int resolved_width;
+    int parsed_height;
     char trailing;
 
-    if (!token) return -1;
+    if (!token || !width || !height) return 0;
     if (strcmp(token, "FHD+") == 0 || strcmp(token, "FHD") == 0 ||
-            strcmp(token, "1080P") == 0 || strcmp(token, "1080p") == 0) {
+            strcmp(token, "1080P") == 0 || strcmp(token, "1080p") == 0 ||
+            strcmp(token, "1080") == 0) {
         int minimum = minimum_mode_width();
-        return minimum > 0 && minimum != maximum_mode_width() ? minimum : -1;
-    }
-    if (strcmp(token, "QHD+") == 0 || strcmp(token, "QHD") == 0 ||
-            strcmp(token, "2K") == 0 || strcmp(token, "2k") == 0) {
-        return maximum_mode_width();
-    }
-    if (sscanf(token, "%dx%d%c", &width, &height, &trailing) == 2 &&
-            width > 0 && height > 0) {
+        resolved_width = minimum > 0 && minimum != maximum_mode_width()
+                ? minimum : -1;
+    } else if (strcmp(token, "QHD+") == 0 || strcmp(token, "QHD") == 0 ||
+            strcmp(token, "2K") == 0 || strcmp(token, "2k") == 0 ||
+            strcmp(token, "1440") == 0) {
+        resolved_width = maximum_mode_width();
+    } else if (sscanf(token, "%dx%d%c", &resolved_width, &parsed_height,
+                      &trailing) == 2 && resolved_width > 0 && parsed_height > 0) {
         for (int i = 0; i < mode_count; i++) {
-            if (modes[i].width == width && modes[i].height == height) return width;
+            if (modes[i].width == resolved_width && modes[i].height == parsed_height) {
+                *width = resolved_width;
+                *height = parsed_height;
+                return 1;
+            }
         }
+        return 0;
+    } else {
+        return 0;
     }
-    return -1;
-}
 
-static const char *resolution_token_for_width(int width) {
-    static char token[32];
-    int minimum = minimum_mode_width();
-    int maximum = maximum_mode_width();
-
-    if (width == maximum && maximum > 0) return "QHD+";
-    if (width == minimum && minimum > 0 && minimum != maximum) return "FHD+";
+    if (resolved_width <= 0) return 0;
     for (int i = 0; i < mode_count; i++) {
-        if (modes[i].width == width) {
-            snprintf(token, sizeof(token), "%dx%d", width, modes[i].height);
-            return token;
+        if (modes[i].width == resolved_width && modes[i].height > 0) {
+            *width = resolved_width;
+            *height = modes[i].height;
+            return 1;
         }
     }
-    return NULL;
+    return 0;
 }
 
 static int write_mode_spec_line(FILE *fp, int mode_id) {
-    const char *token = resolution_token_for_width(get_mode_width(mode_id));
+    int width = get_mode_width(mode_id);
+    int height = mode_height(mode_id);
     int fps = mode_fps(mode_id);
-    if (!fp || !token || fps < 30) return 0;
-    return fprintf(fp, "%s %d\n", token, fps) > 0;
+    if (!fp || width <= 0 || height <= 0 || fps < 30) return 0;
+    return fprintf(fp, "%dx%d %d\n", width, height, fps) > 0;
 }
 
 static int write_app_spec_line(FILE *fp, const char *package_name,
                                int mode_id, int global_mode_id) {
-    const char *token;
+    int width = get_mode_width(mode_id);
+    int height = mode_height(mode_id);
     int fps;
+    (void)global_mode_id;
     if (!fp || !valid_package_name(package_name)) return 0;
-    token = resolution_token_for_width(get_mode_width(mode_id));
     fps = mode_fps(mode_id);
-    if (!token || fps < 30) return 0;
-    if (get_mode_width(mode_id) == get_mode_width(global_mode_id)) {
-        return fprintf(fp, "%s %d\n", package_name, fps) > 0;
-    }
-    return fprintf(fp, "%s %s %d\n", package_name, token, fps) > 0;
+    if (width <= 0 || height <= 0 || fps < 30) return 0;
+    return fprintf(fp, "%s %dx%d %d\n", package_name, width, height, fps) > 0;
 }
 
 // 读取配置文件
@@ -766,11 +737,13 @@ void load_config(const char* base_path) {
             char trailing[32];
             int fps;
             int width;
+            int height;
             int mode_id;
 
             if (sscanf(trimmed, "%31s %d %31s", resolution, &fps, trailing) == 2 &&
-                    (width = resolution_width_for_token(resolution)) > 0 && fps >= 30 &&
-                    (mode_id = mode_for_width_fps(width, fps)) >= 0) {
+                    resolution_dimensions_for_token(resolution, &width, &height) &&
+                    fps >= 30 &&
+                    (mode_id = mode_for_resolution_fps(width, height, fps)) >= 0) {
                 default_mode_id = mode_id;
             } else if (sscanf(trimmed, "%d", &mode_id) == 1) {
                 /* Legacy <HWC ID> format is rewritten on the next commit. */
@@ -787,6 +760,7 @@ void load_config(const char* base_path) {
             char trailing[32];
             int fps_or_id;
             int width;
+            int height;
             int mode_id = -1;
 
             if (eq) {
@@ -796,9 +770,9 @@ void load_config(const char* base_path) {
                 }
             } else if (sscanf(trimmed, "%127s %31s %d %31s", pkg, resolution,
                               &fps_or_id, trailing) == 3 &&
-                    (width = resolution_width_for_token(resolution)) > 0 &&
+                    resolution_dimensions_for_token(resolution, &width, &height) &&
                     fps_or_id >= 30) {
-                mode_id = mode_for_width_fps(width, fps_or_id);
+                mode_id = mode_for_resolution_fps(width, height, fps_or_id);
             } else if (sscanf(trimmed, "%127s %d", pkg, &fps_or_id) == 2) {
                 if (fps_or_id >= 30) {
                     mode_id = mode_for_width_fps(get_mode_width(default_mode_id),
@@ -923,184 +897,6 @@ int get_screen_state() {
     return result;
 }
 
-// Read user overrides before a resolution transaction. Refresh-only changes
-// deliberately skip this path so they cannot disturb density or app layout.
-static void snapshot_display_overrides(DisplayOverrideState *state) {
-    memset(state, 0, sizeof(*state));
-
-    FILE *fp = popen("wm density 2>/dev/null", "r");
-    if (fp) {
-        char line[128];
-        while (fgets(line, sizeof(line), fp)) {
-            int value;
-            if (sscanf(line, "Override density: %d", &value) == 1 && value > 0) {
-                state->density = value;
-                state->density_valid = 1;
-                break;
-            }
-        }
-        pclose(fp);
-    }
-
-    fp = popen("wm size 2>/dev/null", "r");
-    if (fp) {
-        char line[128];
-        while (fgets(line, sizeof(line), fp)) {
-            int width, height;
-            if (sscanf(line, "Override size: %dx%d", &width, &height) == 2 &&
-                width > 0 && height > 0) {
-                state->size_width = width;
-                state->size_height = height;
-                state->size_valid = 1;
-                break;
-            }
-        }
-        pclose(fp);
-    }
-
-    log_msg("Display overrides before resolution switch: density=%s%d size=%s%dx%d",
-            state->density_valid ? "" : "none/", state->density,
-            state->size_valid ? "" : "none/", state->size_width, state->size_height);
-}
-
-static int read_override_density(void) {
-    FILE *fp = popen("wm density 2>/dev/null", "r");
-    int density = -1;
-
-    if (!fp) return -1;
-    char line[128];
-    while (fgets(line, sizeof(line), fp)) {
-        if (sscanf(line, "Override density: %d", &density) == 1 && density > 0) {
-            break;
-        }
-        density = -1;
-    }
-    pclose(fp);
-    return density;
-}
-
-static int read_effective_density(void) {
-    FILE *fp = popen("wm density 2>/dev/null", "r");
-    int physical = -1;
-    int override = -1;
-
-    if (!fp) return -1;
-    char line[128];
-    while (fgets(line, sizeof(line), fp)) {
-        int value;
-        if (sscanf(line, "Physical density: %d", &value) == 1 && value > 0) {
-            physical = value;
-        } else if (sscanf(line, "Override density: %d", &value) == 1 && value > 0) {
-            override = value;
-        }
-    }
-    pclose(fp);
-    return override > 0 ? override : physical;
-}
-
-static int read_density_scale(const char *property, int *values, int capacity) {
-    char command[160];
-    char line[256];
-    char *cursor;
-    FILE *fp;
-    int count = 0;
-
-    if (!property || !values || capacity <= 0) return 0;
-    snprintf(command, sizeof(command), "getprop %s 2>/dev/null", property);
-    fp = popen(command, "r");
-    if (!fp) return 0;
-    if (!fgets(line, sizeof(line), fp)) {
-        pclose(fp);
-        return 0;
-    }
-    pclose(fp);
-
-    cursor = line;
-    while (*cursor && count < capacity) {
-        char *end;
-        long value;
-
-        while (*cursor == ',' || isspace((unsigned char)*cursor)) cursor++;
-        if (!*cursor) break;
-        value = strtol(cursor, &end, 10);
-        if (end == cursor || value <= 0 || value > 2000) return 0;
-        values[count++] = (int)value;
-        cursor = end;
-        while (isspace((unsigned char)*cursor)) cursor++;
-        if (*cursor && *cursor != ',') return 0;
-    }
-    return count;
-}
-
-static int density_for_resolution(int current_width, int target_width,
-                                  int current_density) {
-    const char *current_property = NULL;
-    const char *target_property = NULL;
-    int current_values[16];
-    int target_values[16];
-    int current_count;
-    int target_count;
-
-    int minimum_width = minimum_mode_width();
-    int maximum_width = maximum_mode_width();
-
-    if (current_width == maximum_width && target_width == minimum_width &&
-            minimum_width != maximum_width) {
-        current_property = "ro.density.screenzoom.qdh";
-        target_property = "ro.density.screenzoom.fdh";
-    } else if (current_width == minimum_width && target_width == maximum_width &&
-            minimum_width != maximum_width) {
-        current_property = "ro.density.screenzoom.fdh";
-        target_property = "ro.density.screenzoom.qdh";
-    }
-
-    if (current_property) {
-        current_count = read_density_scale(current_property, current_values, 16);
-        target_count = read_density_scale(target_property, target_values, 16);
-        if (current_count > 0 && current_count == target_count) {
-            for (int i = 0; i < current_count; i++) {
-                if (current_values[i] == current_density) {
-                    log_msg("Mapped ColorOS display-size slot: width=%d->%d "
-                            "density=%d->%d index=%d",
-                            current_width, target_width, current_density,
-                            target_values[i], i);
-                    return target_values[i];
-                }
-            }
-
-            /* A vendor/native transition can update geometry and density in
-             * separate callbacks. If the destination density is already
-             * active, scaling it again would turn RMX5200's FHD 420 into 315
-             * (or QHD 560 into 747) and visibly enlarge/shrink the UI. */
-            for (int i = 0; i < target_count; i++) {
-                if (target_values[i] == current_density) {
-                    log_msg("Destination ColorOS display-size density already active: "
-                            "width=%d->%d density=%d index=%d",
-                            current_width, target_width, current_density, i);
-                    return current_density;
-                }
-            }
-        }
-    }
-
-    if (current_width <= 0 || target_width <= 0 || current_density <= 0) {
-        return -1;
-    }
-    return (current_density * target_width + current_width / 2) / current_width;
-}
-
-static void restore_size_override(const DisplayOverrideState *state) {
-    char cmd[128];
-
-    if (state->size_valid) {
-        snprintf(cmd, sizeof(cmd), "wm size %dx%d >/dev/null 2>&1",
-                 state->size_width, state->size_height);
-        system(cmd);
-        log_msg("Display size override restored after resolution switch: %dx%d",
-                state->size_width, state->size_height);
-    }
-}
-
 static int read_setting_int(const char *table, const char *key, int *value) {
     char cmd[256];
     char line[128];
@@ -1149,150 +945,6 @@ static int delete_setting(const char *table, const char *key) {
     return rc == 0;
 }
 
-static void snapshot_coloros_settings(ColorOsSettingsState *state) {
-    memset(state, 0, sizeof(*state));
-    state->resolution_adjust_valid = read_setting_int(
-        "secure", "oplus_customize_screen_resolution_adjust",
-        &state->resolution_adjust);
-    state->screen_index_valid = read_setting_int(
-        "secure", "user_preferred_screen_index", &state->screen_index);
-    state->preferred_resolution_valid =
-        read_setting_int("global", "user_preferred_resolution_width",
-                         &state->preferred_width) &&
-        read_setting_int("global", "user_preferred_resolution_height",
-                         &state->preferred_height);
-    state->refresh_rate_mode_valid = read_setting_int(
-        "secure", "oplus_customize_screen_refresh_rate",
-        &state->refresh_rate_mode);
-
-    log_msg("ColorOS settings before switch: resolution_adjust=%s%d screen_index=%s%d "
-            "preferred_resolution=%s%dx%d refresh_mode=%s%d",
-            state->resolution_adjust_valid ? "" : "none/",
-            state->resolution_adjust,
-            state->screen_index_valid ? "" : "none/", state->screen_index,
-            state->preferred_resolution_valid ? "" : "none/",
-            state->preferred_width, state->preferred_height,
-            state->refresh_rate_mode_valid ? "" : "none/",
-            state->refresh_rate_mode);
-}
-
-static void restore_coloros_settings(const ColorOsSettingsState *state) {
-    if (state->resolution_adjust_valid) {
-        write_setting_int("secure", "oplus_customize_screen_resolution_adjust",
-                          state->resolution_adjust);
-    } else {
-        delete_setting("secure", "oplus_customize_screen_resolution_adjust");
-    }
-
-    if (state->screen_index_valid) {
-        write_setting_int("secure", "user_preferred_screen_index",
-                          state->screen_index);
-    } else {
-        delete_setting("secure", "user_preferred_screen_index");
-    }
-
-    if (state->preferred_resolution_valid) {
-        write_setting_int("global", "user_preferred_resolution_width",
-                          state->preferred_width);
-        write_setting_int("global", "user_preferred_resolution_height",
-                          state->preferred_height);
-    } else {
-        delete_setting("global", "user_preferred_resolution_width");
-        delete_setting("global", "user_preferred_resolution_height");
-    }
-
-    /* Never touch the resolution backup key. It is ColorOS recovery state. */
-    log_msg("Restored ColorOS resolution settings after failed verification");
-}
-
-static int request_coloros_resolution_change(int width, int density,
-                                             ColorOsSettingsState *before) {
-    int adjust;
-    int verify_adjust;
-    int current_adjust;
-    char property_cmd[128];
-
-    adjust = resolution_adjust_for_width(width);
-    if (adjust < 0) {
-        log_msg("ColorOS resolution sync skipped: unsupported width=%d", width);
-        return 0;
-    }
-
-    /* Match RMX5200's stock ScreenResolutionFragment. The secure enum is the
-     * only cross-resolution trigger: OplusDisplayModeService coordinates WMS,
-     * the freeze animation and the physical display as one native operation. */
-    if (density > 0) {
-        snprintf(property_cmd, sizeof(property_cmd),
-                 "setprop persist.sys.display.user_density %d", density);
-        if (system(property_cmd) != 0) {
-            log_msg("ColorOS density property write failed: density=%d", density);
-            return 0;
-        }
-        /* ColorOS reads user_density while publishing the resolution enum. Set
-         * the matching override first so its relayout never uses the default
-         * density for the destination geometry. */
-        if (!ensure_density_override(density, 1000)) {
-            log_msg("ColorOS pre-resolution density failed: density=%d", density);
-            return 0;
-        }
-    }
-    snprintf(property_cmd, sizeof(property_cmd),
-             "setprop persist.sys.display.screen_resolution %d", adjust);
-    if (system(property_cmd) != 0) {
-        log_msg("ColorOS resolution property write failed: adjust=%d", adjust);
-        return 0;
-    }
-
-    if (!read_setting_int("secure", "oplus_customize_screen_resolution_adjust",
-                          &current_adjust)) {
-        current_adjust = -1;
-    }
-    if ((current_adjust != adjust &&
-         !write_setting_int("secure", "oplus_customize_screen_resolution_adjust",
-                            adjust)) ||
-        !read_setting_int("secure", "oplus_customize_screen_resolution_adjust",
-                          &verify_adjust) ||
-        verify_adjust != adjust) {
-        log_msg("ColorOS native resolution request failed for width=%d; rolling back",
-                width);
-        restore_coloros_settings(before);
-        return 0;
-    }
-
-    log_msg("ColorOS native resolution transition requested: adjust=%d "
-            "target_width=%d density=%d already_published=%d",
-            adjust, width, density, current_adjust == adjust);
-    return 1;
-}
-
-static int finalize_coloros_resolution_settings(int width, int height) {
-    int adjust;
-    int verify_index;
-    int verify_width;
-    int verify_height;
-
-    adjust = resolution_adjust_for_width(width);
-    if (adjust < 0) return 0;
-
-    if (!write_setting_int("secure", "user_preferred_screen_index", adjust) ||
-        !read_setting_int("secure", "user_preferred_screen_index",
-                          &verify_index) ||
-        verify_index != adjust ||
-        !write_setting_int("global", "user_preferred_resolution_width", width) ||
-        !write_setting_int("global", "user_preferred_resolution_height", height) ||
-        !read_setting_int("global", "user_preferred_resolution_width",
-                          &verify_width) ||
-        !read_setting_int("global", "user_preferred_resolution_height",
-                          &verify_height) ||
-        verify_width != width || verify_height != height) {
-        log_msg("ColorOS preferred resolution finalize failed: target=%dx%d",
-                width, height);
-        return 0;
-    }
-    log_msg("ColorOS preferred resolution finalized: %dx%d", width, height);
-    return 1;
-}
-
 static int coloros_refresh_mode_index(int fps) {
     /* Custom tiers are represented by ColorOS' coarse high-refresh enum; the
      * exact HWC mode remains authoritative in mode.txt. */
@@ -1304,30 +956,6 @@ static int coloros_refresh_mode_index(int fps) {
     return -1;
 }
 
-static int set_display_preference(int id) {
-    int fps = 0;
-    int width = 0;
-    int height = 0;
-    for (int i = 0; i < mode_count; i++) {
-        if (modes[i].id == id) {
-            fps = modes[i].fps;
-            width = modes[i].width;
-            height = modes[i].height;
-            break;
-        }
-    }
-    if (fps <= 0 || width <= 0 || height <= 0) return 0;
-
-    char cmd[160];
-    snprintf(cmd, sizeof(cmd),
-             "cmd display set-user-preferred-display-mode %d %d %d >/dev/null 2>&1",
-             width, height, fps);
-    int rc = system(cmd);
-    log_msg("Framework preferred mode %dx%d@%d requested, rc=%d",
-            width, height, fps, rc);
-    return rc == 0;
-}
-
 static int clear_display_preference(void) {
     int rc = system("cmd display clear-user-preferred-display-mode "
                     ">/dev/null 2>&1");
@@ -1336,25 +964,10 @@ static int clear_display_preference(void) {
     return rc == 0;
 }
 
-static int prepared_resolution_matches(int width, int density) {
-    if (!prepared_resolution.valid) return 0;
-    if (monotonic_ms() > prepared_resolution.expires_at_ms) {
-        log_msg("Prepared resolution expired: target=%d density=%d",
-                prepared_resolution.target_width,
-                prepared_resolution.target_density);
-        prepared_resolution.valid = 0;
-        return 0;
-    }
-    return prepared_resolution.target_width == width &&
-           prepared_resolution.target_density == density;
-}
-
 static int prepare_resolution_transaction(int width) {
     PreparedResolutionState next;
     int active_id = get_current_system_mode();
     int active_width = get_mode_width(active_id);
-    int active_density;
-    int target_density;
 
     memset(&next, 0, sizeof(next));
     if (active_id < 0 || active_width <= 0 || active_width == width) {
@@ -1363,64 +976,18 @@ static int prepare_resolution_transaction(int width) {
         return 0;
     }
 
-    snapshot_display_overrides(&next.display_before);
-    snapshot_coloros_settings(&next.coloros_before);
-    active_density = read_effective_density();
-    if (active_density <= 0) {
-        log_msg("Resolution prepare rejected: effective density unavailable");
-        return 0;
-    }
-    target_density = density_for_resolution(active_width, width, active_density);
-    if (target_density < 72 || target_density > 2000) {
-        log_msg("Resolution prepare rejected: scaled density=%d", target_density);
-        return 0;
-    }
     if (!clear_display_preference()) return 0;
 
     next.valid = 1;
     next.target_width = width;
-    next.target_density = target_density;
     next.previous_mode_id = active_id;
     next.previous_width = active_width;
     next.expires_at_ms = monotonic_ms() + 10000;
     prepared_resolution = next;
-    log_msg("Resolution prepared before Settings native path: target=%d/%ddpi "
+    log_msg("Resolution prepared before Settings native path: target_width=%d "
             "previous=%d/%dpx",
-            width, target_density, active_id, active_width);
+            width, active_id, active_width);
     return 1;
-}
-
-static void apply_density_override(int density) {
-    char cmd[128];
-
-    if (density <= 0) return;
-    snprintf(cmd, sizeof(cmd), "wm density %d >/dev/null 2>&1", density);
-    int rc = system(cmd);
-    log_msg("Display density override requested: %d rc=%d", density, rc);
-}
-
-static int ensure_density_override(int target_density, int timeout_ms) {
-    int current_density;
-
-    if (target_density <= 0) return 1;
-    current_density = read_override_density();
-    if (current_density == target_density) {
-        log_msg("Display density already correct: %d", target_density);
-        return 1;
-    }
-    apply_density_override(target_density);
-    return wait_for_override_density(target_density, timeout_ms);
-}
-
-static void restore_density_override(const DisplayOverrideState *state) {
-    int rc;
-
-    if (state->density_valid) {
-        apply_density_override(state->density);
-        return;
-    }
-    rc = system("wm density reset >/dev/null 2>&1");
-    log_msg("Display density override reset after failed resolution, rc=%d", rc);
 }
 
 static int wait_for_active_width(int target_width, int timeout_ms) {
@@ -1442,6 +1009,48 @@ static int wait_for_active_width(int target_width, int timeout_ms) {
     log_msg("Active display width verification timed out: target=%d timeout=%dms",
             target_width, timeout_ms);
     return 0;
+}
+
+static int wait_for_boot_resolution_stable(int *active_id, int *active_width) {
+    long long started_ms = monotonic_ms();
+    long long deadline_ms = started_ms + BOOT_RESOLUTION_SETTLE_TIMEOUT_MS;
+    int last_width = -1;
+    int stable_samples = 0;
+    int observed_id = -1;
+    int observed_width = -1;
+
+    if (!active_id || !active_width) return 0;
+    do {
+        observed_id = get_current_system_mode();
+        observed_width = get_mode_width(observed_id);
+        if (observed_width > 0) {
+            if (observed_width == last_width) {
+                stable_samples++;
+            } else {
+                last_width = observed_width;
+                stable_samples = 1;
+            }
+            if (stable_samples >= BOOT_RESOLUTION_SETTLE_SAMPLES) {
+                *active_id = observed_id;
+                *active_width = observed_width;
+                log_msg("Boot ColorOS resolution stable: mode=%d width=%d "
+                        "after=%dms samples=%d", observed_id, observed_width,
+                        (int)(monotonic_ms() - started_ms), stable_samples);
+                return 1;
+            }
+        } else {
+            last_width = -1;
+            stable_samples = 0;
+        }
+        usleep(BOOT_RESOLUTION_SETTLE_SAMPLE_MS * 1000);
+    } while (monotonic_ms() <= deadline_ms);
+
+    *active_id = observed_id;
+    *active_width = observed_width;
+    log_msg("Boot ColorOS resolution did not settle: mode=%d width=%d "
+            "timeout=%dms", observed_id, observed_width,
+            BOOT_RESOLUTION_SETTLE_TIMEOUT_MS);
+    return observed_width > 0;
 }
 
 static int wait_for_active_mode(int target_id, int timeout_ms) {
@@ -1760,184 +1369,46 @@ static int complete_resolution_geometry(int target_id, int target_width) {
             && wait_for_active_width(target_width, 1500);
 }
 
-static int wait_for_override_density(int target_density, int timeout_ms) {
-    long long started_ms = monotonic_ms();
-    long long deadline_ms = started_ms + timeout_ms;
-
-    if (target_density <= 0) return 1;
-    do {
-        int density = read_override_density();
-        if (density == target_density) {
-            log_msg("Display density verified: %d after=%dms",
-                    density, (int)(monotonic_ms() - started_ms));
-            return 1;
-        }
-        usleep(50000);
-    } while (monotonic_ms() <= deadline_ms);
-    log_msg("Display density verification timed out: target=%d timeout=%dms",
-            target_density, timeout_ms);
-    return 0;
-}
-
-static void rollback_resolution_transaction(
-        int previous_mode_id, int previous_width,
-        const DisplayOverrideState *display_before,
-        const ColorOsSettingsState *coloros_before) {
-    char property_cmd[128];
-
-    prepared_resolution.valid = 0;
-    restore_coloros_settings(coloros_before);
-    if (coloros_before->resolution_adjust_valid) {
-        snprintf(property_cmd, sizeof(property_cmd),
-                 "setprop persist.sys.display.screen_resolution %d",
-                 coloros_before->resolution_adjust);
-        system(property_cmd);
-    }
-    if (display_before->density_valid) {
-        snprintf(property_cmd, sizeof(property_cmd),
-                 "setprop persist.sys.display.user_density %d",
-                 display_before->density);
-        system(property_cmd);
-    }
-
-    if (previous_width > 0 &&
-        complete_resolution_geometry(previous_mode_id, previous_width)) {
-        restore_density_override(display_before);
-        if (is_valid_mode(previous_mode_id)) {
-            set_display_preference(previous_mode_id);
-            wait_for_active_width(previous_width, 500);
-        }
-    } else {
-        log_msg("Resolution rollback could not verify previous physical width=%d; "
-                "density left unchanged", previous_width);
-    }
-    if (is_valid_mode(previous_mode_id)) {
-        set_display_preference(previous_mode_id);
-    }
-    restore_size_override(display_before);
-    log_msg("Resolution transaction rolled back to actual pre-switch mode=%d width=%d",
-            previous_mode_id, previous_width);
-}
-
 static int apply_mode_transaction(int target_id, int resolution_change,
-                                  int target_density) {
-    DisplayOverrideState before;
-    ColorOsSettingsState coloros_before;
-    int target_width = 0;
-    int target_height = 0;
-    int current_width = get_mode_width(current_mode_id);
-    int previous_mode_id = current_mode_id;
-    int density = target_density;
-    int used_prepared_state = 0;
+                                  int target_height) {
+    int target_width = get_mode_width(target_id);
 
-    for (int i = 0; i < mode_count; i++) {
-        if (modes[i].id == target_id) {
-            target_width = modes[i].width;
-            target_height = modes[i].height;
-            break;
-        }
+    (void)target_height;
+    if (!is_valid_mode(target_id) || target_width <= 0) {
+        log_msg("Display mode transaction rejected: mode=%d", target_id);
+        return 0;
     }
 
+    /* A mode ID already contains the complete HWC geometry and timing. A
+     * resolution switch therefore uses the same transaction as a refresh
+     * switch; no WindowManager override is part of this path. */
     if (resolution_change) {
-        if (prepared_resolution_matches(target_width, target_density)) {
-            before = prepared_resolution.display_before;
-            coloros_before = prepared_resolution.coloros_before;
-            previous_mode_id = prepared_resolution.previous_mode_id;
-            current_width = prepared_resolution.previous_width;
-            used_prepared_state = 1;
-            prepared_resolution.valid = 0;
-        } else {
-            snapshot_display_overrides(&before);
-            snapshot_coloros_settings(&coloros_before);
-        }
-        if (density <= 0 && before.density_valid && current_width > 0 &&
-            target_width > 0) {
-            density = density_for_resolution(current_width, target_width,
-                                             before.density);
-            log_msg("Resolved density for resolution switch: width=%d->%d density=%d",
-                    current_width, target_width, density);
-        }
-    }
-
-    if (resolution_change) {
-        /* Never use SurfaceFlinger transaction 1035 across resolutions. It
-         * bypasses ColorOS/WMS' freeze transaction and exposes recursively
-         * scaled old/new surfaces. Publish the vendor enum first and wait for
-         * OplusDisplayModeService to complete the geometry change. */
-        if ((!used_prepared_state && !clear_display_preference()) ||
-            !request_coloros_resolution_change(target_width, density,
-                                               &coloros_before) ||
-            !complete_resolution_geometry(target_id, target_width)) {
-            rollback_resolution_transaction(previous_mode_id, current_width,
-                                            &before, &coloros_before);
+        if (!set_surface_flinger_mode(target_id) ||
+            !wait_for_active_mode(target_id, 2500) ||
+            !wait_for_active_width(target_width, 1500)) {
+            log_msg("Display resolution mode transaction failed: mode=%d "
+                    "width=%d", target_id, target_width);
             return 0;
         }
-
-        /* Apply the matching user density as soon as the native geometry is
-         * active, before publishing the remaining framework preferences. */
-        if (!ensure_density_override(density, 1500)) {
-            rollback_resolution_transaction(previous_mode_id, current_width,
-                                            &before, &coloros_before);
-            return 0;
-        }
-
-        /* The native transition chooses a valid rate for the new resolution.
-         * Publish a native anchor through DisplayManager so subsequent ColorOS
-         * requests remain authoritative; the ladder selects the extension. */
-        int preference_id = target_id;
-        if (is_overclock_mode(target_id)) {
-            int stock_id = native_anchor_for_target(target_id);
-            if (stock_id >= 0) preference_id = stock_id;
-        }
-        if (!set_display_preference(preference_id) ||
-            !wait_for_active_width(target_width, 500)) {
-            log_msg("Native resolution completed but native anchor failed: "
-                    "anchor=%d target=%d", preference_id, target_id);
-            rollback_resolution_transaction(previous_mode_id, current_width,
-                                             &before, &coloros_before);
-            return 0;
-        }
-        if (!finalize_coloros_resolution_settings(target_width, target_height)) {
-            rollback_resolution_transaction(previous_mode_id, current_width,
-                                             &before, &coloros_before);
-            return 0;
-        }
-        restore_size_override(&before);
-        current_mode_id = get_current_system_mode();
-        if (!apply_refresh_ladder(target_id)) {
-            log_msg("Native resolution completed but refresh ladder failed: target=%d",
-                    target_id);
-            rollback_resolution_transaction(previous_mode_id, current_width,
-                                             &before, &coloros_before);
-            return 0;
-        }
-        sync_android_settings(target_id);
-        return 1;
-    }
-
-    /* Each physical step aligns the live HWC policy and publishes only its
-     * adjacent mode; the final v2.2 Settings state is written once below. */
-    if (!apply_refresh_ladder(target_id)) {
+    } else if (!apply_refresh_ladder(target_id)) {
         log_msg("Refresh ladder request failed: target=%d", target_id);
         return 0;
     }
+
     sync_android_settings(target_id);
+    if (resolution_change) {
+        sync_android_resolution_settings(target_id);
+    }
     return 1;
 }
 
 static int apply_hook_mode_request(const char *base_path, int mode_id,
-                                   int width, int density) {
+                                   int width) {
     int active_id;
-    int active_density;
 
-    if (prepared_resolution_matches(width, density)) {
-        current_mode_id = prepared_resolution.previous_mode_id;
-    } else {
-        active_id = get_current_system_mode();
-        if (is_valid_mode(active_id)) current_mode_id = active_id;
-    }
-    pending_density_mode_id = mode_id;
-    pending_density = density;
+    active_id = get_current_system_mode();
+    if (is_valid_mode(active_id)) current_mode_id = active_id;
+    prepared_resolution.valid = 0;
     load_config(base_path);
 
     /* Bridge callers must receive OK only after the physical transaction is
@@ -1947,18 +1418,16 @@ static int apply_hook_mode_request(const char *base_path, int mode_id,
     smooth_switch(mode_id);
 
     active_id = get_current_system_mode();
-    active_density = read_override_density();
-    if (active_id != mode_id || get_mode_width(active_id) != width ||
-        (density > 0 && active_density != density)) {
-        log_msg("Display hook mode transaction failed: target=%d/%dpx/%ddpi "
-                "active=%d/%dpx/%ddpi",
-                mode_id, width, density, active_id,
-                get_mode_width(active_id), active_density);
+    if (active_id != mode_id || get_mode_width(active_id) != width) {
+        log_msg("Display hook mode transaction failed: target=%d/%dpx "
+                "active=%d/%dpx", mode_id, width, active_id,
+                get_mode_width(active_id));
         return 0;
     }
 
-    log_msg("Display hook mode transaction completed: mode=%d width=%d density=%d",
-            mode_id, width, density);
+    log_msg("Display hook mode transaction completed: mode=%d width=%d height=%d "
+            "fps=%d", mode_id, get_mode_width(mode_id), mode_height(mode_id),
+            mode_fps(mode_id));
     return 1;
 }
 
@@ -2343,7 +1812,6 @@ static int start_video_override(const char *base_path, int follow, int fps) {
     int previous_vendor_owned = video_override_vendor_owned;
     int target_id;
     int width;
-    int density;
     int screen_state;
 
     if (!premium_video_memc_enabled()) {
@@ -2355,7 +1823,6 @@ static int start_video_override(const char *base_path, int follow, int fps) {
     load_config(base_path);
     width = get_mode_width(default_mode_id);
     target_id = follow ? default_mode_id : mode_for_width_fps(width, fps);
-    density = read_override_density();
     if (!is_valid_mode(target_id) || width <= 0) {
         log_msg("Video temporary mode rejected: follow=%d fps=%d default=%d",
                 follow, fps, default_mode_id);
@@ -2421,7 +1888,7 @@ static int start_video_override(const char *base_path, int follow, int fps) {
     sync_oti_pause_policy(base_path, 1);
     update_rmx5200_ltpo_controller(base_path, target_id, screen_state);
 
-    if (!apply_hook_mode_request(base_path, target_id, width, density)) {
+    if (!apply_hook_mode_request(base_path, target_id, width)) {
         log_msg("Video temporary mode failed: follow=%d fps=%d target=%d",
                 follow, fps, target_id);
         video_override_active = previous_active;
@@ -2448,7 +1915,6 @@ static int start_video_override(const char *base_path, int follow, int fps) {
 static int stop_video_override(const char *base_path, const char *reason) {
     int target_id;
     int width;
-    int density;
     int screen_state;
     int esd_restored;
 
@@ -2499,9 +1965,8 @@ static int stop_video_override(const char *base_path, const char *reason) {
     sync_oti_pause_policy(base_path, 1);
     target_id = default_mode_id;
     width = get_mode_width(target_id);
-    density = read_override_density();
     if (!is_valid_mode(target_id) || width <= 0 ||
-            !apply_hook_mode_request(base_path, target_id, width, density)) {
+            !apply_hook_mode_request(base_path, target_id, width)) {
         log_msg("Video temporary mode restore failed: reason=%s target=%d",
                 reason ? reason : "unknown", target_id);
         return 0;
@@ -2522,15 +1987,9 @@ static int stop_video_override(const char *base_path, const char *reason) {
 // stay inside apply_refresh_ladder so no caller can bypass the ordered path.
 void smooth_switch(int target_id) {
     int observed_id;
-    int target_density = -1;
     int screen_on_attempt = screen_on_reapply_pending;
 
     if (screen_on_attempt) screen_on_reapply_transaction_ok = 0;
-    if (pending_density_mode_id == target_id) {
-        target_density = pending_density;
-        pending_density_mode_id = -1;
-        pending_density = -1;
-    }
 
     /* The RMX5200 ADFR property stores its minimum in seven bits. Keep 60/90
      * fixed at their selected rate and clamp every 120+ tier to the hardware
@@ -2576,7 +2035,7 @@ void smooth_switch(int target_id) {
         } else {
             // 获取失败，直接设置并假设成功
             log_msg("First switch (unknown current) / 首次切换 (当前未知): -> %d", target_id);
-            if (apply_mode_transaction(target_id, 0, target_density)) {
+            if (apply_mode_transaction(target_id, 0, mode_height(target_id))) {
                 current_mode_id = target_id;
             }
             return;
@@ -2584,9 +2043,6 @@ void smooth_switch(int target_id) {
     }
 
     if (current_mode_id == target_id) {
-        if (target_density > 0) {
-            apply_density_override(target_density);
-        }
         if (screen_on_attempt) screen_on_reapply_transaction_ok = 1;
         return;
     }
@@ -2597,7 +2053,7 @@ void smooth_switch(int target_id) {
     // 如果无法获取宽度（无效ID），直接切换
     if (current_width == 0 || target_width == 0) {
         log_msg("Invalid width / 无效宽度 (curr=%d, target=%d). Direct switch / 直接切换.", current_width, target_width);
-        if (apply_mode_transaction(target_id, 0, target_density)) {
+        if (apply_mode_transaction(target_id, 0, mode_height(target_id))) {
             current_mode_id = target_id;
             if (screen_on_attempt) screen_on_reapply_transaction_ok = 1;
         }
@@ -2606,7 +2062,7 @@ void smooth_switch(int target_id) {
 
     if (current_width != target_width) {
         log_msg("Resolution change / 分辨率变更: %d -> %d. Direct switch / 直接切换.", current_mode_id, target_id);
-        if (apply_mode_transaction(target_id, 1, target_density)) {
+        if (apply_mode_transaction(target_id, 1, mode_height(target_id))) {
             current_mode_id = target_id;
             if (screen_on_attempt) screen_on_reapply_transaction_ok = 1;
         }
@@ -2614,7 +2070,7 @@ void smooth_switch(int target_id) {
     }
 
     log_msg("Ordered refresh switch / 阶梯刷新率切换: %d -> %d", current_mode_id, target_id);
-    if (apply_mode_transaction(target_id, 0, target_density)) {
+    if (apply_mode_transaction(target_id, 0, mode_height(target_id))) {
         current_mode_id = target_id;
         if (screen_on_attempt) screen_on_reapply_transaction_ok = 1;
     }
@@ -2841,19 +2297,9 @@ void sync_android_settings(int id) {
             log_msg("ColorOS refresh setting left unchanged for unsupported "
                     "Settings enum value: %dHz", fps);
         }
-        /* The exact HWC mode remains in mode.txt.  These keys are only the
-         * ColorOS/Framework display mirror, so keep geometry and screen index
-         * aligned after Web or daemon changes as well. */
-        int width = get_mode_width(id);
-        int height = mode_height(id);
-        int adjust = resolution_adjust_for_width(width);
-        if (width > 0 && height > 0 && adjust > 0) {
-            write_setting_int("secure", "user_preferred_screen_index", adjust);
-            write_setting_int("secure", "oplus_customize_screen_resolution_adjust",
-                              adjust);
-            write_setting_int("global", "user_preferred_resolution_width", width);
-            write_setting_int("global", "user_preferred_resolution_height", height);
-        }
+        /* mode.txt and the HWC mode ID are authoritative for geometry. Never
+         * write ColorOS resolution keys while synchronizing a refresh rate;
+         * those keys can start a geometry transition and disturb the mode. */
         if (coloros_mode >= 0) {
             /* The ColorOS observer applies its enum asynchronously and may
              * reset the framework ceiling and floor several hundred
@@ -2995,11 +2441,78 @@ static void rmx5200_oti_state_path(char *path, size_t size,
     snprintf(path, size, "%s/config/adfr_lock/%s", base_path, name);
 }
 
+static void sync_android_resolution_settings(int id) {
+    int width = get_mode_width(id);
+    int height = mode_height(id);
+    int adjust = resolution_adjust_for_width(width);
+
+    if (width <= 0 || height <= 0 || adjust < 0) {
+        log_msg("Resolution settings mirror skipped: mode=%d width=%d height=%d adjust=%d",
+                id, width, height, adjust);
+        return;
+    }
+    write_setting_int("secure", "user_preferred_screen_index", adjust);
+    write_setting_int("secure", "oplus_customize_screen_resolution_adjust", adjust);
+    write_setting_int("global", "user_preferred_resolution_width", width);
+    write_setting_int("global", "user_preferred_resolution_height", height);
+    log_msg("Resolution settings synchronized: mode=%d geometry=%dx%d adjust=%d",
+            id, width, height, adjust);
+}
+
+static int ensure_rmx5200_oti_state_dir(const char *base_path) {
+    char config_path[PATH_MAX];
+    char state_path[PATH_MAX];
+    const char *root = base_path;
+    struct stat state;
+
+    if (!root || !*root) root = "/data/adb/modules/murongchaopin";
+    if (snprintf(config_path, sizeof(config_path), "%s/config", root)
+            >= (int)sizeof(config_path)
+            || snprintf(state_path, sizeof(state_path),
+                        "%s/config/adfr_lock", root)
+                   >= (int)sizeof(state_path)) {
+        log_msg("RMX5200 OTI state path is too long");
+        return 0;
+    }
+
+    if (stat(state_path, &state) == 0) {
+        if (!S_ISDIR(state.st_mode)) {
+            log_msg("RMX5200 OTI state path is not a directory: %s",
+                    state_path);
+            return 0;
+        }
+        return 1;
+    }
+    if (errno != ENOENT) {
+        log_msg("RMX5200 OTI state directory check failed: %s: %s",
+                state_path, strerror(errno));
+        return 0;
+    }
+
+    if (mkdir(config_path, 0700) != 0 && errno != EEXIST) {
+        log_msg("RMX5200 OTI config directory create failed: %s: %s",
+                config_path, strerror(errno));
+        return 0;
+    }
+    if (mkdir(state_path, 0700) != 0 && errno != EEXIST) {
+        log_msg("RMX5200 OTI state directory create failed: %s: %s",
+                state_path, strerror(errno));
+        return 0;
+    }
+    if (stat(state_path, &state) != 0 || !S_ISDIR(state.st_mode)) {
+        log_msg("RMX5200 OTI state directory unavailable: %s", state_path);
+        return 0;
+    }
+    chmod(state_path, 0700);
+    return 1;
+}
+
 static int read_surfaceflinger_oti_pause_state(const char *base_path) {
     char path[512];
     char line[32];
     FILE *fp;
 
+    if (!ensure_rmx5200_oti_state_dir(base_path)) return -1;
     rmx5200_oti_state_path(path, sizeof(path), base_path, "oti_pause_last");
     fp = fopen(path, "r");
     if (!fp) return -1;
@@ -3018,6 +2531,7 @@ static void write_surfaceflinger_oti_pause_state(const char *base_path,
     char path[512];
     FILE *fp;
 
+    if (!ensure_rmx5200_oti_state_dir(base_path)) return;
     rmx5200_oti_state_path(path, sizeof(path), base_path, "oti_pause_last");
     fp = fopen(path, "w");
     if (!fp) {
@@ -3034,6 +2548,7 @@ static void set_rmx5200_ltpo_oti_owner(const char *base_path, int owned) {
     FILE *fp;
 
     if (strcmp(device_model, "RMX5200") != 0) return;
+    if (!ensure_rmx5200_oti_state_dir(base_path)) return;
     rmx5200_oti_state_path(path, sizeof(path), base_path, "oti_pause_owner");
     if (!owned) {
         unlink(path);
@@ -4648,12 +4163,25 @@ static int group_has_extended_rate(int width, int group) {
     return 0;
 }
 
+static int mode_height_for_width(int width) {
+    if (width <= 0) return -1;
+    for (int i = 0; i < mode_count; i++) {
+        if (modes[i].width == width && modes[i].height > 0) {
+            return modes[i].height;
+        }
+    }
+    return -1;
+}
+
 static int mode_for_width_fps(int width, int fps) {
     int fallback = -1;
     int extended = -1;
+    int height = mode_height_for_width(width);
     if (width <= 0 || fps <= 0) return -1;
     for (int i = 0; i < mode_count; i++) {
-        if (modes[i].width == width && modes[i].fps == fps) {
+        if (modes[i].width == width &&
+                (height <= 0 || modes[i].height == height) &&
+                modes[i].fps == fps) {
             if (fallback < 0 || modes[i].id < fallback) {
                 fallback = modes[i].id;
             }
@@ -4666,6 +4194,23 @@ static int mode_for_width_fps(int width, int fps) {
     if (extended >= 0 && extended != fallback) {
         log_msg("Duplicate mode resolved through extended group: %dx%dHz "
                 "fallback=%d selected=%d", width, fps, fallback, extended);
+    }
+    return extended >= 0 ? extended : fallback;
+}
+
+static int mode_for_resolution_fps(int width, int height, int fps) {
+    int fallback = -1;
+    int extended = -1;
+    if (width <= 0 || height <= 0 || fps <= 0) return -1;
+    for (int i = 0; i < mode_count; i++) {
+        if (modes[i].width == width && modes[i].height == height &&
+                modes[i].fps == fps) {
+            if (fallback < 0 || modes[i].id < fallback) fallback = modes[i].id;
+            if (group_has_extended_rate(width, modes[i].group) &&
+                    (extended < 0 || modes[i].id < extended)) {
+                extended = modes[i].id;
+            }
+        }
     }
     return extended >= 0 ? extended : fallback;
 }
@@ -4683,8 +4228,7 @@ static int mode_for_app_fps(int fps) {
         }
     }
     if (width <= 0 || height <= 0) return -1;
-    (void)height;
-    return mode_for_width_fps(width, fps);
+    return mode_for_resolution_fps(width, height, fps);
 }
 
 static int write_app_config(const char *base_path, const char *package_name,
@@ -4763,6 +4307,7 @@ static int write_resolution_config(const char *base_path, int mode_id,
     char temporary_path[560];
     FILE *fp;
     int failed = 0;
+    int target_height = mode_height(mode_id);
 
     snprintf(config_path, sizeof(config_path), "%s/config/mode.txt", base_path);
     snprintf(temporary_path, sizeof(temporary_path), "%s.hook.%d",
@@ -4772,7 +4317,7 @@ static int write_resolution_config(const char *base_path, int mode_id,
     if (!write_mode_spec_line(fp, mode_id)) failed = 1;
     for (int i = 0; i < app_config_count; i++) {
         int fps = mode_fps(app_configs[i].mode_id);
-        int remapped = mode_for_width_fps(target_width, fps);
+        int remapped = mode_for_resolution_fps(target_width, target_height, fps);
         if (remapped >= 0) {
             if (!write_app_spec_line(fp, app_configs[i].package, remapped,
                                      mode_id)) {
@@ -4797,16 +4342,31 @@ static int write_resolution_config(const char *base_path, int mode_id,
     return 1;
 }
 
+static int valid_module_path(const char *base_path) {
+    char config_path[PATH_MAX];
+    struct stat state;
+
+    if (!base_path || !*base_path || base_path[0] == '-') return 0;
+    if (strlen(base_path) >= PATH_MAX) return 0;
+    if (stat(base_path, &state) != 0 || !S_ISDIR(state.st_mode)) return 0;
+    if (snprintf(config_path, sizeof(config_path), "%s/config", base_path)
+            >= (int)sizeof(config_path)) return 0;
+    if (stat(config_path, &state) != 0 || !S_ISDIR(state.st_mode)) return 0;
+    return 1;
+}
+
 static void reconcile_boot_resolution(const char *base_path) {
     int adjust = -1;
-    int active_id = get_current_system_mode();
-    int active_width = get_mode_width(active_id);
+    int active_id = -1;
+    int active_width = -1;
     int configured_id = default_mode_id;
     int configured_fps = mode_fps(configured_id);
-    int target_width = active_width;
+    int target_width = -1;
     int target_id;
     int persisted = 0;
 
+    wait_for_boot_resolution_stable(&active_id, &active_width);
+    target_width = active_width;
     if (read_setting_int("secure",
                          "oplus_customize_screen_resolution_adjust",
                          &adjust)) {
@@ -4824,7 +4384,7 @@ static void reconcile_boot_resolution(const char *base_path) {
         /* The configured mode.txt is authoritative. Never overwrite it with
          * the active geometry just because the boot transition is incomplete;
          * that would silently downgrade the user's chosen resolution (and
-         * leave the density mismatched) on every restart. */
+         * leave the configured geometry mismatched) on every restart. */
         log_msg("Boot resolution restore is unsettled: adjust=%d wants=%d "
                 "active=%d/%d; keeping configured geometry",
                 adjust, target_width, active_id, active_width);
@@ -4852,29 +4412,12 @@ static void reconcile_boot_resolution(const char *base_path) {
 }
 
 static int queue_native_resolution_adoption(int target_width, int source_width,
-                                            int source_density,
                                             long long generation) {
     NativeResolutionAdoption next;
     int stable_source_width = source_width;
-    int stable_source_density = source_density;
-    int target_density;
 
     if (native_resolution_adoption.valid) {
         stable_source_width = native_resolution_adoption.source_width;
-        stable_source_density = native_resolution_adoption.source_density;
-    }
-    if (target_width == stable_source_width) {
-        target_density = stable_source_density;
-    } else {
-        target_density = density_for_resolution(stable_source_width, target_width,
-                                                stable_source_density);
-    }
-    if (target_density < 72 || target_density > 2000) {
-        log_msg("Native Settings adoption rejected: target=%d source=%d/%ddpi "
-                "resolved_density=%d generation=%lld",
-                target_width, source_width, source_density, target_density,
-                generation);
-        return 0;
     }
     if (!clear_display_preference()) {
         log_msg("Native Settings adoption could not clear the source display "
@@ -4883,22 +4426,10 @@ static int queue_native_resolution_adoption(int target_width, int source_width,
         return 0;
     }
 
-    /* The daemon finalizes successful changes into these AOSP user settings.
-     * Clear a stale source-size vote while ColorOS publishes the new size;
-     * otherwise the old QHD vote wins and ColorOS changes density only. */
-    if (!delete_setting("global", "user_preferred_resolution_width") ||
-        !delete_setting("global", "user_preferred_resolution_height")) {
-        log_msg("Native Settings adoption could not fully clear the stale "
-                "framework size vote: generation=%lld target=%d",
-                generation, target_width);
-    }
-
     memset(&next, 0, sizeof(next));
     next.valid = 1;
     next.target_width = target_width;
     next.source_width = stable_source_width;
-    next.source_density = stable_source_density;
-    next.target_density = target_density;
     next.generation = generation;
     next.queued_at_ms = monotonic_ms();
     next.expires_at_ms = next.queued_at_ms + 8000;
@@ -4911,19 +4442,16 @@ static int queue_native_resolution_adoption(int target_width, int source_width,
                 generation, target_width);
     }
     native_resolution_adoption = next;
-    log_msg("Native Settings adoption queued: generation=%lld target=%d/%ddpi "
-            "source=%d/%ddpi",
-            generation, target_width, target_density,
-            stable_source_width, stable_source_density);
+    log_msg("Native Settings adoption queued: generation=%lld target_width=%d "
+            "source_width=%d", generation, target_width, stable_source_width);
     return 1;
 }
 
 static void recover_native_resolution_adoption(void) {
     int active_id = get_current_system_mode();
     int active_width = get_mode_width(active_id);
-    int active_height = 0;
-    int adjust;
-    char property_cmd[128];
+    int source_id;
+    int desired_fps = mode_fps(default_mode_id);
 
     if (!is_valid_mode(active_id)
             || active_width != native_resolution_adoption.source_width) {
@@ -4933,35 +4461,24 @@ static void recover_native_resolution_adoption(void) {
                 native_resolution_adoption.source_width);
         return;
     }
-    for (int i = 0; i < mode_count; i++) {
-        if (modes[i].id == active_id) {
-            active_height = modes[i].height;
-            break;
-        }
+    source_id = mode_for_width_fps(native_resolution_adoption.source_width,
+                                   desired_fps);
+    if (!is_valid_mode(source_id)) {
+        source_id = active_id;
     }
-    adjust = resolution_adjust_for_width(active_width);
-    if (adjust < 0 || active_height <= 0) {
-        log_msg("Native Settings adoption recovery unsupported: width=%d height=%d",
-                active_width, active_height);
+    if (!is_valid_mode(source_id) ||
+            !set_surface_flinger_mode(source_id) ||
+            !wait_for_active_mode(source_id, 1500) ||
+            !wait_for_active_width(native_resolution_adoption.source_width, 1500)) {
+        log_msg("Native Settings adoption recovery failed: source_width=%d mode=%d",
+                native_resolution_adoption.source_width, source_id);
         return;
     }
-
-    snprintf(property_cmd, sizeof(property_cmd),
-             "setprop persist.sys.display.user_density %d",
-             native_resolution_adoption.source_density);
-    system(property_cmd);
-    snprintf(property_cmd, sizeof(property_cmd),
-             "setprop persist.sys.display.screen_resolution %d", adjust);
-    system(property_cmd);
-    ensure_density_override(native_resolution_adoption.source_density, 1500);
-    write_setting_int("secure", "oplus_customize_screen_resolution_adjust",
-                      adjust);
-    finalize_coloros_resolution_settings(active_width, active_height);
-    current_mode_id = active_id;
-    log_msg("Native Settings adoption timed out and source state was restored: "
-            "generation=%lld mode=%d width=%d density=%d",
-            native_resolution_adoption.generation, active_id, active_width,
-            native_resolution_adoption.source_density);
+    current_mode_id = source_id;
+    log_msg("Native Settings adoption timed out and source mode was restored: "
+            "generation=%lld mode=%d width=%d fps=%d",
+            native_resolution_adoption.generation, source_id,
+            native_resolution_adoption.source_width, mode_fps(source_id));
 }
 
 static void process_native_resolution_adoption(const char *base_path) {
@@ -4972,7 +4489,6 @@ static void process_native_resolution_adoption(const char *base_path) {
     int target_height = 0;
     int desired_fps;
     long long now_ms;
-    char property_cmd[128];
 
     if (!native_resolution_adoption.valid) return;
 
@@ -5041,49 +4557,49 @@ static void process_native_resolution_adoption(const char *base_path) {
         int stock_id = native_anchor_for_target(target_id);
         if (stock_id >= 0) preference_id = stock_id;
     }
-    /* ADOPTRES clears the stale source-size vote before ColorOS starts. Always
-     * rebuild a native user preference after the physical mode is correct.
-     * The exact extension is selected only by the ordered ladder below. */
-    if (!set_display_preference(preference_id)
-        || !wait_for_active_width(native_resolution_adoption.target_width, 500)) {
-        log_msg("Native Settings refresh remap retry: generation=%lld active=%d "
-                "target=%d",
-                native_resolution_adoption.generation, active_id, target_id);
-        native_resolution_adoption.target_observed_at_ms = now_ms;
-        return;
-    }
-
-    for (int i = 0; i < mode_count; i++) {
-        if (modes[i].id == target_id) {
-            target_height = modes[i].height;
-            break;
-        }
-    }
-    if (target_height <= 0) {
-        native_resolution_adoption.target_observed_at_ms = now_ms;
-        return;
-    }
-
-    snprintf(property_cmd, sizeof(property_cmd),
-             "setprop persist.sys.display.user_density %d",
-             native_resolution_adoption.target_density);
-    if (system(property_cmd) != 0
-            || !ensure_density_override(native_resolution_adoption.target_density,
-                                        1500)
-            || !finalize_coloros_resolution_settings(
-                    native_resolution_adoption.target_width, target_height)) {
-        log_msg("Native Settings adoption finalization retry: generation=%lld "
-                "mode=%d density=%d",
-                native_resolution_adoption.generation, target_id,
-                native_resolution_adoption.target_density);
-        native_resolution_adoption.target_observed_at_ms = now_ms;
-        return;
-    }
-
+    /* Select the exact HWC mode after the native Settings geometry settles.
+     * The framework preference is intentionally not rewritten here: it can
+     * re-enter ColorOS' resolution path and alter logical display scaling. */
     current_mode_id = get_current_system_mode();
     if (!is_valid_mode(current_mode_id) ||
-            !same_mode_geometry(current_mode_id, target_id) ||
-            !apply_refresh_ladder(target_id) ||
+            get_mode_width(current_mode_id) !=
+                    native_resolution_adoption.target_width) {
+        log_msg("Native Settings mode adoption geometry drift: generation=%lld "
+                "active=%d/%d target_width=%d",
+                native_resolution_adoption.generation, current_mode_id,
+                get_mode_width(current_mode_id),
+                native_resolution_adoption.target_width);
+        native_resolution_adoption.target_observed_at_ms = now_ms;
+        return;
+    }
+    if (is_overclock_mode(target_id)) {
+        int stock_id = native_anchor_for_target(target_id);
+        if (stock_id >= 0 && current_mode_id != stock_id) {
+            if (!set_surface_flinger_mode(stock_id) ||
+                    !wait_for_active_mode(stock_id, 1500)) {
+                log_msg("Native Settings mode anchor failed: generation=%lld "
+                        "anchor=%d target=%d",
+                        native_resolution_adoption.generation, stock_id,
+                        target_id);
+                native_resolution_adoption.target_observed_at_ms = now_ms;
+                return;
+            }
+            current_mode_id = stock_id;
+        }
+    } else if (current_mode_id != target_id &&
+            !same_mode_geometry(current_mode_id, target_id)) {
+        if (!set_surface_flinger_mode(target_id) ||
+                !wait_for_active_mode(target_id, 1500)) {
+            log_msg("Native Settings mode selection failed: generation=%lld "
+                    "target=%d active=%d",
+                    native_resolution_adoption.generation, target_id,
+                    current_mode_id);
+            native_resolution_adoption.target_observed_at_ms = now_ms;
+            return;
+        }
+        current_mode_id = target_id;
+    }
+    if (!apply_refresh_ladder(target_id) ||
             !write_resolution_config(base_path, target_id,
                                      native_resolution_adoption.target_width)) {
         log_msg("Native Settings ordered refresh retry: generation=%lld "
@@ -5097,10 +4613,10 @@ static void process_native_resolution_adoption(const char *base_path) {
     sync_android_settings(target_id);
     load_config(base_path);
     log_msg("Native Settings resolution adopted: generation=%lld mode=%d "
-            "width=%d density=%d fps=%d",
+            "width=%d fps=%d",
             native_resolution_adoption.generation, target_id,
             native_resolution_adoption.target_width,
-            native_resolution_adoption.target_density, mode_fps(target_id));
+            mode_fps(target_id));
     native_resolution_adoption.valid = 0;
 }
 
@@ -5269,7 +4785,8 @@ static void handle_display_hook_client(int server_fd, const char *base_path) {
     int fps;
     int width;
     int source_width;
-    int density;
+    long long adoption_arg;
+    int adoption_fields;
     long long generation;
     long long story_uptime;
     int client_fd = accept4(server_fd, (struct sockaddr *)&address,
@@ -5299,6 +4816,13 @@ static void handle_display_hook_client(int server_fd, const char *base_path) {
         close(client_fd);
         return;
     }
+
+    adoption_arg = 0;
+    generation = 0;
+    adoption_fields = sscanf(request, "ADOPTRES %d %d %lld %lld",
+                             &width, &source_width, &adoption_arg,
+                             &generation);
+    if (adoption_fields == 3) generation = adoption_arg;
 
     if (strcmp(trim(request), "PING") == 0) {
         dprintf(client_fd, "OK API 4\n");
@@ -5424,64 +4948,58 @@ static void handle_display_hook_client(int server_fd, const char *base_path) {
     } else if (sscanf(request, "PREPRES %d", &width) == 1
             && width >= 480 && width <= 10000) {
         if (prepare_resolution_transaction(width)) {
-            dprintf(client_fd, "OK %d\n", prepared_resolution.target_density);
+            dprintf(client_fd, "OK %d\n", width);
         } else {
             dprintf(client_fd, "ERR prepare\n");
         }
-    } else if (sscanf(request, "ADOPTRES %d %d %d %lld",
-                      &width, &source_width, &density, &generation) == 4
+    } else if ((adoption_fields == 3 || adoption_fields == 4)
             && width >= 480 && width <= 10000
             && source_width >= 480 && source_width <= 10000
-            && density >= 72 && density <= 2000
             && generation > 0) {
-        if (queue_native_resolution_adoption(width, source_width, density,
-                                             generation)) {
+        if (queue_native_resolution_adoption(width, source_width, generation)) {
             dprintf(client_fd, "OK %d\n", default_mode_id);
         } else {
             dprintf(client_fd, "ERR adopt\n");
         }
-    } else if (sscanf(request, "SETRES %d %d", &width, &density) == 2
-            && width >= 480 && width <= 10000
-            && density >= 72 && density <= 2000) {
+    } else if (sscanf(request, "SETRES %d", &width) == 1
+            && width >= 480 && width <= 10000) {
         fps = mode_fps(default_mode_id);
         int mode_id = mode_for_width_fps(width, fps);
         if (mode_id < 0) {
             dprintf(client_fd, "ERR mode\n");
-        } else if (!apply_hook_mode_request(base_path, mode_id, width, density)) {
+        } else if (!apply_hook_mode_request(base_path, mode_id, width)) {
             dprintf(client_fd, "ERR apply\n");
         } else if (!write_resolution_config(base_path, mode_id, width)) {
             dprintf(client_fd, "ERR write\n");
         } else {
             load_config(base_path);
             dprintf(client_fd, "OK %d\n", mode_id);
-            log_msg("Display hook set resolution width=%d density=%d fps=%d mode=%d",
-                    width, density, fps, mode_id);
+            log_msg("Display hook set resolution width=%d fps=%d mode=%d",
+                    width, fps, mode_id);
         }
-    } else if (sscanf(request, "SETMODE %d %d %d", &width, &fps, &density) == 3
+    } else if (sscanf(request, "SETMODE %d %d", &width, &fps) == 2
             && width >= 480 && width <= 10000
-            && fps >= 30 && fps <= 1000
-            && density >= 72 && density <= 2000) {
+            && fps >= 30 && fps <= 1000) {
         int mode_id = mode_for_width_fps(width, fps);
         if (mode_id < 0) {
             dprintf(client_fd, "ERR mode\n");
-        } else if (!apply_hook_mode_request(base_path, mode_id, width, density)) {
+        } else if (!apply_hook_mode_request(base_path, mode_id, width)) {
             dprintf(client_fd, "ERR apply\n");
         } else if (!write_resolution_config(base_path, mode_id, width)) {
             dprintf(client_fd, "ERR write\n");
         } else {
             load_config(base_path);
             dprintf(client_fd, "OK %d\n", mode_id);
-            log_msg("Display hook set exact mode width=%d fps=%d density=%d mode=%d",
-                    width, fps, density, mode_id);
+            log_msg("Display hook set exact mode width=%d fps=%d mode=%d",
+                    width, fps, mode_id);
         }
     } else if (sscanf(request, "SETGLOBAL %d", &fps) == 1
             && fps >= 30 && fps <= 1000) {
         int mode_id = mode_for_app_fps(fps);
         int width = get_mode_width(mode_id);
-        int density = read_override_density();
         if (mode_id < 0) {
             dprintf(client_fd, "ERR mode\n");
-        } else if (!apply_hook_mode_request(base_path, mode_id, width, density)) {
+        } else if (!apply_hook_mode_request(base_path, mode_id, width)) {
             dprintf(client_fd, "ERR apply\n");
         } else if (!write_global_config(base_path, mode_id)) {
             dprintf(client_fd, "ERR write\n");
@@ -5564,11 +5082,19 @@ static void handle_display_hook_client(int server_fd, const char *base_path) {
 
 
 int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        printf("Usage: %s <module_path>\n", argv[0]);
-        return 1;
+    if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+        printf("rate_daemon %s\n", RATE_DAEMON_VERSION);
+        return 0;
     }
-    
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <module_path> | --version\n", argv[0]);
+        return 2;
+    }
+    if (!valid_module_path(argv[1])) {
+        fprintf(stderr, "Invalid module path: %s\n", argv[1]);
+        return 2;
+    }
+
     char *base_path = argv[1];
 #ifndef MURONG_FREE_BUILD
     premium_base_path = base_path;
@@ -5595,6 +5121,7 @@ int main(int argc, char *argv[]) {
 #ifndef MURONG_FREE_BUILD
     recover_video_iris_esd_on_startup(base_path);
 #endif
+    ensure_rmx5200_oti_state_dir(base_path);
     sync_oti_pause_policy(base_path, 1);
     int hook_server_fd = create_display_hook_server();
     reconcile_boot_resolution(base_path);
@@ -5918,7 +5445,7 @@ int main(int argc, char *argv[]) {
                          * a ColorOS app/scene resolution vote.  Games and
                          * video apps can move HWC to the FHD group while the
                          * durable policy remains QHD; leaving the controller
-                         * idle here also leaves Android with a stale 560-dpi
+                         * idle here also leaves Android with a stale display
                          * layout.  Let the normal transaction restore the
                          * configured geometry, then resume LTPO ownership. */
                         int applied_id = get_current_applied_mode();

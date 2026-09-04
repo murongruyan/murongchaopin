@@ -31,19 +31,6 @@ write_bridge() {
 }
 write_bridge 0 ""
 
-# Paid package dispatch runs first so the premium LTPO provider (if authorized)
-# is loaded before the free display backend re-evaluates the active mode set.
-# The free backend's boot-apply then skips itself when the custom LTPO module
-# already owns the mode array.
-if [ -f "$PREMIUM_POST_FS" ]; then
-    . "$GATE_HELPER" 2>/dev/null
-    gate_normalize_premium_scripts >/dev/null 2>&1 || true
-    REMOVE_PREMIUM=$(gate_json_field "$GATE_STATE_FILE" remove_premium)
-    if [ "$REMOVE_PREMIUM" != "1" ]; then
-        sh "$PREMIUM_POST_FS" >/dev/null 2>&1 || true
-    fi
-fi
-
 # RMX5200's stock LTPS framework can resolve QHD60 correctly, but a stale
 # object-animation entry in SurfaceFlinger's vendor vote map can keep the
 # overclocked 170Hz mode selected. For the free stock_ltps policy only, filter
@@ -70,7 +57,20 @@ fi
 # block boot before the vendor consumer has initialized.
 
 [ -f "$DISPLAY_HELPER" ] || exit 0
-if [ ! -d /sys/module/rmx5200_ltpo_modes ]; then
+# Preserve the original two-stage ownership: the free DRM backend publishes
+# the overclock modes first, then the paid LTPO provider appends 30/10/1Hz to
+# that live mode array.  The LTPO helper no longer treats the DRM module as an
+# error; loading it after DRM is the supported RMX5200 composition.
+if [ ! -d /sys/module/rmx5200_drm_modes ]; then
     sh "$DISPLAY_HELPER" boot-apply >/dev/null 2>&1
+fi
+
+if [ -f "$PREMIUM_POST_FS" ]; then
+    . "$GATE_HELPER" 2>/dev/null
+    gate_normalize_premium_scripts >/dev/null 2>&1 || true
+    REMOVE_PREMIUM=$(gate_json_field "$GATE_STATE_FILE" remove_premium)
+    if [ "$REMOVE_PREMIUM" != "1" ]; then
+        sh "$PREMIUM_POST_FS" >/dev/null 2>&1 || true
+    fi
 fi
 exit 0

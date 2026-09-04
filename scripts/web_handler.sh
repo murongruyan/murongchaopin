@@ -25,6 +25,7 @@ SF_RISE_HELPER="$PREMIUM_PATH/scripts/surfaceflinger_ltpo_rise_patch.sh"
 MEMC_GATE_HELPER="$PREMIUM_PATH/scripts/libpwiris_memc_gate_patch.sh"
 COLOROS_PREMIUM_HELPER="$PREMIUM_PATH/scripts/coloros_config_premium.sh"
 PREMIUM_SYSTEM_OVERLAY_HELPER="$PREMIUM_PATH/scripts/premium_system_overlay.sh"
+GAME_ASSISTANT_CONFIG_HELPER="$PREMIUM_PATH/scripts/game_assistant_config_premium.sh"
 ADFR_POLICY_FILE="$MOD_PATH/config/rmx5200_adfr_mode.txt"
 ADFR_TEST_BYPASS_FILE="$MOD_PATH/config/adfr_lock_test_disabled"
 DISPLAY_POLICY_FILE="$MOD_PATH/config/rmx5200_display_policy.txt"
@@ -37,14 +38,87 @@ MODE_MANIFEST_FILE="$MOD_PATH/config/display_mode_manifest.txt"
 SETTINGS_BRIDGE_HELPER="$MOD_PATH/scripts/display_settings_bridge.sh"
 MODE_MANIFEST_HELPER="$MOD_PATH/scripts/mode_manifest.sh"
 COLOROS_CONFIG_HELPER="$MOD_PATH/scripts/coloros_config.sh"
+DISPLAY_HOOK_TOKEN="api102-6d85e308abce16567fdd668dcd12ebadf5f82bdaa78dc6023f04fcee9795f6c4"
 VIDEO_MEMC_APPS_FILE="$MOD_PATH/config/video_memc_apps.txt"
 GAME_ASSISTANT_APPS_FILE="$MOD_PATH/config/game_assistant_apps.txt"
+GAME_ASSISTANT_FEATURES_FILE="$MOD_PATH/config/game_assistant_features.txt"
+normalize_game_assistant_apps() {
+    [ -f "$GAME_ASSISTANT_APPS_FILE" ] || return 0
+    local tmp="${GAME_ASSISTANT_APPS_FILE}.normalize.$$"
+    sed -e 's/\r//g' -e 's/,/\n/g' -e 's/n\(com\.\)/\n\1/g' \
+        "$GAME_ASSISTANT_APPS_FILE" | sed '/^[[:space:]]*$/d' | sort -u > "$tmp" || return 1
+    mv -f "$tmp" "$GAME_ASSISTANT_APPS_FILE" || return 1
+    chmod 0644 "$GAME_ASSISTANT_APPS_FILE" 2>/dev/null
+}
+normalize_game_assistant_features() {
+    [ -f "$GAME_ASSISTANT_FEATURES_FILE" ] || return 0
+    local tmp="${GAME_ASSISTANT_FEATURES_FILE}.normalize.$$"
+    awk -F '|' '
+        BEGIN { OFS="|" }
+        NF >= 1 {
+            package = $1
+            sub(/\r$/, "", package)
+            if (package !~ /^[A-Za-z0-9_]+\.[A-Za-z0-9._]+$/) next
+            raw = $2
+            count = split(raw, values, ",")
+            features = ""
+            for (feature_index = 1; feature_index <= count; feature_index++) {
+                if (values[feature_index] == "frame" || values[feature_index] == "sr" || values[feature_index] == "hqv") {
+                    if ("," features "," !~ "," values[feature_index] ",") {
+                        features = features (features == "" ? "" : ",") values[feature_index]
+                    }
+                }
+            }
+            print package, features
+        }
+    ' "$GAME_ASSISTANT_FEATURES_FILE" | sort -t '|' -k1,1 -u > "$tmp" || return 1
+    mv -f "$tmp" "$GAME_ASSISTANT_FEATURES_FILE" || return 1
+    chmod 0644 "$GAME_ASSISTANT_FEATURES_FILE" 2>/dev/null
+}
+game_assistant_default_features() {
+    printf 'frame,sr,hqv\n'
+}
+game_assistant_features_for_package() {
+    local package="$1"
+    local features=""
+    if [ -f "$GAME_ASSISTANT_FEATURES_FILE" ] &&
+        features=$(awk -F '|' -v package="$package" \
+            '$1 == package { print (NF >= 2 ? $2 : ""); found=1; exit }
+             END { if (!found) exit 1 }' "$GAME_ASSISTANT_FEATURES_FILE"); then
+        printf '%s\n' "$features"
+    else
+        game_assistant_default_features "$package"
+    fi
+}
+sync_game_assistant_features_property() {
+    local value=""
+    if [ -f "$GAME_ASSISTANT_FEATURES_FILE" ]; then
+        normalize_game_assistant_features || true
+        value=$(awk -F '|' '
+            NF >= 1 && $1 != "" {
+                gsub(/,/, "+", $2)
+                printf "%s%s:%s", separator, $1, $2
+                separator = ";"
+            }
+        ' "$GAME_ASSISTANT_FEATURES_FILE")
+    fi
+    setprop sys.murong.game_assistant_features "$value" 2>/dev/null || true
+}
 sync_game_assistant_property() {
     local value=""
     if [ -f "$GAME_ASSISTANT_APPS_FILE" ]; then
+        normalize_game_assistant_apps || true
         value=$(tr '\n' ',' < "$GAME_ASSISTANT_APPS_FILE" | sed 's/,$//')
     fi
     setprop sys.murong.game_assistant_apps "$value" 2>/dev/null || true
+    sync_game_assistant_features_property
+}
+apply_game_assistant_config() {
+    [ -x "$GAME_ASSISTANT_CONFIG_HELPER" ] || {
+        echo "Error: game assistant config helper is missing"
+        return 1
+    }
+    sh "$GAME_ASSISTANT_CONFIG_HELPER" apply
 }
 VIDEO_MOTION_TARGET_KEY="murong_video_motion_target_rate"
 BASE_API_URL="https://murongdiaodu.rl1.cc/api"
@@ -109,16 +183,199 @@ mkdir -p "$(dirname "$CONFIG_FILE")"
 [ ! -f "$DISPLAY_POLICY_FILE" ] && printf 'stock_ltps\n' > "$DISPLAY_POLICY_FILE"
 
 mode_semantic_for_id() {
+    MODE_ID="$1"
+    case "$MODE_ID" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
     MODE_LINE=$(dumpsys SurfaceFlinger 2>/dev/null | \
-        grep -oE "id=$1, hwcId=[0-9]+, resolution=[0-9]+x[0-9]+, vsyncRate=[0-9.]+" | head -n 1)
+        grep -E "id=${MODE_ID}[,}]" | \
+        grep -E 'resolution=[0-9]+x[0-9]+|width=[0-9]+.*height=[0-9]+' | \
+        grep -E 'vsyncRate=[0-9.]+' | head -n 1)
     [ -n "$MODE_LINE" ] || return 1
-    MODE_WIDTH=$(printf '%s\n' "$MODE_LINE" | sed -n 's/.*resolution=\([0-9]*\)x[0-9]*.*/\1/p')
-    MODE_FPS=$(printf '%s\n' "$MODE_LINE" | sed -n 's/.*vsyncRate=\([0-9.]*\).*/\1/p' | awk '{printf "%d", $1 + 0.5}')
-    case "$MODE_WIDTH" in
-        1080) printf 'FHD+ %s\n' "$MODE_FPS" ;;
-        1440) printf 'QHD+ %s\n' "$MODE_FPS" ;;
+    MODE_WIDTH=$(printf '%s\n' "$MODE_LINE" | sed -n 's/.*resolution=\([0-9][0-9]*\)x[0-9][0-9]*.*/\1/p')
+    MODE_HEIGHT=$(printf '%s\n' "$MODE_LINE" | sed -n 's/.*resolution=[0-9][0-9]*x\([0-9][0-9]*\).*/\1/p')
+    if [ -z "$MODE_WIDTH" ] || [ -z "$MODE_HEIGHT" ]; then
+        MODE_WIDTH=$(printf '%s\n' "$MODE_LINE" | sed -n 's/.*width=\([0-9][0-9]*\).*height=\([0-9][0-9]*\).*/\1/p')
+        MODE_HEIGHT=$(printf '%s\n' "$MODE_LINE" | sed -n 's/.*width=[0-9][0-9]*.*height=\([0-9][0-9]*\).*/\1/p')
+    fi
+    MODE_FPS=$(printf '%s\n' "$MODE_LINE" | sed -n 's/.*vsyncRate=\([0-9.][0-9.]*\).*/\1/p' | awk '{printf "%d", $1 + 0.5}')
+    [ -n "$MODE_WIDTH" ] && [ -n "$MODE_HEIGHT" ] && [ "$MODE_FPS" -ge 30 ] || return 1
+    printf '%sx%s %s\n' "$MODE_WIDTH" "$MODE_HEIGHT" "$MODE_FPS"
+}
+
+active_display_width() {
+    dumpsys SurfaceFlinger 2>/dev/null | sed -n \
+        's/.*activeMode={[^}]*resolution=\([0-9][0-9]*\)x[0-9][0-9]*.*/\1/p' | \
+        head -n 1
+}
+
+display_hook_request() {
+    DISPLAY_HOOK_REQUEST="$1"
+    printf 'AUTH %s %s\n' "$DISPLAY_HOOK_TOKEN" "$DISPLAY_HOOK_REQUEST" | \
+        nc -w 2 127.0.0.1 49721 2>/dev/null | head -n 1
+}
+
+coloros_density_for_resolution() {
+    RESOLUTION_ADJUST="$1"
+    DENSITY_INDEX=$(settings get system display_density_index_manual 2>/dev/null | \
+        tr -d '[:space:]')
+    case "$DENSITY_INDEX" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    case "$RESOLUTION_ADJUST" in
+        2) DENSITY_SCALE=$(getprop ro.density.screenzoom.fdh 2>/dev/null) ;;
+        3) DENSITY_SCALE=$(getprop ro.density.screenzoom.qdh 2>/dev/null) ;;
         *) return 1 ;;
     esac
+    TARGET_DENSITY=$(printf '%s\n' "$DENSITY_SCALE" | awk -F, \
+        -v field="$((DENSITY_INDEX + 1))" \
+        'field >= 1 && field <= NF && $field ~ /^[0-9]+$/ { print $field }')
+    case "$TARGET_DENSITY" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$TARGET_DENSITY" -ge 72 ] 2>/dev/null && \
+        [ "$TARGET_DENSITY" -le 2000 ] 2>/dev/null
+}
+
+begin_coloros_resolution_change() {
+    TARGET_MODE_ID="$1"
+    TARGET_SPEC="$2"
+    set -- $TARGET_SPEC
+    TARGET_GEOMETRY="$1"
+    TARGET_WIDTH=${TARGET_GEOMETRY%%x*}
+    SOURCE_WIDTH=$(active_display_width)
+    case "$TARGET_WIDTH:$SOURCE_WIDTH" in
+        *[!0-9:]*|:|*:|*::* ) return 1 ;;
+    esac
+    [ "$TARGET_WIDTH" -ne "$SOURCE_WIDTH" ] 2>/dev/null || return 2
+
+    DISPLAY_WIDTH_LIST=$(display_widths)
+    MIN_DISPLAY_WIDTH=$(printf '%s\n' "$DISPLAY_WIDTH_LIST" | head -n 1)
+    MAX_DISPLAY_WIDTH=$(printf '%s\n' "$DISPLAY_WIDTH_LIST" | tail -n 1)
+    if [ "$TARGET_WIDTH" = "$MIN_DISPLAY_WIDTH" ] && \
+            [ "$MIN_DISPLAY_WIDTH" != "$MAX_DISPLAY_WIDTH" ]; then
+        RESOLUTION_ADJUST=2
+    elif [ "$TARGET_WIDTH" = "$MAX_DISPLAY_WIDTH" ]; then
+        RESOLUTION_ADJUST=3
+    else
+        return 1
+    fi
+    coloros_density_for_resolution "$RESOLUTION_ADJUST" || return 1
+
+    RESOLUTION_GENERATION="$(date +%s 2>/dev/null)$$"
+    case "$RESOLUTION_GENERATION" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    ADOPT_RESPONSE=$(display_hook_request \
+        "ADOPTRES $TARGET_WIDTH $SOURCE_WIDTH $TARGET_MODE_ID $RESOLUTION_GENERATION")
+    case "$ADOPT_RESPONSE" in
+        "OK "*) ;;
+        *) return 1 ;;
+    esac
+
+    # Match ScreenResolutionFragment's native property order. The density is
+    # selected by the user's existing display-size slot, so FHD/QHD switches
+    # preserve visual scale instead of reusing the source resolution's DPI.
+    setprop persist.sys.display.user_density "$TARGET_DENSITY" || return 1
+    setprop persist.sys.display.screen_resolution "$RESOLUTION_ADJUST" || return 1
+    settings put secure oplus_customize_screen_resolution_adjust \
+        "$RESOLUTION_ADJUST" || return 1
+    settings put secure user_preferred_screen_index "$RESOLUTION_ADJUST" || return 1
+    sleep 0.1
+    wm density "$TARGET_DENSITY" >/dev/null 2>&1 || return 1
+
+    RESOLUTION_WAIT=0
+    while [ "$RESOLUTION_WAIT" -lt 100 ]; do
+        [ "$(sed -n '1{s/\r$//;p;q;}' "$CONFIG_FILE" 2>/dev/null)" = \
+                "$TARGET_SPEC" ] && return 0
+        sleep 0.1
+        RESOLUTION_WAIT=$((RESOLUTION_WAIT + 1))
+    done
+    return 1
+}
+
+display_widths() {
+    dumpsys SurfaceFlinger 2>/dev/null |
+        sed -n 's/.*resolution=\([0-9][0-9]*\)x[0-9][0-9]*.*/\1/p' |
+        sort -n -u
+}
+
+height_for_width() {
+    dumpsys SurfaceFlinger 2>/dev/null |
+        sed -n "s/.*resolution=$1x\([0-9][0-9]*\).*/\1/p" |
+        head -n 1
+}
+
+mode_semantic_for_resolution() {
+    MODE_TOKEN="$1"
+    MODE_FPS="$2"
+    MODE_WIDTH=""
+    MODE_HEIGHT=""
+    case "$MODE_FPS" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$MODE_FPS" -ge 30 ] || return 1
+    case "$MODE_TOKEN" in
+        FHD+|FHD|1080P|1080p|1080) MODE_WIDTH=$(display_widths | head -n 1) ;;
+        QHD+|QHD|2K|2k|1440) MODE_WIDTH=$(display_widths | tail -n 1) ;;
+        *x*)
+            MODE_WIDTH=$(printf '%s\n' "$MODE_TOKEN" | sed -n 's/^\([0-9][0-9]*\)x[0-9][0-9]*$/\1/p')
+            MODE_HEIGHT=$(printf '%s\n' "$MODE_TOKEN" | sed -n 's/^[0-9][0-9]*x\([0-9][0-9]*\)$/\1/p') ;;
+        *) return 1 ;;
+    esac
+    [ -n "$MODE_WIDTH" ] || return 1
+    [ -n "$MODE_HEIGHT" ] || MODE_HEIGHT=$(height_for_width "$MODE_WIDTH")
+    [ -n "$MODE_HEIGHT" ] || return 1
+    printf '%sx%s %s\n' "$MODE_WIDTH" "$MODE_HEIGHT" "$MODE_FPS"
+}
+
+canonical_global_spec() {
+    GLOBAL_LINE=$(head -n 1 "$CONFIG_FILE" 2>/dev/null | tr -d '\r')
+    case "$GLOBAL_LINE" in
+        ''|\#*) return 1 ;;
+        *[!0-9]*) ;;
+        *) mode_semantic_for_id "$GLOBAL_LINE"; return $? ;;
+    esac
+    set -- $GLOBAL_LINE
+    [ "$#" -eq 2 ] || return 1
+    mode_semantic_for_resolution "$1" "$2"
+}
+
+canonical_app_line() {
+    APP_LINE=$(printf '%s\n' "$1" | tr -d '\r')
+    APP_LINE=$(printf '%s\n' "$APP_LINE" | sed 's/=/ /')
+    set -- $APP_LINE
+    [ "$#" -ge 2 ] || return 1
+    APP_PACKAGE="$1"
+    if [ "$#" -ge 3 ]; then
+        mode_semantic_for_resolution "$2" "$3" | sed "s/^/$APP_PACKAGE /"
+        return $?
+    fi
+    case "$2" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    if [ "$2" -ge 30 ]; then
+        set -- $GLOBAL_SPEC
+        printf '%s %s %s\n' "$APP_PACKAGE" "$1" "$2"
+    else
+        mode_semantic_for_id "$2" | sed "s/^/$APP_PACKAGE /"
+    fi
+}
+
+canonicalize_app_configs() {
+    GLOBAL_SPEC="$1"
+    EXCLUDED_PACKAGE="$2"
+    [ -f "$CONFIG_FILE" ] || return 0
+    tail -n +2 "$CONFIG_FILE" 2>/dev/null | while IFS= read -r APP_LINE || [ -n "$APP_LINE" ]; do
+        case "$APP_LINE" in
+            ''|'#*') continue ;;
+        esac
+        CANONICAL_LINE=$(canonical_app_line "$APP_LINE") || continue
+        case "$CANONICAL_LINE" in
+            "$EXCLUDED_PACKAGE "*) continue ;;
+        esac
+        printf '%s\n' "$CANONICAL_LINE"
+    done
 }
 
 read_adfr_policy() {
@@ -1402,7 +1659,20 @@ case "$1" in
         ;;
 
     "get_game_assistant_apps")
+        normalize_game_assistant_apps || true
         [ -f "$GAME_ASSISTANT_APPS_FILE" ] && cat "$GAME_ASSISTANT_APPS_FILE"
+        ;;
+
+    "get_game_assistant_config")
+        normalize_game_assistant_apps || true
+        normalize_game_assistant_features || true
+        if [ -f "$GAME_ASSISTANT_APPS_FILE" ]; then
+            while IFS= read -r GAME_PACKAGE || [ -n "$GAME_PACKAGE" ]; do
+                [ -n "$GAME_PACKAGE" ] || continue
+                printf '%s|%s\n' "$GAME_PACKAGE" \
+                    "$(game_assistant_features_for_package "$GAME_PACKAGE")"
+            done < "$GAME_ASSISTANT_APPS_FILE"
+        fi
         ;;
 
     "add_game_assistant_app")
@@ -1412,27 +1682,71 @@ case "$1" in
             echo "Error: invalid package"
             exit 1
         }
+        if [ "$#" -ge 3 ]; then
+            GAME_FEATURES="$3"
+        else
+            GAME_FEATURES="$(game_assistant_features_for_package "$GAME_PACKAGE")"
+        fi
+        valid_game_assistant_features() {
+            case "$1" in *[!A-Za-z0-9_,]*) return 1 ;; esac
+            [ -n "$1" ] || return 0
+            OLD_IFS="$IFS"
+            IFS=,
+            set -- $1
+            IFS="$OLD_IFS"
+            [ "$#" -le 3 ] || return 1
+            for GAME_FEATURE in "$@"; do
+                case "$GAME_FEATURE" in
+                    frame|sr|hqv) ;;
+                    *) return 1 ;;
+                esac
+            done
+        }
+        valid_game_assistant_features "$GAME_FEATURES" || {
+            echo "Error: invalid game assistant features"
+            exit 1
+        }
         mkdir -p "$(dirname "$GAME_ASSISTANT_APPS_FILE")" || exit 1
         [ -f "$GAME_ASSISTANT_APPS_FILE" ] || : > "$GAME_ASSISTANT_APPS_FILE"
+        normalize_game_assistant_apps || exit 1
         grep -Fqx "$GAME_PACKAGE" "$GAME_ASSISTANT_APPS_FILE" 2>/dev/null ||
             printf '%s\n' "$GAME_PACKAGE" >> "$GAME_ASSISTANT_APPS_FILE"
         sort -u "$GAME_ASSISTANT_APPS_FILE" > "$GAME_ASSISTANT_APPS_FILE.tmp.$$" || exit 1
         mv -f "$GAME_ASSISTANT_APPS_FILE.tmp.$$" "$GAME_ASSISTANT_APPS_FILE" || exit 1
         chmod 0644 "$GAME_ASSISTANT_APPS_FILE" 2>/dev/null
+        [ -f "$GAME_ASSISTANT_FEATURES_FILE" ] || : > "$GAME_ASSISTANT_FEATURES_FILE"
+        normalize_game_assistant_features || exit 1
+        awk -F '|' -v package="$GAME_PACKAGE" '$1 != package { print }' \
+            "$GAME_ASSISTANT_FEATURES_FILE" > "$GAME_ASSISTANT_FEATURES_FILE.tmp.$$" || exit 1
+        printf '%s|%s\n' "$GAME_PACKAGE" "$GAME_FEATURES" \
+            >> "$GAME_ASSISTANT_FEATURES_FILE.tmp.$$"
+        sort -t '|' -k1,1 -u "$GAME_ASSISTANT_FEATURES_FILE.tmp.$$" \
+            > "$GAME_ASSISTANT_FEATURES_FILE" || exit 1
+        rm -f "$GAME_ASSISTANT_FEATURES_FILE.tmp.$$"
+        chmod 0644 "$GAME_ASSISTANT_FEATURES_FILE" 2>/dev/null
         sync_game_assistant_property
-        echo "Success: game assistant enhancement app saved"
+        apply_game_assistant_config || exit 1
+        echo "Success: game assistant enhancement app and features saved"
         ;;
 
     "remove_game_assistant_app")
         require_premium game_assistant
         GAME_PACKAGE="$2"
         valid_video_package "$GAME_PACKAGE" || exit 1
-        [ -f "$GAME_ASSISTANT_APPS_FILE" ] || exit 0
-        awk -v package="$GAME_PACKAGE" '$0 != package { print }' \
-            "$GAME_ASSISTANT_APPS_FILE" > "$GAME_ASSISTANT_APPS_FILE.tmp.$$" || exit 1
-        mv -f "$GAME_ASSISTANT_APPS_FILE.tmp.$$" "$GAME_ASSISTANT_APPS_FILE" || exit 1
-        chmod 0644 "$GAME_ASSISTANT_APPS_FILE" 2>/dev/null
+        if [ -f "$GAME_ASSISTANT_APPS_FILE" ]; then
+            awk -v package="$GAME_PACKAGE" '$0 != package { print }' \
+                "$GAME_ASSISTANT_APPS_FILE" > "$GAME_ASSISTANT_APPS_FILE.tmp.$$" || exit 1
+            mv -f "$GAME_ASSISTANT_APPS_FILE.tmp.$$" "$GAME_ASSISTANT_APPS_FILE" || exit 1
+            chmod 0644 "$GAME_ASSISTANT_APPS_FILE" 2>/dev/null
+        fi
+        if [ -f "$GAME_ASSISTANT_FEATURES_FILE" ]; then
+            awk -F '|' -v package="$GAME_PACKAGE" '$1 != package { print }' \
+                "$GAME_ASSISTANT_FEATURES_FILE" > "$GAME_ASSISTANT_FEATURES_FILE.tmp.$$" || exit 1
+            mv -f "$GAME_ASSISTANT_FEATURES_FILE.tmp.$$" "$GAME_ASSISTANT_FEATURES_FILE" || exit 1
+            chmod 0644 "$GAME_ASSISTANT_FEATURES_FILE" 2>/dev/null
+        fi
         sync_game_assistant_property
+        apply_game_assistant_config || exit 1
         echo "Success: game assistant enhancement app removed"
         ;;
 
@@ -2026,8 +2340,8 @@ case "$1" in
         ;;
 
     "set_config")
-        # $2 is a runtime HWC mode id selected by WebUI. Persist its semantic
-        # resolution/rate pair; the daemon resolves it back to an exact ID.
+        # $2 is a runtime HWC mode id. mode.txt has one durable grammar:
+        # global <width>x<height> <fps>; app <package> <width>x<height> <fps>.
         NEW_MODE="$2"
         if [ -z "$NEW_MODE" ]; then
             echo "Error: Missing mode ID"
@@ -2039,9 +2353,14 @@ case "$1" in
             exit 1
         }
         TMP_FILE="${CONFIG_FILE}.tmp"
-        echo "$NEW_SPEC" > "$TMP_FILE"
-        # 从第二行开始追加原始内容
-        tail -n +2 "$CONFIG_FILE" >> "$TMP_FILE" 2>/dev/null
+        {
+            printf '%s\n' "$NEW_SPEC"
+            canonicalize_app_configs "$NEW_SPEC"
+        } > "$TMP_FILE" || {
+            rm -f "$TMP_FILE"
+            echo "Error: Failed to normalize mode configuration"
+            exit 1
+        }
         mv "$TMP_FILE" "$CONFIG_FILE"
         chmod 666 "$CONFIG_FILE"
 
@@ -2051,9 +2370,31 @@ case "$1" in
         echo "Success: Global mode set to $NEW_MODE"
         ;;
 
+    "set_resolution_config")
+        NEW_MODE="$2"
+        case "$NEW_MODE" in
+            ''|*[!0-9]*) echo "Error: Invalid mode ID"; exit 1 ;;
+        esac
+        NEW_SPEC=$(mode_semantic_for_id "$NEW_MODE") || {
+            echo "Error: Unknown display mode $NEW_MODE"
+            exit 1
+        }
+        begin_coloros_resolution_change "$NEW_MODE" "$NEW_SPEC"
+        RESOLUTION_RESULT=$?
+        if [ "$RESOLUTION_RESULT" -eq 2 ]; then
+            echo "Error: Target resolution is already active"
+            exit 1
+        fi
+        if [ "$RESOLUTION_RESULT" -ne 0 ]; then
+            echo "Error: ColorOS resolution transaction failed"
+            exit 1
+        fi
+        echo "Success: Resolution mode set to $NEW_MODE"
+        ;;
+
     "set_app_config")
-        # $2 is package, $3 is runtime HWC mode id (-1 to delete), $4 is
-        # optional explicit FHD+/QHD+; omitted/default inherits global width.
+        # $2 is package, $3 is runtime HWC mode id (-1 to delete). The
+        # optional fourth argument is accepted for API compatibility only.
         PKG="$2"
         MODE="$3"
         APP_RESOLUTION="$4"
@@ -2063,27 +2404,26 @@ case "$1" in
             exit 1
         fi
 
-        # 读取第一行作为全局语义配置
-        GLOBAL_MODE=$(head -n 1 "$CONFIG_FILE")
-        
+        GLOBAL_SPEC=$(canonical_global_spec) || {
+            echo "Error: Unknown global display mode"
+            exit 1
+        }
         TMP_FILE="${CONFIG_FILE}.tmp"
-        echo "$GLOBAL_MODE" > "$TMP_FILE"
-        
-        # 处理现有配置，按第一列排除当前包；同时保留旧格式行。
-        awk -v package="$PKG" 'NR > 1 && $1 != package { print }' "$CONFIG_FILE" >> "$TMP_FILE"
-        
-        # 如果不是删除模式，追加新配置
+        {
+            printf '%s\n' "$GLOBAL_SPEC"
+            canonicalize_app_configs "$GLOBAL_SPEC" "$PKG"
+        } > "$TMP_FILE" || {
+            rm -f "$TMP_FILE"
+            echo "Error: Failed to normalize mode configuration"
+            exit 1
+        }
         if [ "$MODE" != "-1" ]; then
             APP_SPEC=$(mode_semantic_for_id "$MODE") || {
                 echo "Error: Unknown display mode $MODE"
                 rm -f "$TMP_FILE"
                 exit 1
             }
-            APP_FPS=$(printf '%s\n' "$APP_SPEC" | awk '{print $2}')
-            case "$APP_RESOLUTION" in
-                FHD+|QHD+) echo "$PKG $APP_RESOLUTION $APP_FPS" >> "$TMP_FILE" ;;
-                *) echo "$PKG $APP_FPS" >> "$TMP_FILE" ;;
-            esac
+            printf '%s %s\n' "$PKG" "$APP_SPEC" >> "$TMP_FILE"
         fi
         
         mv "$TMP_FILE" "$CONFIG_FILE"

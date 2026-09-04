@@ -951,49 +951,53 @@ textarea.form-input {
     background: #fff;
 }
 
+.switch-control input:disabled + .switch-track {
+    opacity: 0.5;
+}
+
+.game-assistant-feature-controls {
+    margin: 12px 0;
+    padding: 12px 0 0;
+    border-top: 1px solid var(--border);
+}
+
+.game-assistant-feature-controls .form-label {
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 650;
+}
+
+.game-assistant-feature-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.game-assistant-feature-option {
+    min-width: 0;
+    min-height: 42px;
+    justify-content: center;
+    padding: 7px 8px;
+    color: var(--text);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+}
+
+.game-assistant-feature-option > span:last-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.game-assistant-feature-controls .text-hint {
+    margin-top: 8px;
+}
+
 .app-list {
     max-height: none;
     overflow: visible;
-}
-
-.fab-save {
-    position: fixed;
-    right: max(20px, calc((100vw - 720px) / 2 + 20px));
-    bottom: calc(94px + env(safe-area-inset-bottom));
-    z-index: 950;
-    display: grid;
-    width: 56px;
-    height: 56px;
-    place-items: center;
-    padding: 0;
-    color: #fff;
-    background: rgba(231, 71, 145, 0.88);
-    border: 1px solid rgba(255, 255, 255, 0.72);
-    border-radius: 50%;
-    box-shadow: 0 10px 24px rgba(168, 44, 105, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.34);
-    -webkit-backdrop-filter: blur(18px) saturate(160%);
-    backdrop-filter: blur(18px) saturate(160%);
-    cursor: pointer;
-    -webkit-tap-highlight-color: transparent;
-}
-
-.fab-save:active {
-    transform: scale(0.95);
-}
-
-.fab-save:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-}
-
-.fab-save svg {
-    width: 23px;
-    height: 23px;
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 2;
-    stroke-linecap: round;
-    stroke-linejoin: round;
 }
 
 .app-item {
@@ -1160,6 +1164,12 @@ textarea.form-input {
     margin-top: 5px;
     font-size: 11px;
     color: var(--paid);
+}
+
+.game-assistant-feature-tags {
+    margin-top: 4px;
+    color: var(--text-2);
+    font-size: 11px;
 }
 
 .selection-dialog {

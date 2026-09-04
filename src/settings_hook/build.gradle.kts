@@ -15,7 +15,7 @@ val hookVersionCode = 69
 android {
     namespace = "com.murongchaopin.displayhook"
     compileSdk = 37
-    buildToolsVersion = "37.0.0"
+    compileSdkMinor = 1
 
     defaultConfig {
         applicationId = "com.murongchaopin.displayhook"

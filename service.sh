@@ -2,6 +2,7 @@
 MODDIR=${0%/*}
 DAEMON_BIN="$MODDIR/bin/rate_daemon"
 PREMIUM_DAEMON_BIN="$MODDIR/premium/bin/rate_daemon_premium"
+DAEMON_SUPERVISOR_PID_FILE="$MODDIR/runtime/rate_daemon_supervisor/pid"
 COLOROS_CONFIG_HELPER="$MODDIR/scripts/coloros_config.sh"
 SETTINGS_BRIDGE_HELPER="$MODDIR/scripts/display_settings_bridge.sh"
 GATE_HELPER="$MODDIR/scripts/display_license_gate.sh"
@@ -86,14 +87,75 @@ if [ -f "$PREMIUM_DAEMON_BIN" ]; then
         fi
     fi
 fi
+
+daemon_cmdline() {
+    tr '\000' ' ' < "/proc/$1/cmdline" 2>/dev/null
+}
+
+is_module_daemon() {
+    case "$(daemon_cmdline "$1")" in
+        "$DAEMON_BIN $MODDIR"|"$DAEMON_BIN $MODDIR "*|\
+        "$PREMIUM_DAEMON_BIN $MODDIR"|"$PREMIUM_DAEMON_BIN $MODDIR "*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+is_module_supervisor() {
+    case "$(daemon_cmdline "$1")" in
+        *rate_daemon_supervisor.sh*) return 0 ;;
+    esac
+    return 1
+}
+
+cleanup_stale_module_daemons() {
+    for daemon_name in rate_daemon rate_daemon_premium; do
+        for daemon_pid in $(pidof "$daemon_name" 2>/dev/null); do
+            daemon_line=$(daemon_cmdline "$daemon_pid")
+            case "$daemon_line" in
+                "$DAEMON_BIN --version"|"$DAEMON_BIN --version "*|\
+                "$PREMIUM_DAEMON_BIN --version"|"$PREMIUM_DAEMON_BIN --version "*)
+                    kill "$daemon_pid" >/dev/null 2>&1 || true
+                    ;;
+            esac
+        done
+    done
+    sleep 1
+}
+
+cleanup_stale_module_daemons
 # ColorOS restores its persisted resolution after system_server starts. Let
 # that become authoritative before mode.txt is replayed; otherwise a stale
 # module width and the native boot width can fight across HWC mode groups.
 sleep 2
-if ! pidof rate_daemon >/dev/null 2>&1 &&
-   ! pidof rate_daemon_premium >/dev/null 2>&1; then
+daemon_running=0
+if [ -f "$DAEMON_SUPERVISOR_PID_FILE" ]; then
+    supervisor_pid=$(sed -n '1p' "$DAEMON_SUPERVISOR_PID_FILE" 2>/dev/null)
+    case "$supervisor_pid" in
+        ''|*[!0-9]*) supervisor_pid="" ;;
+    esac
+    if [ -n "$supervisor_pid" ] && [ -r "/proc/$supervisor_pid/cmdline" ] &&
+       is_module_supervisor "$supervisor_pid"; then
+        daemon_running=1
+    fi
+fi
+for daemon_name in rate_daemon rate_daemon_premium; do
+    [ "$daemon_running" -eq 0 ] || break
+    for daemon_pid in $(pidof "$daemon_name" 2>/dev/null); do
+        if is_module_daemon "$daemon_pid"; then
+            daemon_running=1
+            break 2
+        fi
+    done
+done
+if [ "$daemon_running" -eq 0 ]; then
     chmod +x "$DAEMON_TO_START" 2>/dev/null
-    nohup "$DAEMON_TO_START" "$MODDIR" > /dev/null 2>&1 &
+    # nohup only ignores SIGHUP; service-stage shells can still terminate
+    # their inherited process group during package/app cleanup. Start the
+    # native daemon in its own session so an unrelated shell-group SIGTERM
+    # cannot take the display controller down with it.
+    setsid nohup "$DAEMON_TO_START" "$MODDIR" > /dev/null 2>&1 &
 fi
 
 # Settings only exposes a subset of the HWC refresh modes.  Keep its global
