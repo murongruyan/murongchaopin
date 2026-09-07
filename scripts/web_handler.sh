@@ -153,14 +153,13 @@ require_premium() {
 }
 
 # A valid lease is not enough to apply a display policy: the corresponding
-# signed runtime component must also be present.  Older package builds silently
-# omitted these files, which left the WebUI persisting a policy that could never
-# become active after reboot.
+# verified runtime component must also be present.  The paid package manifest
+# already authenticates every installed payload file; do not require a second
+# standalone hash sidecar that is not part of the package contract.
 premium_payload_ready() {
     case "$1" in
         custom_ltpo)
             [ -r "$PREMIUM_PATH/bin/rmx5200_ltpo_modes.ko" ] &&
-                [ -r "$PREMIUM_PATH/config/rmx5200_ltpo_modes.sha256" ] &&
                 [ -x "$PREMIUM_PATH/scripts/rmx5200_ltpo_experiment.sh" ]
             ;;
         adfr_disable)
