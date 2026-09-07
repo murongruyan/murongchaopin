@@ -71,8 +71,6 @@ Volume_key_monitoring() {
   esac
 }
 
-assert_supported_install_model
-
 # 安装阶段选择应用后端。原厂基线确认与后端选择必须是两次明确操作；
 # 后端选择必须由用户明确完成，绝不默认写入 DTBO，避免用户只确认原厂基线
 # 后发生隐式修改。这里不设选择倒计时，避免用户阅读提示期间被取消或误判。
@@ -318,6 +316,10 @@ recover_legacy_applied_manifest() {
 }
 
 recover_legacy_applied_manifest
+
+# The installer runtime defines abort/ui_print after the helper declarations;
+# perform the model gate only once the real install route is about to run.
+assert_supported_install_model
 
 if [ -n "$CURRENT_DTBO_HASH" ] &&
    [ -n "$APPLIED_HASH" ] &&
