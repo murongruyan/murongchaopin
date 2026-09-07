@@ -21,6 +21,7 @@ const UPDATE_NOTICE_SESSION_KEY = "murongchaopin_update_notice";
 const AUTH_REFRESH_TTL_MS = 15000;
 const VIDEO_DATA_TTL_MS = 10000;
 const APPLIED_MODE_POLL_MS = 2500;
+const UI_BACKGROUND_IDLE_MS = 1200;
 
 let currentMode = -1;
 let appliedMode = -1;
@@ -37,6 +38,7 @@ let dtsBackendBusy = false;
 let adfrPolicyBusy = false;
 let displayPolicyProfile = 'rmx5200';
 let videoMotionEntries = [];
+let videoMotionLoadGeneration = 0;
 let gameAssistantEntries = [];
 let gameAssistantFeatureConfig = {};
 let ocNodes = [];
@@ -46,8 +48,6 @@ const gameAssistantFeatures = [
     { key: 'sr', label: '超分' },
     { key: 'hqv', label: '超级 HDR' }
 ];
-const labelQueue = [];
-let processingQueue = false;
 let activeTabId = 'tab-oc';
 let modalHistoryActive = false;
 let paymentHistoryActive = false;
@@ -56,9 +56,7 @@ let paymentClosing = false;
 const tabScrollPositions = new Map();
 let tabHistory = [];
 let predictiveBackState = null;
-let bottomNavInteraction = null;
 let bottomNavResizeObserver = null;
-let bottomNavSuppressClickUntil = 0;
 
 // 授权相关运行时状态
 let authToken = null;
@@ -72,8 +70,11 @@ let paymentOrder = null;
 let paymentPollTimer = null;
 let updateCheckBusy = false;
 let automaticUpdateCheckStarted = false;
+let automaticUpdateCheckTimer = null;
+let automaticUpdateCheckGeneration = 0;
 let paymentCheckBusy = false;
 let authorizationRefreshPromise = null;
+let authorizationRefreshGeneration = 0;
 let leaseRefreshPromise = null;
 let authorizationRefreshedAt = 0;
 let videoDataRefreshPromise = null;
@@ -82,12 +83,25 @@ let appListLoaded = false;
 let appListLoadPromise = null;
 let appListRenderGeneration = 0;
 let appListRenderTimer = null;
+let appLabelEnrichmentGeneration = 0;
+let appLabelEnrichmentTimer = null;
+let appLabelEnrichmentRunning = false;
+let appLabelEnrichmentPackages = [];
+let appLabelEnrichmentCursor = 0;
 let displayModesLoaded = false;
 let displayModesLoadPromise = null;
 let minePageRenderKey = '';
 let videoPageRenderKey = '';
 let videoAuthRenderKey = '';
 let tabWorkGeneration = 0;
+let tabBackgroundTimer = null;
+let tabPageFrame = null;
+let displayedTabId = 'tab-oc';
+let uiInteractionGeneration = 0;
+let moduleInitializationTimer = null;
+let moduleInitializationRunning = false;
+let moduleInitializationComplete = false;
+let moduleInitializationDeferred = false;
 
 // ============================================================
 // 调试日志
@@ -797,196 +811,22 @@ function bottomNavClamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
 }
 
-function bottomNavNow() {
-    return typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
-}
-
-function bottomNavGeometry() {
-    const nav = document.querySelector('.bottom-nav');
-    if (!nav) return null;
-    const buttons = Array.from(nav.querySelectorAll('.tab-btn'));
-    if (!buttons.length) return null;
-    const navRect = nav.getBoundingClientRect();
-    const originX = navRect.left + nav.clientLeft;
-    const originY = navRect.top + nav.clientTop;
-    const rects = buttons.map(button => button.getBoundingClientRect());
-    const centers = rects.map(rect => rect.left + rect.width / 2);
-    const widths = rects.map(rect => rect.width);
-    const heights = rects.map(rect => Math.max(40, Math.min(56, rect.height - 4)));
-    return { nav, rects, centers, widths, heights, originX, originY };
-}
-
-function bottomNavInterpolatedGeometry(index, geometry = bottomNavGeometry()) {
-    if (!geometry) return null;
-    const maxIndex = geometry.centers.length - 1;
-    const bounded = bottomNavClamp(Number(index) || 0, 0, maxIndex);
-    const lower = Math.floor(bounded);
-    const upper = Math.min(maxIndex, lower + 1);
-    const fraction = bounded - lower;
-    const center = geometry.centers[lower] +
-        (geometry.centers[upper] - geometry.centers[lower]) * fraction;
-    const width = geometry.widths[lower] +
-        (geometry.widths[upper] - geometry.widths[lower]) * fraction;
-    const height = geometry.heights[lower] +
-        (geometry.heights[upper] - geometry.heights[lower]) * fraction;
-    return {
-        left: center - geometry.originX - width / 2,
-        top: geometry.rects[lower].top - geometry.originY +
-            (geometry.rects[lower].height - height) / 2,
-        width,
-        height,
-        centers: geometry.centers
-    };
-}
-
 function setBottomNavIndicator(index, animate = true) {
     const nav = document.querySelector('.bottom-nav');
-    const geometry = bottomNavGeometry();
-    if (!nav || !geometry || index < 0) return;
-    const indicator = bottomNavInterpolatedGeometry(index, geometry);
-    if (!indicator) return;
+    if (!nav || index < 0) return;
+    const bounded = bottomNavClamp(Number(index) || 0, 0, TAB_ORDER.length - 1);
     const immediate = !animate && !nav.classList.contains('predictive-back-settle');
     nav.classList.toggle('indicator-immediate', immediate);
-    nav.style.setProperty('--tab-indicator-index', String(index));
-    nav.style.setProperty('--indicator-left', `${indicator.left}px`);
-    nav.style.setProperty('--indicator-top', `${indicator.top}px`);
-    nav.style.setProperty('--indicator-width', `${indicator.width}px`);
-    nav.style.setProperty('--indicator-height', `${indicator.height}px`);
+    nav.style.setProperty('--tab-indicator-index', String(bounded));
+    nav.style.setProperty('--indicator-x', `${bounded * 100}%`);
     if (immediate) requestAnimationFrame(() => nav.classList.remove('indicator-immediate'));
 }
 
-function setBottomNavDragWeights(index) {
-    const bounded = bottomNavClamp(index, 0, TAB_ORDER.length - 1);
-    document.querySelectorAll('.bottom-nav .tab-btn').forEach((button, tabIndex) => {
-        const weight = bottomNavClamp(1 - Math.abs(tabIndex - bounded), 0, 1);
-        button.style.setProperty('--drag-tab-weight', String(weight));
-    });
-}
-
-function clearBottomNavDragWeights() {
-    document.querySelectorAll('.bottom-nav .tab-btn').forEach(button => {
-        button.style.removeProperty('--drag-tab-weight');
-    });
-}
-
-function finishBottomNavLiquidGesture(state, cancelled = false) {
-    if (!state || bottomNavInteraction !== state) return;
-    if (state.longPressTimer) clearTimeout(state.longPressTimer);
-    const nav = state.nav;
-    if (state.held && !cancelled) {
-        const targetIndex = bottomNavClamp(Math.round(state.index), 0, TAB_ORDER.length - 1);
-        const targetId = TAB_ORDER[targetIndex];
-        bottomNavSuppressClickUntil = bottomNavNow() + 520;
-        nav.classList.remove('is-dragging', 'is-pressed');
-        nav.classList.add('nav-settling');
-        nav.style.setProperty('--indicator-scale-x', '1');
-        nav.style.setProperty('--indicator-scale-y', '1');
-        clearBottomNavDragWeights();
-        if (targetId && targetId !== activeTabId) {
-            activateTab(targetId, { push: true });
-        } else {
-            setBottomNavIndicator(targetIndex, true);
-        }
-        setTimeout(() => nav.classList.remove('nav-settling'), 540);
-    } else {
-        nav.classList.remove('is-dragging', 'is-pressed');
-        nav.style.setProperty('--indicator-scale-x', '1');
-        nav.style.setProperty('--indicator-scale-y', '1');
-        clearBottomNavDragWeights();
-    }
-    try {
-        if (nav.hasPointerCapture(state.pointerId)) nav.releasePointerCapture(state.pointerId);
-    } catch (_) { /* WebView may release capture during teardown. */ }
-    bottomNavInteraction = null;
-}
-
-function setupBottomNavLiquidGesture() {
+function setupBottomNavIndicator() {
     const nav = document.querySelector('.bottom-nav');
-    if (!nav || nav.dataset.liquidGestureReady === '1') return;
-    nav.dataset.liquidGestureReady = '1';
-
-    const start = event => {
-        if (event.pointerType === 'mouse' && event.button !== 0) return;
-        if (bottomNavInteraction) finishBottomNavLiquidGesture(bottomNavInteraction, true);
-        const button = event.target.closest?.('.tab-btn');
-        if (!button || !nav.contains(button)) return;
-        const startIndex = TAB_ORDER.indexOf(button.getAttribute('data-tab'));
-        if (startIndex < 0) return;
-        const state = {
-            nav,
-            pointerId: event.pointerId,
-            startX: event.clientX,
-            startY: event.clientY,
-            lastX: event.clientX,
-            lastTime: bottomNavNow(),
-            index: startIndex,
-            held: false,
-            moved: false,
-            longPressTimer: null
-        };
-        bottomNavInteraction = state;
-        try { nav.setPointerCapture(event.pointerId); } catch (_) { /* optional */ }
-        state.longPressTimer = setTimeout(() => {
-            if (bottomNavInteraction !== state || state.moved) return;
-            state.held = true;
-            nav.classList.add('is-pressed', 'is-dragging');
-            setBottomNavIndicator(state.index, false);
-            setBottomNavDragWeights(state.index);
-            nav.style.setProperty('--indicator-scale-x', '1.34');
-            nav.style.setProperty('--indicator-scale-y', '1.34');
-        }, 155);
-    };
-
-    const move = event => {
-        const state = bottomNavInteraction;
-        if (!state || state.pointerId !== event.pointerId) return;
-        const dx = event.clientX - state.startX;
-        const dy = event.clientY - state.startY;
-        if (!state.held) {
-            if (Math.abs(dx) > 9 || Math.abs(dy) > 12) {
-                state.moved = true;
-                if (state.longPressTimer) clearTimeout(state.longPressTimer);
-            }
-            return;
-        }
-        event.preventDefault();
-        const geometry = bottomNavGeometry();
-        if (!geometry || geometry.centers.length < 2) return;
-        const first = geometry.centers[0];
-        const last = geometry.centers[geometry.centers.length - 1];
-        state.index = bottomNavClamp(
-            (event.clientX - first) / (last - first) * (geometry.centers.length - 1),
-            0,
-            geometry.centers.length - 1
-        );
-        const now = bottomNavNow();
-        const dt = Math.max(1, now - state.lastTime);
-        const velocity = bottomNavClamp((event.clientX - state.lastX) / dt * 0.9, -1, 1);
-        const speed = Math.abs(velocity);
-        state.lastX = event.clientX;
-        state.lastTime = now;
-        setBottomNavIndicator(state.index, false);
-        setBottomNavDragWeights(state.index);
-        nav.style.setProperty('--indicator-scale-x', String(1.34 + speed * 0.32));
-        nav.style.setProperty('--indicator-scale-y', String(1.34 - speed * 0.1));
-    };
-
-    const end = event => {
-        const state = bottomNavInteraction;
-        if (!state || state.pointerId !== event.pointerId) return;
-        finishBottomNavLiquidGesture(state);
-    };
-
-    nav.addEventListener('pointerdown', start, { passive: true });
-    nav.addEventListener('pointermove', move, { passive: false });
-    nav.addEventListener('pointerup', end, { passive: true });
-    nav.addEventListener('pointercancel', event => {
-        const state = bottomNavInteraction;
-        if (state && state.pointerId === event.pointerId) finishBottomNavLiquidGesture(state, true);
-    }, { passive: true });
-    const refresh = () => {
-        if (!bottomNavInteraction) setBottomNavIndicator(TAB_ORDER.indexOf(activeTabId), false);
-    };
+    if (!nav || nav.dataset.indicatorReady === '1') return;
+    nav.dataset.indicatorReady = '1';
+    const refresh = () => setBottomNavIndicator(TAB_ORDER.indexOf(activeTabId), false);
     if (typeof ResizeObserver !== 'undefined') {
         bottomNavResizeObserver = new ResizeObserver(refresh);
         bottomNavResizeObserver.observe(nav);
@@ -1054,7 +894,6 @@ function cleanupPredictiveBack() {
 
 function activateTab(targetId, { push = false, back = false } = {}) {
     const tabs = document.querySelectorAll('.tab-btn');
-    const contents = document.querySelectorAll('.page');
     const target = document.getElementById(targetId);
     if (!target) return;
     const changed = activeTabId !== targetId;
@@ -1064,32 +903,66 @@ function activateTab(targetId, { push = false, back = false } = {}) {
     }
     if (!changed) return;
 
-    tabScrollPositions.set(activeTabId, window.scrollY || document.documentElement.scrollTop || 0);
+    // Invalidate queued page work immediately. A user can tap several tabs
+    // before the idle callback fires; stale root commands must not pile up
+    // behind the currently visible page.
+    tabWorkGeneration++;
+    appLabelEnrichmentGeneration++;
+    if (appLabelEnrichmentTimer !== null) {
+        clearTimeout(appLabelEnrichmentTimer);
+        appLabelEnrichmentTimer = null;
+    }
+    if (tabBackgroundTimer !== null) {
+        clearTimeout(tabBackgroundTimer);
+        tabBackgroundTimer = null;
+    }
+    if (tabPageFrame !== null) {
+        cancelAnimationFrame(tabPageFrame);
+        tabPageFrame = null;
+    }
+    automaticUpdateCheckGeneration++;
+    if (automaticUpdateCheckTimer !== null) {
+        clearTimeout(automaticUpdateCheckTimer);
+        automaticUpdateCheckTimer = null;
+    }
+    automaticUpdateCheckStarted = false;
+    // An authorization refresh may have been started by the previous tab.
+    // It cannot interrupt a bridge call already in flight, but invalidating
+    // its generation prevents the remaining device/server/root stages from
+    // starting after the user has moved on.
+    authorizationRefreshGeneration++;
+
+    tabScrollPositions.set(displayedTabId, window.scrollY || document.documentElement.scrollTop || 0);
     const oldIndex = TAB_ORDER.indexOf(activeTabId);
     const newIndex = TAB_ORDER.indexOf(targetId);
     const direction = back || (oldIndex >= 0 && newIndex >= 0 && newIndex < oldIndex) ? 'back' : 'forward';
-    const apply = () => {
-        tabs.forEach(t => t.classList.toggle('active', t.getAttribute('data-tab') === targetId));
-        contents.forEach(c => c.classList.remove('active', 'page-forward', 'page-back'));
+    tabs.forEach(t => t.classList.toggle('active', t.getAttribute('data-tab') === targetId));
+    activeTabId = targetId;
+    setBottomNavIndicator(newIndex, !back);
+
+    syncAppliedModePolling();
+    if (targetId === 'tab-oc' && moduleInitializationDeferred) {
+        moduleInitializationComplete = false;
+        scheduleModuleInitialization();
+    } else if (targetId === 'tab-oc' && moduleInitializationComplete) {
+        scheduleAutomaticUpdateCheck();
+    }
+    // One frame is enough to commit the page switch. Waiting for a second
+    // frame made taps feel stuck on slower Android WebViews, especially while
+    // the first root reads were still completing.
+    tabPageFrame = requestAnimationFrame(() => {
+        tabPageFrame = null;
+        if (activeTabId !== targetId || document.hidden) return;
+        const previous = document.getElementById(displayedTabId);
+        if (previous && previous !== target) {
+            previous.classList.remove('active', 'page-forward', 'page-back');
+        }
         target.classList.add('active');
         target.classList.add(direction === 'back' ? 'page-back' : 'page-forward');
-        activeTabId = targetId;
+        displayedTabId = targetId;
         const restoreY = tabScrollPositions.get(targetId) || 0;
         window.scrollTo(0, restoreY);
         cleanupPredictiveBack();
-        setBottomNavIndicator(newIndex, !back);
-    };
-
-    apply();
-
-    syncAppliedModePolling();
-    // Keep the tap handler and the first visible frame free of DOM rebuilding.
-    // The target page shell is cheap, but rebuilding it synchronously is still
-    // noticeable on the Android WebView when the source page owns a large app
-    // list. Do it after the navigation frame, then start root/network work on
-    // the existing two-frame idle path.
-    requestAnimationFrame(() => {
-        if (activeTabId !== targetId || document.hidden) return;
         if (targetId === 'tab-mine') renderMinePage();
         if (targetId === 'tab-video') renderVideoPage();
         scheduleTabBackgroundWork(targetId);
@@ -1097,8 +970,11 @@ function activateTab(targetId, { push = false, back = false } = {}) {
 }
 
 function scheduleTabBackgroundWork(targetId) {
-    const generation = ++tabWorkGeneration;
-    runAfterFirstPaint(async () => {
+    const generation = tabWorkGeneration;
+    if (tabBackgroundTimer !== null) clearTimeout(tabBackgroundTimer);
+    tabBackgroundTimer = setTimeout(() => {
+        tabBackgroundTimer = null;
+        runAfterFirstPaint(async () => {
         if (generation !== tabWorkGeneration || activeTabId !== targetId || document.hidden) return;
         try {
             if (targetId === 'tab-logs') {
@@ -1106,15 +982,26 @@ function scheduleTabBackgroundWork(targetId) {
                 return;
             }
             if (targetId === 'tab-mine') {
-                await refreshAuthorizationView();
+                // Mine renders the latest cached authorization snapshot. An
+                // automatic root/server refresh here used to start after the
+                // user had been idle for 1.2 seconds, making the next tap look
+                // frozen on KernelSU builds whose exec bridge blocks WebView.
+                // The refresh button and pull-to-refresh remain explicit paths.
                 return;
             }
             if (targetId === 'tab-video') {
-                await Promise.all([refreshAuthorizationView(), ensureDisplayModesLoaded()]);
-                if (generation !== tabWorkGeneration || activeTabId !== targetId) return;
+                // Do not put the visible video page behind auth/device
+                // refresh. Those network and root reads can be slow or wait
+                // on a serialized KSU bridge; the page must start its own
+                // bounded local reads as soon as it is visible.
                 renderVideoPage();
-                await refreshVideoPageData();
-                processLabelQueue();
+                void refreshVideoPageData({ force: true });
+                if (authState.premium_available !== 1 || authState.package_installed !== 1) {
+                    void refreshAuthorizationView({
+                        shouldContinue: () => generation === tabWorkGeneration
+                            && activeTabId === targetId
+                    });
+                }
                 return;
             }
             if (targetId === 'tab-rates') {
@@ -1122,29 +1009,25 @@ function scheduleTabBackgroundWork(targetId) {
                 if (generation !== tabWorkGeneration || activeTabId !== targetId) return;
                 refreshAppliedMode();
                 await ensureAppListLoaded({ renderRates: true });
-                processLabelQueue();
             }
         } catch (error) {
             debugLog(`background ${targetId} refresh failed: ${error.message}`);
         }
-    });
+        });
+    }, UI_BACKGROUND_IDLE_MS);
 }
 
 function setupTabs() {
     const tabs = document.querySelectorAll('.tab-btn');
     const initial = document.querySelector('.tab-btn.active')?.getAttribute('data-tab') || 'tab-oc';
     activeTabId = initial;
+    displayedTabId = initial;
     tabHistory = [initial];
     history.replaceState({ kind: 'tab', tab: initial }, '', `#${initial}`);
     setBottomNavIndicator(TAB_ORDER.indexOf(initial), false);
-    setupBottomNavLiquidGesture();
+    setupBottomNavIndicator();
     tabs.forEach(tab => {
-        tab.addEventListener('click', event => {
-            if (bottomNavSuppressClickUntil > bottomNavNow()) {
-                event.preventDefault();
-                event.stopPropagation();
-                return;
-            }
+        tab.addEventListener('click', () => {
             const targetId = tab.getAttribute('data-tab');
             activateTab(targetId, { push: true });
         });
@@ -1335,13 +1218,16 @@ async function apiFetch(path, opts = {}) {
             payload = JSON.stringify(opts.body);
         }
     }
-    // Authenticated requests use the root-side HTTPS channel. ColorOS WebView
-    // can reject cross-origin POST before the request reaches the server, and
-    // the root channel can restore the persisted token after WebView recreation.
-    if (opts.auth && !opts.form && (method === 'GET' || method === 'POST')) {
+    // Keep the root-side HTTPS channel for requests that need credentials or
+    // form encoding. Public JSON GETs (catalog and payment polling) stay on
+    // the WebView network path; starting a root shell for every poll makes the
+    // UI visibly lag on KSU WebUI.
+    const useRootProxy = opts.rootProxy === true || opts.auth === true || opts.form === true;
+    if (useRootProxy && (method === 'GET' || method === 'POST')) {
         const payloadB64 = payload === undefined ? '' : utf8ToBase64Url(payload);
         const raw = await ksuExec(handlerCmd(
-            'api_request', method, path, '1', payloadB64, requestNonce
+            'api_request', method, path, opts.auth ? '1' : '0', payloadB64,
+            requestNonce, opts.form ? '1' : '0'
         ), true);
         if (!raw || raw.startsWith('Error:')) {
             throw new Error((raw || '授权后端无响应').replace(/^Error:\s*/, ''));
@@ -1481,22 +1367,41 @@ async function refreshServerAuth() {
 
 function renderCurrentAuthorizationPage() {
     if (activeTabId === 'tab-mine') renderMinePage();
-    if (activeTabId === 'tab-video') renderVideoPage();
+    if (activeTabId === 'tab-video') {
+        renderVideoPage();
+        if (isPremium() && authState.package_installed === 1) {
+            void refreshVideoPageData({ force: true });
+        }
+    }
     updatePaidMarkers();
 }
 
-async function refreshAuthorizationView({ force = false } = {}) {
+async function refreshAuthorizationView({ force = false, shouldContinue = null } = {}) {
     if (!force && authorizationRefreshedAt > 0
         && Date.now() - authorizationRefreshedAt < AUTH_REFRESH_TTL_MS) {
         renderCurrentAuthorizationPage();
         return true;
     }
     if (authorizationRefreshPromise) return authorizationRefreshPromise;
+    const refreshGeneration = authorizationRefreshGeneration;
+    const canContinue = () => refreshGeneration === authorizationRefreshGeneration
+        && (!shouldContinue || shouldContinue());
     authorizationRefreshPromise = (async () => {
-        await Promise.all([refreshAuthState(), refreshDeviceInfo()]);
-        authorizationRefreshedAt = Date.now();
-        if (authToken || authState.account === 'logged_in') await refreshServerAuth();
+        // KernelSU's WebUI bridge serializes shell work on some releases.
+        // Keep these reads separate so an auth refresh cannot starve input.
         await refreshAuthState();
+        if (!canContinue()) return false;
+        await yieldToBrowser();
+        await refreshDeviceInfo();
+        if (!canContinue()) return false;
+        authorizationRefreshedAt = Date.now();
+        if (authToken || authState.account === 'logged_in') {
+            if (!canContinue()) return false;
+            await refreshServerAuth();
+        }
+        if (!canContinue()) return false;
+        await refreshAuthState();
+        if (!canContinue()) return false;
         renderCurrentAuthorizationPage();
         return true;
     })().finally(() => {
@@ -1940,12 +1845,14 @@ async function showAvailableUpdate(result, automatic) {
     if (action === 'paid') await startPackageDownload(result.paid);
 }
 
-async function checkForUpdates({ automatic = false } = {}) {
+async function checkForUpdates({ automatic = false, shouldContinue = null } = {}) {
     if (updateCheckBusy) return;
+    if (shouldContinue && !shouldContinue()) return;
     updateCheckBusy = true;
     if (!automatic) showToast('正在检查更新…');
     try {
         const result = await collectUpdates();
+        if (shouldContinue && !shouldContinue()) return;
         const hasUpdate = Boolean((result.base && result.base.available) || result.paid);
         if (!hasUpdate) {
             if (!automatic) {
@@ -1972,15 +1879,31 @@ async function checkForUpdates({ automatic = false } = {}) {
 }
 
 function scheduleAutomaticUpdateCheck(attempt = 0) {
-    if (automaticUpdateCheckStarted && attempt === 0) return;
-    automaticUpdateCheckStarted = true;
-    setTimeout(() => {
+    if (attempt === 0) {
+        if (automaticUpdateCheckStarted) return;
+        if (activeTabId !== 'tab-oc' || document.hidden) return;
+        automaticUpdateCheckStarted = true;
+        automaticUpdateCheckGeneration++;
+    }
+    const generation = automaticUpdateCheckGeneration;
+    if (automaticUpdateCheckTimer !== null) clearTimeout(automaticUpdateCheckTimer);
+    automaticUpdateCheckTimer = setTimeout(() => {
+        automaticUpdateCheckTimer = null;
+        if (generation !== automaticUpdateCheckGeneration
+            || activeTabId !== 'tab-oc' || document.hidden) {
+            automaticUpdateCheckStarted = false;
+            return;
+        }
         const overlayBusy = modalEl() && !modalEl().hidden;
         if (overlayBusy && attempt < 4) {
             scheduleAutomaticUpdateCheck(attempt + 1);
             return;
         }
-        checkForUpdates({ automatic: true });
+        void checkForUpdates({
+            automatic: true,
+            shouldContinue: () => generation === automaticUpdateCheckGeneration
+                && activeTabId === 'tab-oc' && !document.hidden
+        });
     }, attempt === 0 ? 1200 : 1500);
 }
 
@@ -2713,59 +2636,122 @@ function setVideoMotionStatus(text, state = '') {
     if (state) badge.classList.add(state);
 }
 
+function videoMotionLoadCurrent(generation) {
+    return generation === videoMotionLoadGeneration
+        && activeTabId === 'tab-video'
+        && !document.hidden;
+}
+
+function setVideoListMessage(id, text, className = 'empty-state') {
+    const list = document.getElementById(id);
+    if (!list) return;
+    list.innerHTML = '';
+    const message = document.createElement('div');
+    message.className = className;
+    message.innerText = text;
+    list.appendChild(message);
+}
+
+function applyVideoMotionConfig(result) {
+    const values = parseKeyValueOutput(result);
+    const target = Number(values.target || 0);
+    const rates = Array.from(new Set(displayModes
+        .filter(mode => mode.width === currentResolutionWidth)
+        .map(mode => mode.fps)))
+        .filter(rate => Number.isInteger(rate) && rate >= 30)
+        .sort((left, right) => left - right);
+    const select = document.getElementById('video-motion-target');
+    if (select) {
+        select.innerHTML = '';
+        [0, ...rates].forEach(rate => {
+            const option = document.createElement('option');
+            option.value = String(rate);
+            option.innerText = videoMotionTargetLabel(rate);
+            select.appendChild(option);
+        });
+        if (![0, ...rates].includes(target)) {
+            const option = document.createElement('option');
+            option.value = String(target);
+            option.innerText = videoMotionTargetLabel(target);
+            select.appendChild(option);
+        }
+        select.value = String(target);
+    }
+    const status = values.status || 'unknown';
+    if (status.startsWith('error:')) setVideoMotionStatus('配置错误', 'error');
+    else if (status.startsWith('applied:')) setVideoMotionStatus('已挂载', 'success');
+    else setVideoMotionStatus('已启用', 'success');
+    refreshVideoMotionTargetDetail();
+}
+
 async function loadVideoMotionConfig() {
     if (!isPremium()) return;
+    const generation = ++videoMotionLoadGeneration;
     const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
-    const memcSupported = String(deviceInfo?.device_model || '').toUpperCase() === 'RMX5200';
+    const deviceModel = String(deviceInfo?.device_model || '').toUpperCase();
+    // Device identity can still be loading when the user opens this tab. An
+    // unknown model must not be mistaken for an unsupported model, otherwise
+    // the initial "读取中" state can become permanent.
+    const memcSupported = !deviceModel || deviceModel === 'RMX5200';
     document.querySelectorAll('.video-memc-only').forEach(element => {
         element.hidden = !memcSupported;
     });
-    try {
-        const [result, appsResult, gameAssistantAppsResult, gameAssistantConfigResult] = await Promise.all([
-            memcSupported ? ksuExec(`sh "${scriptPath}" get_video_motion_config`, true) : Promise.resolve(''),
-            memcSupported ? ksuExec(`sh "${scriptPath}" get_video_motion_apps`, true) : Promise.resolve(''),
-            ksuExec(`sh "${scriptPath}" get_game_assistant_apps`, true),
-            ksuExec(`sh "${scriptPath}" get_game_assistant_config`, true)
-        ]);
-        parseGameAssistantConfig(gameAssistantConfigResult, gameAssistantAppsResult);
-        if (!memcSupported) return;
-        const values = {};
-        result.split(/\r?\n/).forEach(line => {
-            const separator = line.indexOf('=');
-            if (separator > 0) values[line.slice(0, separator)] = line.slice(separator + 1);
-        });
-        const target = Number(values.target || 0);
-        const rates = Array.from(new Set(displayModes
-            .filter(mode => mode.width === currentResolutionWidth)
-            .map(mode => mode.fps)))
-            .filter(rate => Number.isInteger(rate) && rate >= 30)
-            .sort((left, right) => left - right);
-        const select = document.getElementById('video-motion-target');
-        if (select) {
-            select.innerHTML = '';
-            [0, ...rates].forEach(rate => {
-                const option = document.createElement('option');
-                option.value = String(rate);
-                option.innerText = videoMotionTargetLabel(rate);
-                select.appendChild(option);
-            });
-            if (![0, ...rates].includes(target)) {
-                const option = document.createElement('option');
-                option.value = String(target);
-                option.innerText = videoMotionTargetLabel(target);
-                select.appendChild(option);
-            }
-            select.value = String(target);
+    if (memcSupported) {
+        setVideoMotionStatus('读取中');
+        const slowReadTimer = setTimeout(() => {
+            if (videoMotionLoadCurrent(generation)) setVideoMotionStatus('读取较慢');
+        }, 2500);
+        try {
+            const result = await ksuExec(
+                `sh "${scriptPath}" get_video_motion_config`, true, 8000
+            );
+            if (!videoMotionLoadCurrent(generation)) return;
+            if (!result || result.startsWith('Error:')) throw new Error(result || '配置无响应');
+            applyVideoMotionConfig(result);
+        } catch (error) {
+            if (!videoMotionLoadCurrent(generation)) return;
+            setVideoMotionStatus('读取失败', 'error');
+            debugLog(`Video motion config load failed: ${error.message}`);
+        } finally {
+            clearTimeout(slowReadTimer);
         }
-        const status = values.status || 'unknown';
-        if (status.startsWith('error:')) setVideoMotionStatus('配置错误', 'error');
-        else if (status.startsWith('applied:')) setVideoMotionStatus('已挂载', 'success');
-        else setVideoMotionStatus('已启用', 'success');
-        refreshVideoMotionTargetDetail();
-        parseVideoMotionApps(appsResult);
+        await yieldToBrowser();
+        if (!videoMotionLoadCurrent(generation)) return;
+        try {
+            const appsResult = await ksuExec(
+                `sh "${scriptPath}" get_video_motion_apps`, true, 8000
+            );
+            if (!videoMotionLoadCurrent(generation)) return;
+            if (appsResult.startsWith('Error:')) throw new Error(appsResult);
+            parseVideoMotionApps(appsResult);
+        } catch (error) {
+            if (!videoMotionLoadCurrent(generation)) return;
+            setVideoListMessage('video-motion-app-list', '自定义应用读取失败', 'error-state');
+            debugLog(`Video motion applications load failed: ${error.message}`);
+        }
+    } else {
+        setVideoMotionStatus('当前机型不支持', 'error');
+        parseVideoMotionApps('');
+    }
+
+    // Game-assistant data is independent from MEMC. Complete the visible
+    // MEMC state first, then load these sections without holding either one in
+    // a fake shared loading state.
+    try {
+        await yieldToBrowser();
+        if (!videoMotionLoadCurrent(generation)) return;
+        // The config endpoint already includes package names and feature
+        // selections. Avoid a duplicate bridge read on every tab entry.
+        const gameAssistantConfigResult = await ksuExec(
+            `sh "${scriptPath}" get_game_assistant_config`, true, 8000
+        );
+        if (!videoMotionLoadCurrent(generation)) return;
+        if (gameAssistantConfigResult.startsWith('Error:')) throw new Error(gameAssistantConfigResult);
+        parseGameAssistantConfig(gameAssistantConfigResult, '');
     } catch (error) {
-        setVideoMotionStatus('读取失败', 'error');
-        debugLog(`Video motion load failed: ${error.message}`);
+        if (!videoMotionLoadCurrent(generation)) return;
+        debugLog(`Game assistant config load failed: ${error.message}`);
+        setVideoListMessage('game-assistant-app-list', '授权配置读取失败', 'error-state');
     }
 }
 
@@ -4214,8 +4200,17 @@ async function commitGlobalMode(previousMode = currentMode,
         const result = await ksuExec(`sh "${scriptPath}" ${command} "${requestedMode}"`);
         if (result.includes("Success")) {
             appliedMode = requestedMode;
+            currentMode = requestedMode;
+            const requestedModeObj = displayModes.find(mode => mode.id === requestedMode);
+            if (requestedModeObj) currentResolutionWidth = requestedModeObj.width;
+            renderResolutionSeg();
+            renderDisplayModes();
             showToast(resolutionChange ? "分辨率切换已提交" : "刷新率切换已提交");
-            await loadDisplayModes();
+            // The mode table is unchanged by a normal setting write. Avoid a
+            // second full dumpsys SurfaceFlinger parse on every tap; the
+            // lightweight config poll still catches an external change.
+            refreshAppliedMode().catch(error =>
+                debugLog(`mode confirmation failed: ${error.message}`));
         } else {
             currentMode = previousMode;
             currentResolutionWidth = previousWidth;
@@ -4287,7 +4282,10 @@ function setupLiveRefresh() {
 async function loadAppListNow({ renderRates = activeTabId === 'tab-rates' } = {}) {
     const listEl = document.getElementById('app-list');
     if (!listEl) return;
-    if (renderRates) listEl.innerHTML = '<div class="loading">正在加载应用列表…</div>';
+    if (renderRates) {
+        listEl.dataset.fullListRendered = '0';
+        listEl.innerHTML = '<div class="loading">正在加载应用列表…</div>';
+    }
 
     const showSystem = (() => {
         try { return localStorage.getItem(SHOW_SYSTEM_APPS_KEY) === '1'; } catch (e) { return false; }
@@ -4304,42 +4302,161 @@ async function loadAppListNow({ renderRates = activeTabId === 'tab-rates' } = {}
         return;
     }
     allPackages = packages;
-
-    if (typeof ksu !== 'undefined' && typeof ksu.getPackagesInfo !== 'undefined') {
-        try {
-            const batchSize = 50;
-            for (let i = 0; i < packages.length; i += batchSize) {
-                const batch = packages.slice(i, i + batchSize);
-                const infoJson = ksu.getPackagesInfo(JSON.stringify(batch));
-                const infoArray = JSON.parse(infoJson);
-                if (Array.isArray(infoArray)) {
-                    infoArray.forEach(info => {
-                        const pkg = info.packageName;
-                        const label = info.appLabel || info.label || pkg;
-                        if (pkg) appLabels[pkg] = label;
-                    });
-                }
-                // Package-manager calls can be synchronous in older KSU
-                // WebViews. Yield between batches so a tab switch or scroll
-                // event gets a frame even with system apps enabled.
-                if (i + batchSize < packages.length) await yieldToBrowser();
-            }
-        } catch (e) { /* ignore */ }
-    }
-
+    // Paint package names immediately. Package-manager label lookup is
+    // synchronous in some KSU builds and must never delay the first tab paint.
     if (renderRates && activeTabId === 'tab-rates') renderAppList(allPackages);
     renderVideoAppPicker();
-    setTimeout(() => {
-        if (activeTabId !== 'tab-rates' && activeTabId !== 'tab-video') return;
-        allPackages.forEach(pkg => {
-            if (!appLabels[pkg]) queueAppLabelFetch(pkg);
+    // Paint package names first, then enrich a few labels at a time. The
+    // enrichment is cancellable on every user interaction so it cannot turn
+    // into the delayed main-thread stall that the old full-list lookup caused.
+    scheduleAppLabelEnrichment(packages);
+}
+
+function updateAppLabelUI(pkg, label) {
+    const labelEl = document.getElementById(`label-${pkg}`);
+    if (labelEl) labelEl.innerText = label;
+    document.querySelectorAll('.selection-row[data-package]').forEach(row => {
+        if (row.dataset.package !== pkg) return;
+        const name = row.querySelector('.selection-app-name');
+        if (name) name.innerText = label;
+    });
+    const videoPicker = document.getElementById('video-app-picker');
+    if (videoPicker?.dataset.value === pkg) setVideoAppPickerValue(pkg);
+    const gamePicker = document.getElementById('game-assistant-picker');
+    if (gamePicker?.dataset.value === pkg) setGameAssistantPickerValue(pkg);
+}
+
+function scheduleAppLabelEnrichment(packages) {
+    appLabelEnrichmentGeneration++;
+    const generation = appLabelEnrichmentGeneration;
+    appLabelEnrichmentPackages = (Array.isArray(packages) ? packages : [])
+        .filter(pkg => !appLabels[pkg]);
+    appLabelEnrichmentCursor = 0;
+    if (appLabelEnrichmentTimer !== null) clearTimeout(appLabelEnrichmentTimer);
+    const start = () => {
+        appLabelEnrichmentTimer = null;
+        if (generation !== appLabelEnrichmentGeneration || document.hidden
+            || (activeTabId !== 'tab-rates' && activeTabId !== 'tab-video')) return;
+        if (appLabelEnrichmentRunning) {
+            appLabelEnrichmentTimer = setTimeout(start, 120);
+            return;
+        }
+        void enrichAppLabelsInBatches(generation);
+    };
+    // Keep the package-label bridge off the interaction path.  A single
+    // getPackagesInfo request is substantially cheaper than the old 16-item
+    // queue (which could leave several bridge calls alive after leaving this
+    // page).  The longer quiet period also gives a tab switch priority.
+    appLabelEnrichmentTimer = setTimeout(start, 600);
+}
+
+function normalizePackageInfoResult(raw) {
+    let value = raw;
+    if (typeof value === 'string') {
+        const text = value.trim();
+        if (!text) return [];
+        try {
+            value = JSON.parse(text);
+        } catch (error) {
+            return [];
+        }
+    }
+    if (value && !Array.isArray(value) && typeof value === 'object') {
+        const nested = value.packages || value.data || value.result || value.items;
+        if (nested !== undefined) {
+            value = nested;
+        } else if (value.packageName || value.package_name) {
+            value = [value];
+        } else {
+            value = Object.entries(value).map(([packageName, info]) => (
+                info && typeof info === 'object'
+                    ? { packageName, ...info }
+                    : { packageName, appLabel: info }
+            ));
+        }
+    }
+    if (!Array.isArray(value)) return [];
+    return value.filter(info => info && typeof info === 'object');
+}
+
+function requestPackageInfoBatch(packages, shouldContinue) {
+    return new Promise((resolve, reject) => {
+        const invoke = () => {
+            if (shouldContinue && !shouldContinue()) {
+                resolve([]);
+                return;
+            }
+            if (typeof ksu === 'undefined' || typeof ksu.getPackagesInfo !== 'function') {
+                resolve([]);
+                return;
+            }
+            let result;
+            try {
+                result = ksu.getPackagesInfo(JSON.stringify(packages));
+            } catch (error) {
+                reject(error);
+                return;
+            }
+            if (result && typeof result.then === 'function') {
+                result.then(resolve, reject);
+            } else {
+                resolve(result);
+            }
+        };
+        if (typeof requestIdleCallback === 'function') {
+            requestIdleCallback(invoke, { timeout: 350 });
+        } else {
+            setTimeout(invoke, 0);
+        }
+    });
+}
+
+async function enrichAppLabelsInBatches(generation) {
+    if (appLabelEnrichmentRunning
+        || typeof ksu === 'undefined') return;
+    if (!appLabelEnrichmentPackages.length) return;
+    appLabelEnrichmentRunning = true;
+    try {
+        if (generation !== appLabelEnrichmentGeneration || document.hidden
+            || (activeTabId !== 'tab-rates' && activeTabId !== 'tab-video')) return;
+        // PackageManager already exposes a vectorized API.  Query the whole
+        // pending set once instead of serial 16-package bridge calls; this
+        // keeps the WebView responsive even on devices with many apps.
+        const batch = appLabelEnrichmentPackages.slice();
+        appLabelEnrichmentCursor = batch.length;
+        const result = await requestPackageInfoBatch(batch, () => (
+            generation === appLabelEnrichmentGeneration
+                && !document.hidden
+                && (activeTabId === 'tab-rates' || activeTabId === 'tab-video')
+        ));
+        if (generation !== appLabelEnrichmentGeneration || document.hidden
+            || (activeTabId !== 'tab-rates' && activeTabId !== 'tab-video')) return;
+        normalizePackageInfoResult(result).forEach(info => {
+            const pkg = String(info.packageName || info.package_name || info.name || '').trim();
+            const label = String(
+                info.appLabel || info.applicationLabel || info.label || info.appName || ''
+            ).trim();
+            if (!pkg || !label || label === pkg) return;
+            appLabels[pkg] = label;
+            updateAppLabelUI(pkg, label);
         });
-    }, 1000);
+    } catch (error) {
+        debugLog(`application label load failed: ${error.message}`);
+    } finally {
+        appLabelEnrichmentRunning = false;
+    }
 }
 
 async function ensureAppListLoaded({ force = false, renderRates = activeTabId === 'tab-rates' } = {}) {
     if (appListLoaded && !force) {
-        if (renderRates && activeTabId === 'tab-rates') renderAppList(allPackages);
+        const listEl = document.getElementById('app-list');
+        if (renderRates && activeTabId === 'tab-rates'
+            && listEl?.dataset.fullListRendered !== '1') {
+            renderAppList(allPackages, { fullList: true });
+        }
+        if (renderRates && activeTabId === 'tab-rates') {
+            scheduleAppLabelEnrichment(allPackages);
+        }
         return true;
     }
     if (appListLoadPromise) return appListLoadPromise;
@@ -4371,7 +4488,7 @@ function filterAppList() {
     if (!input) return;
     const term = input.value.trim().toLowerCase();
     if (!term) {
-        renderAppList(allPackages);
+        renderAppList(allPackages, { fullList: true });
         return;
     }
     const filtered = allPackages.filter(pkg => {
@@ -4387,87 +4504,6 @@ function filterAppList() {
         return false;
     });
     renderAppList(filtered);
-}
-
-async function getPackageInfoNewKernelSU(packageName) {
-    try {
-        if (typeof ksu !== 'undefined' && typeof ksu.getPackageInfo !== 'undefined') {
-            const info = ksu.getPackageInfo(packageName);
-            if (info && typeof info === 'object') {
-                return { appLabel: info.appLabel || info.label || packageName, packageName };
-            }
-        }
-        if (typeof ksu !== 'undefined' && typeof ksu.getPackagesInfo !== 'undefined') {
-            try {
-                const infoJson = ksu.getPackagesInfo(JSON.stringify([packageName]));
-                const infoArray = JSON.parse(infoJson);
-                if (infoArray && infoArray[0]) {
-                    return { appLabel: infoArray[0].appLabel || infoArray[0].label || packageName, packageName };
-                }
-            } catch (parseError) { /* ignore */ }
-        }
-        if (typeof $packageManager !== 'undefined') {
-            const info = $packageManager.getApplicationInfo(packageName, 0, 0);
-            if (info) {
-                return { appLabel: info.getLabel() || packageName, packageName };
-            }
-        }
-        return null;
-    } catch (error) {
-        return null;
-    }
-}
-
-async function fetchAppLabel(pkg) {
-    if (appLabels[pkg]) return appLabels[pkg];
-    const ksuInfo = await getPackageInfoNewKernelSU(pkg);
-    if (ksuInfo && ksuInfo.appLabel) {
-        appLabels[pkg] = ksuInfo.appLabel;
-        updateLabelUI(pkg, ksuInfo.appLabel);
-        return ksuInfo.appLabel;
-    }
-    const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
-    const label = await ksuExec(`sh "${scriptPath}" get_app_info "${pkg}"`);
-    if (label && label.trim()) {
-        const cleanLabel = label.trim();
-        appLabels[pkg] = cleanLabel;
-        updateLabelUI(pkg, cleanLabel);
-    } else {
-        appLabels[pkg] = pkg;
-    }
-}
-
-function updateLabelUI(pkg, label) {
-    const labelEl = document.getElementById(`label-${pkg}`);
-    if (labelEl) labelEl.innerText = label;
-    const picker = document.getElementById('video-app-picker');
-    if (picker && picker.dataset.value === pkg) setVideoAppPickerValue(pkg);
-    document.querySelectorAll('.selection-row[data-package]').forEach(row => {
-        if (row.dataset.package !== pkg) return;
-        const name = row.querySelector('.selection-app-name');
-        if (name) name.innerText = label;
-    });
-}
-
-async function processLabelQueue() {
-    if (processingQueue) return;
-    processingQueue = true;
-    while (labelQueue.length > 0
-        && (activeTabId === 'tab-rates' || activeTabId === 'tab-video')
-        && !document.hidden) {
-        const batch = labelQueue.splice(0, 3);
-        await Promise.all(batch.map(pkg => fetchAppLabel(pkg)));
-        await new Promise(r => setTimeout(r, 50));
-    }
-    processingQueue = false;
-}
-
-function queueAppLabelFetch(pkg) {
-    if (appLabels[pkg]) return;
-    if (!labelQueue.includes(pkg)) {
-        labelQueue.push(pkg);
-        processLabelQueue();
-    }
 }
 
 function createAppListItem(pkg) {
@@ -4490,8 +4526,7 @@ function createAppListItem(pkg) {
     } else {
         displayName = esc(displayName);
     }
-    if (!appLabels[pkg]) queueAppLabelFetch(pkg);
-    const label = esc(appLabels[pkg] || "加载中…");
+    const label = esc(appLabels[pkg] || pkg);
 
     item.innerHTML = `
         <div class="app-info">
@@ -4509,9 +4544,13 @@ function createAppListItem(pkg) {
     return item;
 }
 
-function renderAppList(packages) {
+function renderAppList(packages, { fullList = packages === allPackages } = {}) {
     const listEl = document.getElementById('app-list');
     if (!listEl) return;
+    // Mark the full list as owned by this render immediately. If the user
+    // changes tabs while chunks are being appended, returning must not start
+    // another full DOM rebuild over the partially rendered list.
+    listEl.dataset.fullListRendered = fullList ? '1' : '0';
     const generation = ++appListRenderGeneration;
     if (appListRenderTimer !== null) {
         clearTimeout(appListRenderTimer);
@@ -4524,7 +4563,7 @@ function renderAppList(packages) {
     }
     listEl.innerHTML = '';
     let cursor = 0;
-    const chunkSize = 24;
+    const chunkSize = 16;
     const appendChunk = () => {
         appListRenderTimer = null;
         if (generation !== appListRenderGeneration || activeTabId !== 'tab-rates') return;
@@ -4535,9 +4574,8 @@ function renderAppList(packages) {
         }
         listEl.appendChild(fragment);
         if (cursor < list.length) {
-            // A zero-delay task yields to touch/scroll handling without
-            // leaving a visible blank list for the first chunk.
-            appListRenderTimer = setTimeout(appendChunk, 0);
+            // Keep large package lists from monopolizing a run-loop turn.
+            appListRenderTimer = setTimeout(appendChunk, 32);
         }
     };
     appendChunk();
@@ -4646,7 +4684,7 @@ async function saveAppConfig(pkg, modeId, resolution) {
                 fps: mode ? mode.fps : -1
             };
         }
-        renderAppList(allPackages);
+        renderAppList(allPackages, { fullList: true });
     } else {
         showToast("保存失败");
     }
@@ -4780,6 +4818,63 @@ function yieldToBrowser() {
     });
 }
 
+function delayForBrowser(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function waitForUiIdle() {
+    let observedGeneration = uiInteractionGeneration;
+    while (true) {
+        await delayForBrowser(UI_BACKGROUND_IDLE_MS);
+        if (observedGeneration === uiInteractionGeneration) return;
+        observedGeneration = uiInteractionGeneration;
+    }
+}
+
+function noteUiInteraction() {
+    uiInteractionGeneration++;
+    appLabelEnrichmentGeneration++;
+    if (appLabelEnrichmentTimer !== null) {
+        clearTimeout(appLabelEnrichmentTimer);
+        appLabelEnrichmentTimer = null;
+    }
+    if (appListLoaded && (activeTabId === 'tab-rates' || activeTabId === 'tab-video')) {
+        scheduleAppLabelEnrichment(allPackages);
+    }
+    if (!moduleInitializationRunning && !moduleInitializationComplete) {
+        scheduleModuleInitialization();
+    }
+}
+
+function setupUiWorkScheduling() {
+    document.addEventListener('pointerdown', noteUiInteraction, {
+        capture: true,
+        passive: true
+    });
+}
+
+function scheduleModuleInitialization() {
+    if (moduleInitializationRunning || moduleInitializationComplete) return;
+    if (activeTabId !== 'tab-oc') {
+        // Non-overview pages must remain interaction-only. Their visible
+        // state is already rendered from memory and has explicit refresh
+        // actions; starting root reads after an idle period makes the next
+        // tap on the Mine page appear frozen.
+        moduleInitializationDeferred = true;
+        return;
+    }
+    if (moduleInitializationTimer !== null) clearTimeout(moduleInitializationTimer);
+    const generation = uiInteractionGeneration;
+    moduleInitializationTimer = setTimeout(() => {
+        moduleInitializationTimer = null;
+        if (generation !== uiInteractionGeneration || document.hidden) {
+            scheduleModuleInitialization();
+            return;
+        }
+        void initializeModuleData();
+    }, UI_BACKGROUND_IDLE_MS);
+}
+
 function runAfterFirstPaint(task) {
     requestAnimationFrame(() => {
         requestAnimationFrame(() => {
@@ -4793,25 +4888,67 @@ function runAfterFirstPaint(task) {
 }
 
 async function initializeModuleData() {
-    try {
-        await Promise.all([
-            refreshAuthState(),
-            refreshDeviceInfo(),
-            loadSystemStatus(),
-            loadAdfrPolicy(),
-            loadDtsBackend()
-        ]);
-        updatePaidMarkers();
-        renderVideoPage();
-        renderMinePage();
-        syncAppliedModePolling();
-
-        // 后台同步服务端授权（不阻塞免费流程）
-        if (authToken || authState.account === 'logged_in') {
-            refreshAuthorizationView({ force: true }).catch(error => {
-                debugLog(`initial authorization sync failed: ${error.message}`);
-            });
+    if (moduleInitializationRunning || moduleInitializationComplete) return;
+    moduleInitializationRunning = true;
+    const initialInteractionGeneration = uiInteractionGeneration;
+    const resumeOverviewOnly = moduleInitializationDeferred;
+    moduleInitializationDeferred = false;
+    if (activeTabId !== 'tab-oc') {
+        moduleInitializationDeferred = true;
+        moduleInitializationComplete = true;
+        moduleInitializationRunning = false;
+        return;
+    }
+    const runStage = async (name, task) => {
+        const generation = uiInteractionGeneration;
+        try {
+            await task();
+        } catch (error) {
+            debugLog(`initial ${name} load failed: ${error.message}`);
         }
+        await yieldToBrowser();
+        if (generation !== uiInteractionGeneration) await waitForUiIdle();
+        else await delayForBrowser(80);
+    };
+    try {
+        // These bridge calls take 0.2-1.5 seconds on the target KSU build.
+        // Run one at a time and yield between them instead of freezing the
+        // opening screen with a Promise.all burst.
+        // Local authorization gates two whole tabs, so resolve it before the
+        // lower-priority status cards on the opening page. When it changes,
+        // renderCurrentAuthorizationPage also starts video data immediately.
+        if (!resumeOverviewOnly) {
+            await runStage('authorization', async () => {
+                await refreshAuthState();
+                renderCurrentAuthorizationPage();
+            });
+            if (activeTabId !== 'tab-oc' || uiInteractionGeneration !== initialInteractionGeneration) {
+                moduleInitializationDeferred = true;
+                moduleInitializationComplete = true;
+                return;
+            }
+            await runStage('device identity', refreshDeviceInfo);
+        }
+        if (activeTabId !== 'tab-oc' || uiInteractionGeneration !== initialInteractionGeneration) {
+            // Do not compete with a page the user is actively using. The
+            // remaining overview-only reads are resumed when they return to
+            // the first tab.
+            moduleInitializationDeferred = true;
+            moduleInitializationComplete = true;
+            return;
+        }
+        await delayForBrowser(UI_BACKGROUND_IDLE_MS);
+        if (activeTabId !== 'tab-oc' || uiInteractionGeneration !== initialInteractionGeneration) {
+            moduleInitializationDeferred = true;
+            moduleInitializationComplete = true;
+            return;
+        }
+        await runStage('display policy', loadAdfrPolicy);
+        await runStage('display backend', loadDtsBackend);
+        await runStage('system status', loadSystemStatus);
+        authorizationRefreshedAt = Date.now();
+        syncAppliedModePolling();
+        moduleInitializationComplete = true;
         if (activeTabId !== 'tab-oc') scheduleTabBackgroundWork(activeTabId);
         scheduleAutomaticUpdateCheck();
     } catch (e) {
@@ -4821,12 +4958,16 @@ async function initializeModuleData() {
         if (listEl) {
             listEl.innerHTML = `<div class="error-state">初始化错误：${esc(e.message)}</div>`;
         }
+    } finally {
+        moduleInitializationRunning = false;
+        if (!moduleInitializationComplete) scheduleModuleInitialization();
     }
 }
 
 function init() {
     try {
         setupTheme();
+        setupUiWorkScheduling();
         setupTabs();
         setupAuthorizationPullRefresh();
         setupLiveRefresh();
@@ -4843,7 +4984,7 @@ function init() {
         renderMinePage();
         renderVideoPage();
         updatePaidMarkers();
-        runAfterFirstPaint(initializeModuleData);
+        runAfterFirstPaint(scheduleModuleInitialization);
     } catch (e) {
         console.error("First-frame init failed:", e);
         showToast("初始化失败: " + e.message);

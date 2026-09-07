@@ -15,6 +15,8 @@ grep -Fq "proxied.refresh_token" "$JS"
 grep -Fq "handlerCmd('auth_update_token', authToken)" "$JS"
 grep -Fq 'auth_update_token' "$HANDLER"
 grep -Fq 'X-Refresh-Token' "$HANDLER"
+grep -Fq 'const useRootProxy = opts.rootProxy === true || opts.auth === true || opts.form === true;' "$JS"
+grep -Fq "if (useRootProxy && (method === 'GET' || method === 'POST'))" "$JS"
 
 node - "$JS" <<'NODE'
 const fs = require('fs');

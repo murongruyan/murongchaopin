@@ -30,10 +30,10 @@ require_text "$HTML" '<img src="1000003559.png" alt=""'
 require_text "$CSS" '.payment-sheet'
 require_text "$CSS" '.app-mode-picker'
 require_text "$CSS" '.app-mode-grid'
-require_text "$CSS" 'backdrop-filter: blur(22px) saturate(175%)'
+require_text "$CSS" 'backdrop-filter: none'
 require_text "$CSS" '.nav-indicator {'
 require_text "$CSS" '.nav-indicator-surface {'
-require_text "$CSS" '--indicator-scale-x: 1.34;'
+require_text "$CSS" 'touch-action: manipulation;'
 require_text "$CSS" '.update-release-notes-body'
 
 require_text "$JS" "product_code === 'display_oc_permanent'"
@@ -51,12 +51,15 @@ require_text "$JS" 'authState.package_version_code'
 require_text "$JS" 'result.paid.version_code'
 require_text "$JS" "deviceInfo?.device_model || ''"
 require_text "$JS" "querySelectorAll('.video-memc-only')"
-require_text "$JS" 'function bottomNavInterpolatedGeometry('
+require_text "$JS" 'function setBottomNavIndicator('
 require_text "$JS" 'commitGlobalMode(previousMode, previousWidth, false);'
-require_text "$JS" 'function setupBottomNavLiquidGesture()'
-require_text "$JS" "nav.addEventListener('pointerdown'"
-require_text "$JS" "nav.addEventListener('pointermove'"
+require_text "$JS" 'function setupBottomNavIndicator()'
 require_text "$JS" "activateTab(targetId, { push: true });"
+
+if grep -Fq 'setPointerCapture' "$JS"; then
+    echo 'bottom navigation must not capture ordinary taps' >&2
+    exit 1
+fi
 
 if grep -Fq 'id="btn-save-global"' "$HTML" || grep -Fq '.fab-save' "$CSS"; then
     echo 'legacy global save button must stay removed; refresh-rate selection is immediate' >&2

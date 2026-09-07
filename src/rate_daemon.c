@@ -26,7 +26,7 @@
 #define MAX_APPS 200
 #define MAX_PKG_LEN 128
 #define MAX_EXTENSION_RATES 256
-#define RATE_DAEMON_VERSION "2.9.22"
+#define RATE_DAEMON_VERSION "2.9.23"
 #define BOOT_RESOLUTION_SETTLE_TIMEOUT_MS 8000
 #define BOOT_RESOLUTION_SETTLE_SAMPLE_MS 150
 #define BOOT_RESOLUTION_SETTLE_SAMPLES 4
@@ -270,6 +270,7 @@ static void set_rmx5200_ltpo_oti_owner(const char *base_path, int owned);
 static void sync_adfr_lock_floor(int mode_id);
 static void maintain_adfr_lock(const char *base_path, int mode_id);
 static int valid_package_name(const char *package_name);
+static int usable_foreground_package(const char *package_name);
 static int set_surface_flinger_mode(int mode_id);
 static int apply_refresh_ladder(int target_id);
 static int next_refresh_ladder_step(int active_id, int target_id);
@@ -2159,6 +2160,17 @@ void get_foreground_app(char *buffer, int size) {
         strncpy(buffer, "unknown", size);
         buffer[size - 1] = '\0';
     }
+}
+
+/* WindowManager reports placeholders while the display, launcher, or
+ * fingerprint overlay is changing. They must not be treated as an app
+ * transition because doing so can replay a stale refresh-rate policy. */
+static int usable_foreground_package(const char *package_name) {
+    if (!package_name || !*package_name) return 0;
+    if (strcmp(package_name, "unknown") == 0 ||
+            strcmp(package_name, "android") == 0 ||
+            strcmp(package_name, "android.system") == 0) return 0;
+    return valid_package_name(package_name);
 }
 
 #ifndef MURONG_FREE_BUILD
@@ -5354,6 +5366,15 @@ int main(int argc, char *argv[]) {
         // 获取前台应用
         char current_pkg[MAX_PKG_LEN] = "";
         get_foreground_app(current_pkg, sizeof(current_pkg));
+
+        if (!usable_foreground_package(current_pkg)) {
+            if (usable_foreground_package(last_pkg)) {
+                strncpy(current_pkg, last_pkg, sizeof(current_pkg));
+                current_pkg[sizeof(current_pkg) - 1] = '\0';
+            } else {
+                current_pkg[0] = '\0';
+            }
+        }
 #ifndef MURONG_FREE_BUILD
         /* Probe before the next LTPO policy tick.  This is deliberately
          * package-neutral: the foreground package is only used to scope the
@@ -5361,7 +5382,7 @@ int main(int argc, char *argv[]) {
         rmx5200_video_surface_probe(current_pkg);
 #endif
 
-        if (strlen(current_pkg) > 0) {
+        if (usable_foreground_package(current_pkg)) {
             // 记录应用切换
             if (strcmp(current_pkg, last_pkg) != 0) {
                  log_msg("Detected App Change / 检测到应用切换: %s", current_pkg);

@@ -31,11 +31,21 @@ Outputs() {
 # performs DTBO work.
 Prepare_install_tools() {
   for relative_path in \
-    avbtool/avbtool openssl dtc mkdtimg unpack_dtbo process_dts pack_dtbo; do
+    avbtool/avbtool openssl dtc mkdtimg unpack_dtbo process_dts pack_dtbo curl; do
     install_tool="$BIN_DIR/$relative_path"
     [ -f "$install_tool" ] || return 1
     chmod 0755 "$install_tool" || return 1
   done
+}
+
+assert_supported_install_model() {
+  INSTALL_MODEL=$(getprop ro.product.vendor.model 2>/dev/null | tr -d '\r\n')
+  [ -n "$INSTALL_MODEL" ] || \
+    INSTALL_MODEL=$(getprop ro.product.model 2>/dev/null | tr -d '\r\n')
+  case "$INSTALL_MODEL" in
+    RMX5200|PLK110|PJD110) ;;
+    *) abort "不支持的机型：${INSTALL_MODEL:-unknown}（仅支持 RMX5200、PLK110、PJD110）" ;;
+  esac
 }
 
 # 音量键检测：沿用原来的单事件读取，不设超时或默认值。
@@ -60,6 +70,8 @@ Volume_key_monitoring() {
     *) echo 1 ;;
   esac
 }
+
+assert_supported_install_model
 
 # 安装阶段选择应用后端。原厂基线确认与后端选择必须是两次明确操作；
 # 后端选择必须由用户明确完成，绝不默认写入 DTBO，避免用户只确认原厂基线

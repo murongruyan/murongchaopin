@@ -8,6 +8,7 @@ if [ ! -d "$MOD_PATH" ]; then
 fi
 
 BIN_DIR="$MOD_PATH/bin"
+MODULE_CURL="$BIN_DIR/curl"
 IMG_DIR="$MOD_PATH/img"
 WORK_DIR="$MOD_PATH/workspace"
 CONFIG_FILE="$MOD_PATH/config/mode.txt"
@@ -1146,17 +1147,44 @@ apply_video_memc_config() {
 http_get_file() {
     HTTP_URL="$1"
     HTTP_OUTPUT="$2"
-    if command -v curl >/dev/null 2>&1; then
-        curl --fail --silent --show-error --location \
-            --connect-timeout 10 --max-time 25 --retry 2 --retry-delay 1 \
-            --proto '=https' "$HTTP_URL" -o "$HTTP_OUTPUT"
-        return $?
+    HTTP_CURL=$(select_network_curl)
+    [ -n "$HTTP_CURL" ] || {
+        echo "Error: 模块和系统均缺少 curl，无法使用后端网络通道" >&2
+        return 127
+    }
+    # Keep the JSON body for HTTP 4xx/5xx responses.  The update endpoint
+    # returns a useful server-side diagnostic (for example when the
+    # display_module row has not been registered); --fail would discard it and
+    # incorrectly surface the condition as a network failure.
+    network_curl_exec "$HTTP_CURL" --silent --show-error --location \
+        --connect-timeout 10 --max-time 25 --retry 2 --retry-delay 1 \
+        --proto '=https' "$HTTP_URL" -o "$HTTP_OUTPUT"
+}
+
+# The module carries an Android-native curl so WebUI requests do not depend on
+# whether the current ROM exposes /system/bin/curl.  Fall back to the platform
+# binary only for older/incomplete installs where the bundled file is absent.
+select_network_curl() {
+    if [ -x "$MODULE_CURL" ]; then
+        printf '%s\n' "$MODULE_CURL"
+        return 0
     fi
-    if [ -x /data/adb/ksu/bin/busybox ]; then
-        /data/adb/ksu/bin/busybox wget -q -T 25 -O "$HTTP_OUTPUT" "$HTTP_URL"
-        return $?
+    if [ -x /system/bin/curl ]; then
+        printf '%s\n' /system/bin/curl
+        return 0
     fi
-    return 127
+    command -v curl 2>/dev/null || true
+}
+
+# Run the module curl with its private Android shared libraries.  The platform
+# fallback keeps the ROM linker namespace untouched when the bundled file is
+# missing (for example during an in-place upgrade).
+network_curl_exec() {
+    if [ "$1" = "$MODULE_CURL" ] && [ -d "$BIN_DIR/lib64" ]; then
+        LD_LIBRARY_PATH="$BIN_DIR/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$@"
+    else
+        "$@"
+    fi
 }
 
 base64url_file() {
@@ -1213,6 +1241,7 @@ api_request_proxy() {
     API_AUTH="$3"
     API_BODY_B64="$4"
     API_NONCE="$5"
+    API_FORM="$6"
     case "$API_METHOD" in GET|POST) ;; *) echo "Error: 非法 API 方法"; return 1 ;; esac
     case "$API_PATH" in ''|/*|*://*|*..*) API_PATH_INVALID=1 ;; *) API_PATH_INVALID=0 ;; esac
     printf '%s\n' "$API_PATH" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_./?&=%+-]*$' || API_PATH_INVALID=1
@@ -1220,10 +1249,11 @@ api_request_proxy() {
         echo "Error: 非法 API 路径"
         return 1
     fi
-    command -v curl >/dev/null 2>&1 || {
-        echo "Error: 系统缺少 curl，无法使用后端网络通道"
+    API_CURL=$(select_network_curl)
+    if [ -z "$API_CURL" ]; then
+        echo "Error: 模块和系统均缺少 curl，无法使用后端网络通道"
         return 1
-    }
+    fi
 
     set -- --silent --show-error --location --connect-timeout 10 --max-time 25 \
         --retry 2 --retry-delay 1 --proto '=https' \
@@ -1269,7 +1299,12 @@ api_request_proxy() {
             echo "Error: API 请求正文解码失败"
             return 1
         }
-        set -- "$@" -H 'Content-Type: application/json' --data-binary "@$API_BODY_FILE"
+        if [ "$API_FORM" = 1 ]; then
+            set -- "$@" -H 'Content-Type: application/x-www-form-urlencoded;charset=UTF-8' \
+                --data-binary "@$API_BODY_FILE"
+        else
+            set -- "$@" -H 'Content-Type: application/json' --data-binary "@$API_BODY_FILE"
+        fi
     elif [ -n "$API_BODY_B64" ]; then
         echo "Error: GET 请求不能携带正文"
         return 1
@@ -1284,7 +1319,10 @@ api_request_proxy() {
         echo "Error: 无法创建 API 响应头临时文件"
         return 1
     }
-    if ! curl "$@" -D "$API_HEADERS_FILE" "$BASE_API_URL/$API_PATH" -o "$API_RESPONSE"; then
+    network_curl_exec "$API_CURL" "$@" -D "$API_HEADERS_FILE" "$BASE_API_URL/$API_PATH" \
+        -o "$API_RESPONSE"
+    API_REQUEST_STATUS=$?
+    if [ "$API_REQUEST_STATUS" -ne 0 ]; then
         rm -f "$API_RESPONSE" "$API_HEADERS_FILE" "$API_BODY_FILE"
         echo "Error: 服务器网络请求失败"
         return 1
@@ -1295,7 +1333,7 @@ api_request_proxy() {
         echo "Error: 服务器返回空响应"
         return 1
     }
-    API_REFRESH_TOKEN=$(grep -i '^X-Refresh-Token:' "$API_HEADERS_FILE" 2>/dev/null | \
+    API_REFRESH_TOKEN=$(grep -i '^[[:space:]]*X-Refresh-Token:' "$API_HEADERS_FILE" 2>/dev/null | \
         tail -n 1 | sed 's/^[^:]*:[[:space:]]*//; s/\r$//' | tr -d '[:space:]')
     case "$API_REFRESH_TOKEN" in
         ''|*[!A-Za-z0-9._~-]*) API_REFRESH_TOKEN="" ;;
@@ -1322,10 +1360,11 @@ download_paid_package() {
     case "$PACKAGE_ID" in ''|*[!0-9]*) echo "Error: 付费组件 ID 无效"; return 1 ;; esac
     case "$EXPECTED_SHA" in ''|*[!0-9a-fA-F]*) echo "Error: 付费组件哈希无效"; return 1 ;; esac
     [ "${#EXPECTED_SHA}" -eq 64 ] || { echo "Error: 付费组件哈希长度无效"; return 1; }
-    command -v curl >/dev/null 2>&1 || {
-        echo "Error: 系统缺少 curl，无法下载付费组件"
+    PACKAGE_CURL=$(select_network_curl)
+    if [ -z "$PACKAGE_CURL" ]; then
+        echo "Error: 模块和系统均缺少 curl，无法使用后端网络通道"
         return 1
-    }
+    fi
     [ -f "$GATE_HELPER" ] || { echo "Error: 授权组件缺失"; return 1; }
     gate_init
     API_TOKEN=$(gate_json_field "$GATE_ACCOUNT_FILE" token)
@@ -1355,14 +1394,16 @@ download_paid_package() {
         "$(json_escape "$BASE_VERSION")" "$(json_escape "$KERNEL_VERSION")" \
         "$(json_escape "$BACKEND")" > "$PACKAGE_REQUEST"
 
-    if ! curl --silent --show-error --location --connect-timeout 10 --max-time 30 \
+    network_curl_exec "$PACKAGE_CURL" --silent --show-error --location --connect-timeout 10 --max-time 30 \
         --retry 2 --retry-delay 1 --proto '=https' \
         -H 'Accept: application/json' -H 'Content-Type: application/json' \
         -H "Authorization: Bearer $API_TOKEN" \
         -H "X-Display-Request-Nonce: $REQUEST_NONCE" \
         --data-binary "@$PACKAGE_REQUEST" \
         "$BASE_API_URL/v1/display/packages/$PACKAGE_ID/download-token" \
-        -o "$TOKEN_RESPONSE"; then
+        -o "$TOKEN_RESPONSE"
+    PACKAGE_REQUEST_STATUS=$?
+    if [ "$PACKAGE_REQUEST_STATUS" -ne 0 ]; then
         rm -f "$PACKAGE_REQUEST" "$TOKEN_RESPONSE"
         echo "Error: 获取下载令牌失败"
         return 1
@@ -1392,13 +1433,15 @@ download_paid_package() {
         return 1
     }
     printf '{"download_token":"%s"}' "$DOWNLOAD_TOKEN" > "$DOWNLOAD_REQUEST"
-    if ! curl --fail --silent --show-error --location --connect-timeout 10 --max-time 180 \
+    network_curl_exec "$PACKAGE_CURL" --fail --silent --show-error --location --connect-timeout 10 --max-time 180 \
         --proto '=https' --request POST \
         -H 'Content-Type: application/json' \
         -H "Authorization: Bearer $API_TOKEN" \
         --data-binary "@$DOWNLOAD_REQUEST" \
         "$BASE_API_URL/v1/display/packages/$PACKAGE_ID/download" \
-        -o "$GATE_DOWNLOAD_FILE"; then
+        -o "$GATE_DOWNLOAD_FILE"
+    PACKAGE_DOWNLOAD_STATUS=$?
+    if [ "$PACKAGE_DOWNLOAD_STATUS" -ne 0 ]; then
         rm -f "$DOWNLOAD_REQUEST"
         gate_package_abort >/dev/null 2>&1
         echo "Error: 付费组件下载失败"
@@ -1602,7 +1645,7 @@ case "$1" in
         ;;
 
     "api_request")
-        api_request_proxy "$2" "$3" "$4" "$5" "$6"
+        api_request_proxy "$2" "$3" "$4" "$5" "$6" "$7"
         ;;
 
     "auth_package_download")

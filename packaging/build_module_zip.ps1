@@ -59,6 +59,7 @@ $exactExcludes = @(
 $globExcludes = @(
     "bin/*probe*.ko",                       # research probes
     "bin/*qhd144*.ko",                      # rejected QHD144 experiments
+    "bin/*.device",
     "bin/process_dts.*",                    # dev/test process_dts variants
     "bin/rate_daemon.*"                     # dev/test daemon variants
 )
@@ -96,6 +97,20 @@ foreach ($requiredHookFile in @(
 )) {
     if (-not (Test-Path -LiteralPath (Join-Path $staging $requiredHookFile) -PathType Leaf)) {
         throw "PUBLIC MODULE ASSERTION FAILED - missing signed Hook product: $requiredHookFile"
+    }
+}
+
+foreach ($requiredCurlFile in @(
+    "bin/curl",
+    "bin/lib64/libcrypto.so",
+    "bin/lib64/libssl.so",
+    "bin/lib64/libz.so",
+    "bin/lib64/libc++.so"
+)) {
+    $requiredCurl = Join-Path $staging $requiredCurlFile
+    if (-not (Test-Path -LiteralPath $requiredCurl -PathType Leaf) -or
+        (Get-Item -LiteralPath $requiredCurl).Length -le 0) {
+        throw "PUBLIC MODULE ASSERTION FAILED - missing non-empty bundled curl runtime: $requiredCurlFile"
     }
 }
 

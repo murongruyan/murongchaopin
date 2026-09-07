@@ -13,7 +13,7 @@ BIN_DIR="$TMP_DIR/bin"
 mkdir -p "$BIN_DIR/avbtool"
 
 for relative_path in \
-  avbtool/avbtool openssl dtc mkdtimg unpack_dtbo process_dts pack_dtbo; do
+  avbtool/avbtool openssl dtc mkdtimg unpack_dtbo process_dts pack_dtbo curl; do
   mkdir -p "$(dirname "$BIN_DIR/$relative_path")"
   : > "$BIN_DIR/$relative_path"
   chmod 0644 "$BIN_DIR/$relative_path"
@@ -22,7 +22,7 @@ done
 Prepare_install_tools
 
 for relative_path in \
-  avbtool/avbtool openssl dtc mkdtimg unpack_dtbo process_dts pack_dtbo; do
+  avbtool/avbtool openssl dtc mkdtimg unpack_dtbo process_dts pack_dtbo curl; do
   [ -x "$BIN_DIR/$relative_path" ] || {
     echo "FAIL: tool remains non-executable: $relative_path" >&2
     exit 1

@@ -10,7 +10,10 @@ plugins {
     id("com.android.application") version "9.5.0-alpha02"
 }
 
-val hookVersionCode = 69
+import java.io.File
+import java.util.Properties
+
+val hookVersionCode = 81
 
 android {
     namespace = "com.murongchaopin.displayhook"
@@ -33,14 +36,14 @@ android {
         create("free") {
             dimension = "tier"
             versionCode = hookVersionCode
-            versionName = "69.0-api102-free-stability"
+            versionName = "81.0-api102-free-stability"
             buildConfigField("boolean", "IS_PREMIUM_BUILD", "false")
         }
         create("premium") {
             dimension = "tier"
             applicationIdSuffix = ".premium"
             versionCode = hookVersionCode
-            versionName = "69.0-api102-paid-display-ui"
+            versionName = "81.0-api102-paid-display-ui"
             buildConfigField("boolean", "IS_PREMIUM_BUILD", "true")
         }
     }
@@ -69,24 +72,36 @@ android {
         res.directories.add("res-premium")
     }
 
-    val releaseStoreFile = providers.environmentVariable("MURONG_HOOK_KEYSTORE")
-    val releaseStorePassword = providers.environmentVariable("MURONG_HOOK_STORE_PASSWORD")
-    val releaseKeyAlias = providers.environmentVariable("MURONG_HOOK_KEY_ALIAS")
-    val releaseKeyPassword = providers.environmentVariable("MURONG_HOOK_KEY_PASSWORD")
-    val hasReleaseSigning = listOf(
-        releaseStoreFile,
-        releaseStorePassword,
-        releaseKeyAlias,
-        releaseKeyPassword,
-    ).all { it.isPresent }
+    /* Keep local release builds signed with the same identity as the
+     * murongdiaodu APK. CI may still override every value through the
+     * MURONG_HOOK_* environment variables, but an unset environment must not
+     * silently emit an APK that cannot replace the installed Hook. */
+    val signingProject = rootDir.resolve("../../../../murongdiaodu-apk")
+    val signingProperties = signingProject.resolve("local.properties")
+    val localSigning = Properties().apply {
+        if (signingProperties.isFile) {
+            signingProperties.inputStream().use { load(it) }
+        }
+    }
+    val releaseStoreFileValue = System.getenv("MURONG_HOOK_KEYSTORE")?.takeIf { it.isNotBlank() }
+        ?: signingProject.resolve("murong/慕容调度.jks").absolutePath
+    val releaseStorePasswordValue = System.getenv("MURONG_HOOK_STORE_PASSWORD")?.takeIf { it.isNotBlank() }
+        ?: localSigning.getProperty("storePassword", "")
+    val releaseKeyAliasValue = System.getenv("MURONG_HOOK_KEY_ALIAS")?.takeIf { it.isNotBlank() }
+        ?: "慕容调度"
+    val releaseKeyPasswordValue = System.getenv("MURONG_HOOK_KEY_PASSWORD")?.takeIf { it.isNotBlank() }
+        ?: localSigning.getProperty("keyPassword", "")
+    val hasReleaseSigning = File(releaseStoreFileValue).isFile &&
+        releaseStorePasswordValue.isNotBlank() && releaseKeyAliasValue.isNotBlank() &&
+        releaseKeyPasswordValue.isNotBlank()
 
     if (hasReleaseSigning) {
         signingConfigs {
             create("release") {
-                storeFile = file(releaseStoreFile.get())
-                storePassword = releaseStorePassword.get()
-                keyAlias = releaseKeyAlias.get()
-                keyPassword = releaseKeyPassword.get()
+                storeFile = file(releaseStoreFileValue)
+                storePassword = releaseStorePasswordValue
+                keyAlias = releaseKeyAliasValue
+                keyPassword = releaseKeyPasswordValue
                 enableV1Signing = true
                 enableV2Signing = true
                 enableV3Signing = true
