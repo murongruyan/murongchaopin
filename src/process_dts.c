@@ -31,6 +31,7 @@
 #define MODEL_UNKNOWN 0
 #define MODEL_RMX5200 1 // Realme GT8 Pro
 #define MODEL_PLK110  2 // OnePlus 15 (PLK110)
+#define MODEL_PLQ110  4 // OnePlus Ace 6 (PLQ110)
 #define MODEL_PJD110  3 // OnePlus 12 (PJD110)
 
 int g_current_model = MODEL_UNKNOWN;
@@ -89,6 +90,8 @@ typedef struct {
     size_t rmx5200_dtbo_count;
     unsigned int plk110_dtbo_rates[16];
     size_t plk110_dtbo_count;
+    unsigned int plq110_dtbo_rates[16];
+    size_t plq110_dtbo_count;
 } DisplayModeManifest;
 
 static DisplayModeManifest g_display_mode_manifest;
@@ -496,6 +499,7 @@ static int load_display_mode_manifest(void) {
     int version = 0;
     int seen_rmx = 0;
     int seen_plk = 0;
+    int seen_plq = 0;
 
     memset(&g_display_mode_manifest, 0, sizeof(g_display_mode_manifest));
     paths[0] = env_path && *env_path ? env_path : DISPLAY_MODE_MANIFEST_DEFAULT;
@@ -537,17 +541,26 @@ static int load_display_mode_manifest(void) {
                     sizeof(g_display_mode_manifest.plk110_dtbo_rates[0]),
                 &g_display_mode_manifest.plk110_dtbo_count)))) goto malformed;
         if (rc > 0) { seen_plk = 1; continue; }
+        rc = profile_copy_value(value, sizeof(value), "plq110_dtbo_rates", p);
+        if (rc < 0 || (rc > 0 && (!parse_manifest_rates(
+                value, g_display_mode_manifest.plq110_dtbo_rates,
+                sizeof(g_display_mode_manifest.plq110_dtbo_rates) /
+                    sizeof(g_display_mode_manifest.plq110_dtbo_rates[0]),
+                &g_display_mode_manifest.plq110_dtbo_count)))) goto malformed;
+        if (rc > 0) { seen_plq = 1; continue; }
     }
     fclose(in);
-    if (version != 1 || !seen_rmx || !seen_plk ||
+    if (version != 1 || !seen_rmx || !seen_plk || !seen_plq ||
         g_display_mode_manifest.rmx5200_dtbo_count != 8 ||
-        g_display_mode_manifest.plk110_dtbo_count != 8) {
-        printf("ERROR: display mode manifest is incomplete; RMX5200/PLK110 DTBO entries must contain 8 rates.\n");
+        g_display_mode_manifest.plk110_dtbo_count != 8 ||
+        g_display_mode_manifest.plq110_dtbo_count != 8) {
+        printf("ERROR: display mode manifest is incomplete; RMX5200/PLK110/PLQ110 DTBO entries must contain 8 rates.\n");
         return 0;
     }
-    printf("Verified display mode manifest: RMX5200=%zu rates, PLK110=%zu rates.\n",
+    printf("Verified display mode manifest: RMX5200=%zu rates, PLK110=%zu rates, PLQ110=%zu rates.\n",
            g_display_mode_manifest.rmx5200_dtbo_count,
-           g_display_mode_manifest.plk110_dtbo_count);
+           g_display_mode_manifest.plk110_dtbo_count,
+           g_display_mode_manifest.plq110_dtbo_count);
     return 1;
 
 malformed:
@@ -581,6 +594,9 @@ void detect_device_model() {
     } else if (strstr(model, "PLK110")) {
         g_current_model = MODEL_PLK110;
         printf("Identified as OnePlus 15 (PLK110)\n");
+    } else if (strstr(model, "PLQ110")) {
+        g_current_model = MODEL_PLQ110;
+        printf("Identified as OnePlus Ace 6 (PLQ110)\n");
     } else if (strstr(model, "PJD110")) {
         g_current_model = MODEL_PJD110;
         printf("Identified as OnePlus 12 (PJD110)\n");
@@ -1559,6 +1575,7 @@ static int inject_plk110_adfr_properties(char *target, size_t target_capacity,
 #define PANEL_GT8_PRO "qcom,mdss_dsi_panel_AE084_P_3_A0033_dsc_cmd_dvt02"
 #define PANEL_ONEPLUS_15 "qcom,mdss_dsi_panel_AD296_P_3_A0020_dsc_cmd"
 #define PANEL_ONEPLUS_12 "qcom,mdss_dsi_panel_AA545_P_3_A0005_dsc_cmd"
+#define PANEL_ONEPLUS_ACE6 "qcom,mdss_dsi_panel_AA605_P_7_A0020_dsc_cmd"
 
 // Check if current position is inside a target panel node and return ID
 // 0: None, 1: GT8 Pro, 2: OnePlus 15, 3: OnePlus 12
@@ -1613,6 +1630,14 @@ int get_panel_id(const char *file_start, const char *current_pos, const char **o
                      return 0;
                 }
 
+                // OnePlus Ace 6 Detection
+                if (strcmp(node_name, PANEL_ONEPLUS_ACE6) == 0) {
+                     if (g_current_model == MODEL_PLQ110) {
+                         return 2;
+                     }
+                     return 0;
+                }
+
                 // OnePlus 12 Detection
                 if (strcmp(node_name, PANEL_ONEPLUS_12) == 0) {
                      if (g_current_model == MODEL_PJD110) {
@@ -1638,6 +1663,10 @@ static const char *hmbird_type_for_model(void) {
         case MODEL_RMX5200:
         case MODEL_PLK110:
             return "HMBIRD_EXT";
+        case MODEL_PLQ110:
+            /* The Ace 6 stock DTBO carries the GKI HMBIRD_OGKI node, unlike
+             * the SM8850 devices whose panel DT uses HMBIRD_EXT. */
+            return "HMBIRD_OGKI";
         case MODEL_PJD110:
             return "HMBIRD_OGKI";
         default:
@@ -1980,7 +2009,8 @@ void process_file(const char *filename) {
             template_sdc_144.valid = 1;
             printf("Found New 144Hz Template: %s\n", node_name);
         }
-        if (g_current_model == MODEL_PLK110 &&
+        if ((g_current_model == MODEL_PLK110 ||
+             g_current_model == MODEL_PLQ110) &&
             strstr(node_name, "timing@sdc_fhd_60")) {
             strncpy(template_sdc_60.content, block_start, len);
             template_sdc_60.content[len] = 0;
@@ -2419,8 +2449,16 @@ void process_file(const char *filename) {
                 fputs(current_block, out);
                 fputs("\n", out);
                 
-                for (size_t i = 1; i < g_display_mode_manifest.plk110_dtbo_count; i++) {
-                    int target_fps = (int)g_display_mode_manifest.plk110_dtbo_rates[i];
+                const unsigned int *model_dtbo_rates =
+                    (g_current_model == MODEL_PLQ110)
+                        ? g_display_mode_manifest.plq110_dtbo_rates
+                        : g_display_mode_manifest.plk110_dtbo_rates;
+                const size_t model_dtbo_count =
+                    (g_current_model == MODEL_PLQ110)
+                        ? g_display_mode_manifest.plq110_dtbo_count
+                        : g_display_mode_manifest.plk110_dtbo_count;
+                for (size_t i = 1; i < model_dtbo_count; i++) {
+                    int target_fps = (int)model_dtbo_rates[i];
                     char target_node_name[64];
                     sprintf(target_node_name, "timing@sdc_fhd_%d", target_fps);
                     

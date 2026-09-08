@@ -42,7 +42,7 @@ model_supported() {
     MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
     [ -n "$MODEL" ] || MODEL=$(getprop ro.product.model 2>/dev/null)
     case "$MODEL" in
-        RMX5200|PLK110|PJD110) return 0 ;;
+        RMX5200|PLK110|PLQ110|PJD110) return 0 ;;
         *) return 1 ;;
     esac
 }

@@ -466,7 +466,20 @@ gate_check() {
 }
 
 gate_premium_installed() {
-    [ -s "$GATE_PACKAGE_FILE" ] && [ -d "$GATE_PREMIUM_DIR" ] && [ -s "$GATE_PREMIUM_DIR/manifest.json" ]
+    # The install record alone is not proof of a usable package: a module
+    # wipe or a partial payload extraction can leave package.json behind
+    # without the verified runtime files. Every manifest-declared payload
+    # file must exist in the installed tree so the auth flows can
+    # self-heal by re-downloading instead of reporting "current".
+    [ -s "$GATE_PACKAGE_FILE" ] && [ -s "$GATE_PREMIUM_DIR/manifest.json" ] || return 1
+    _installed_declared=0
+    while IFS= read -r _installed_line; do
+        _installed_target=$(printf '%s' "$_installed_line" | sed -n 's/.*"target_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+        [ -n "$_installed_target" ] || continue
+        _installed_declared=$((_installed_declared + 1))
+        [ -s "$GATE_PREMIUM_DIR/$_installed_target" ] || return 1
+    done < "$GATE_PREMIUM_DIR/manifest.json"
+    [ "$_installed_declared" -gt 0 ]
 }
 
 # Paid packages can be downloaded through Windows-backed WebUI storage, where

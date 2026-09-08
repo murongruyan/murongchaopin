@@ -720,6 +720,10 @@ drm_profile_spec_defaults() {
             DRM_SPEC_RES=$(mode_manifest_resolution PLK110) || return 1
             DRM_SPEC_DEFAULTS=$(mode_manifest_specs PLK110 drm) || return 1
             ;;
+        PLQ110)
+            DRM_SPEC_RES=$(mode_manifest_resolution PLQ110) || return 1
+            DRM_SPEC_DEFAULTS=$(mode_manifest_specs PLQ110 drm) || return 1
+            ;;
         PJD110|*)
             if [ "$MODEL" = PJD110 ]; then
                 DRM_SPEC_RES=$(mode_manifest_resolution PJD110) || return 1
@@ -994,6 +998,11 @@ do_ko_prepare() {
             KO_MODULE="$BIN_DIR/plk110_drm_modes.ko"
             KO_RATES="清单默认 170/175/180/185/190/195/199Hz；首次加载按运行时 ABI 自检"
             ;;
+        PLQ110)
+            KO_PROFILE=PLQ110
+            KO_MODULE="$BIN_DIR/plq110_drm_modes.ko"
+            KO_RATES="清单默认 170/175/180/185/190/195/199Hz；首次加载按运行时 ABI 自检"
+            ;;
         PJD110)
             KO_PROFILE=PJD110
             KO_MODULE="$BIN_DIR/pjd110_drm_modes.ko"
@@ -1071,6 +1080,7 @@ do_smart_add() {
     case "$MODEL" in
         "RMX5200") TARGET_PANEL="qcom,mdss_dsi_panel_AE084_P_3_A0033_dsc_cmd_dvt02" ;;
         "PLK110") TARGET_PANEL="qcom,mdss_dsi_panel_AD296_P_3_A0020_dsc_cmd" ;;
+            "PLQ110") TARGET_PANEL="qcom,mdss_dsi_panel_AA605_P_7_A0020_dsc_cmd" ;;
         "PJD110") TARGET_PANEL="qcom,mdss_dsi_panel_AA545_P_3_A0005_dsc_cmd" ;;
     esac
 
@@ -1596,20 +1606,26 @@ install_latest_paid_package() {
 
     LOCAL_VERSION=$(gate_json_field "$GATE_PACKAGE_FILE" version)
     LOCAL_VERSION_CODE=$(gate_json_number "$GATE_PACKAGE_FILE" version_code)
-    if [ -n "$LOCAL_VERSION_CODE" ]; then
-        case "$LOCAL_VERSION_CODE" in
-            *[!0-9]*) LOCAL_VERSION_CODE=0 ;;
-        esac
-        if [ "$LOCAL_VERSION_CODE" -ge "$REMOTE_VERSION_CODE" ] 2>/dev/null; then
+    # Only trust the installed-version shortcut when the verified payload is
+    # present. A leftover package.json after a module wipe or a partial
+    # extraction must fall through to the download so the WebUI reinstall
+    # path restores the paid components instead of reporting "current".
+    if gate_premium_installed; then
+        if [ -n "$LOCAL_VERSION_CODE" ]; then
+            case "$LOCAL_VERSION_CODE" in
+                *[!0-9]*) LOCAL_VERSION_CODE=0 ;;
+            esac
+            if [ "$LOCAL_VERSION_CODE" -ge "$REMOTE_VERSION_CODE" ] 2>/dev/null; then
+                echo "status=current"
+                echo "version=$LOCAL_VERSION"
+                echo "version_code=$LOCAL_VERSION_CODE"
+                return 0
+            fi
+        elif [ -n "$LOCAL_VERSION" ] && ! version_is_newer "$REMOTE_VERSION" "$LOCAL_VERSION"; then
             echo "status=current"
             echo "version=$LOCAL_VERSION"
-            echo "version_code=$LOCAL_VERSION_CODE"
             return 0
         fi
-    elif [ -n "$LOCAL_VERSION" ] && ! version_is_newer "$REMOTE_VERSION" "$LOCAL_VERSION"; then
-        echo "status=current"
-        echo "version=$LOCAL_VERSION"
-        return 0
     fi
 
     echo "status=downloading"
@@ -1933,6 +1949,9 @@ case "$1" in
             "PLK110") # OnePlus 15
                 TARGET_PANEL="qcom,mdss_dsi_panel_AD296_P_3_A0020_dsc_cmd"
                 ;;
+            "PLQ110") # OnePlus Ace 6
+                TARGET_PANEL="qcom,mdss_dsi_panel_AA605_P_7_A0020_dsc_cmd"
+                ;;
             "PJD110") # OnePlus 12
                 TARGET_PANEL="qcom,mdss_dsi_panel_AA545_P_3_A0005_dsc_cmd"
                 ;;
@@ -1985,6 +2004,7 @@ case "$1" in
         case "$MODEL" in
             "RMX5200") TARGET_PANEL="qcom,mdss_dsi_panel_AE084_P_3_A0033_dsc_cmd_dvt02" ;;
             "PLK110") TARGET_PANEL="qcom,mdss_dsi_panel_AD296_P_3_A0020_dsc_cmd" ;;
+            "PLQ110") TARGET_PANEL="qcom,mdss_dsi_panel_AA605_P_7_A0020_dsc_cmd" ;;
             "PJD110") TARGET_PANEL="qcom,mdss_dsi_panel_AA545_P_3_A0005_dsc_cmd" ;;
         esac
         
@@ -2032,6 +2052,7 @@ case "$1" in
         case "$MODEL" in
             "RMX5200") TARGET_PANEL="qcom,mdss_dsi_panel_AE084_P_3_A0033_dsc_cmd_dvt02" ;;
             "PLK110") TARGET_PANEL="qcom,mdss_dsi_panel_AD296_P_3_A0020_dsc_cmd" ;;
+            "PLQ110") TARGET_PANEL="qcom,mdss_dsi_panel_AA605_P_7_A0020_dsc_cmd" ;;
             "PJD110") TARGET_PANEL="qcom,mdss_dsi_panel_AA545_P_3_A0005_dsc_cmd" ;;
         esac
 
@@ -2181,7 +2202,7 @@ case "$1" in
         echo "model=${MODEL:-unknown}"
         case "$MODEL" in
             RMX5200) DISPLAY_PROFILE=rmx5200 ;;
-            PLK110|PJD110) DISPLAY_PROFILE=vendor_ltpo ;;
+            PLK110|PLQ110|PJD110) DISPLAY_PROFILE=vendor_ltpo ;;
             *) echo "supported=0"; exit 0 ;;
         esac
         echo "supported=1"
@@ -2194,6 +2215,7 @@ case "$1" in
         else
             case "$MODEL" in
                 RMX5200|PLK110) ADFR_PARAM_DIR=/sys/module/rmx5200_adfr_lock/parameters ;;
+                PLQ110) ADFR_PARAM_DIR=/sys/module/plq110_adfr_lock/parameters ;;
                 PJD110) ADFR_PARAM_DIR=/sys/module/pjd110_adfr_lock/parameters ;;
             esac
             if [ "$(cat "$ADFR_PARAM_DIR/lock_active" 2>/dev/null)" = Y ]; then
@@ -2217,11 +2239,11 @@ case "$1" in
                 TARGET_DISPLAY_POLICY="$2"; TARGET_ADFR_POLICY=on ;;
             RMX5200:adfr_off)
                 TARGET_DISPLAY_POLICY=adfr_off; TARGET_ADFR_POLICY=off ;;
-            PLK110:stock_ltpo|PJD110:stock_ltpo)
+            PLK110:stock_ltpo|PLQ110:stock_ltpo|PJD110:stock_ltpo)
                 TARGET_DISPLAY_POLICY=stock_ltpo; TARGET_ADFR_POLICY=on ;;
-            PLK110:adfr_off|PJD110:adfr_off)
+            PLK110:adfr_off|PLQ110:adfr_off|PJD110:adfr_off)
                 TARGET_DISPLAY_POLICY=adfr_off; TARGET_ADFR_POLICY=off ;;
-            RMX5200:*|PLK110:*|PJD110:*)
+            RMX5200:*|PLK110:*|PLQ110:*|PJD110:*)
                 echo "Error: invalid display policy for $MODEL"; exit 1 ;;
             *)
                 echo "Error: display policy is unsupported on $MODEL"; exit 1 ;;

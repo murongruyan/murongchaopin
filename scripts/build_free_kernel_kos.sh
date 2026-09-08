@@ -14,6 +14,9 @@ pjd_commit="d86625c3830b59553b4db6b1b383fddd9655cabf"
 pjd_vendor_repo="https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8650.git"
 pjd_vendor_commit="c1ec0629b3f9bb245577e65f1ed70d5a371e4b9b"
 pjd_release="6.1.141-gd86625c3830b"
+plq_repo="https://github.com/OnePlusOSS/android_kernel_common_oneplus_sm8750.git"
+plq_commit="65b954a773b183a9999b06bb1b2f921f12eaaf11"
+plq_release="6.6.118-android15-8-g93e223c276e7-abogki500782043-4k"
 
 download_tree() {
   local url="$1" archive="$2" destination="$3" unpack="$3.unpacked"
@@ -52,6 +55,7 @@ download_toolchain 'https://github.com/cctv18/oneplus_sm8650_toolchain/releases/
 download_toolchain 'https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/build-tools.zip' build-tools19.zip "$work/build-tools19"
 download_tree "${pjd_repo%.git}/archive/$pjd_commit.zip" pjd.zip "$work/pjd-tree"
 download_tree "${pjd_vendor_repo%.git}/archive/$pjd_vendor_commit.zip" pjd-vendor.zip "$work/pjd-vendor"
+download_tree "${plq_repo%.git}/archive/$plq_commit.zip" plq.zip "$work/plq-tree"
 download_toolchain 'https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang20-r547379/clang-r547379.zip' clang20.zip "$work/clang20"
 download_toolchain 'https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang20-r547379/build-tools.zip' build-tools20.zip "$work/build-tools20"
 
@@ -74,6 +78,35 @@ prepare_rmx() {
   release=$(make -s -C "$tree" O="$out" LOCALVERSION= kernelrelease)
   test "$release" = "$rmx_release"
   node "$root/tools/build_rmx5200_symvers.mjs" --contract "$root/config/kernel/rmx5200-6.12.23-android16-5-gb2a876903b49-ab14541642-4k.ko-abi.json" --output "$out/Module.symvers"
+  test -s "$out/Module.symvers"
+}
+
+prepare_plq() {
+  local tree="$1" out="$2" clang="$3" tools="$4" config="$5"
+  rm -rf "$out"
+  mkdir -p "$out"
+  export PATH="$clang:$tools:$PATH" LLVM=1 LLVM_IAS=1 ARCH=arm64 LOCALVERSION=
+  export CC=clang HOSTCC=clang LD=ld.lld HOSTLD=ld.lld
+  cp "$config" "$out/.config"
+  # Debug information does not participate in genksyms symbol CRCs; keep the
+  # contract build lean.
+  sed -i 's/^CONFIG_DEBUG_INFO=y$/# CONFIG_DEBUG_INFO is not set/' "$out/.config" || true
+  sed -i 's/^CONFIG_DEBUG_INFO_BTF=y$/# CONFIG_DEBUG_INFO_BTF is not set/' "$out/.config" || true
+  sed -i 's/^CONFIG_DEBUG_INFO_BTF_MODULES=y$/# CONFIG_DEBUG_INFO_BTF_MODULES is not set/' "$out/.config" || true
+  local base target
+  base=$(make -s -C "$tree" O="$out" ARCH=arm64 LLVM=1 LLVM_IAS=1 kernelversion)
+  target="${plq_release#"$base"}"
+  grep -q '^CONFIG_LOCALVERSION=' "$out/.config" && sed -i "s|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=\"$target\"|" "$out/.config" || printf 'CONFIG_LOCALVERSION="%s"
+' "$target" >> "$out/.config"
+  grep -q '^CONFIG_LOCALVERSION_AUTO=' "$out/.config" && sed -i 's|^CONFIG_LOCALVERSION_AUTO=.*|CONFIG_LOCALVERSION_AUTO=n|' "$out/.config" || printf 'CONFIG_LOCALVERSION_AUTO=n
+' >> "$out/.config"
+  make -C "$tree" O="$out" CC=clang HOSTCC=clang olddefconfig
+  ensure_module_protect_list "$tree" "$out/.config"
+  make -C "$tree" O="$out" CC=clang HOSTCC=clang modules_prepare
+  local release
+  release=$(make -s -C "$tree" O="$out" LOCALVERSION= kernelrelease)
+  test "$release" = "$plq_release"
+  node "$root/tools/build_rmx5200_symvers.mjs" --contract "$root/config/kernel/plq110-6.6.118-android15-8-g93e223c276e7-abogki500782043-4k.ko-abi.json" --output "$out/Module.symvers"
   test -s "$out/Module.symvers"
 }
 
@@ -125,7 +158,7 @@ prepare_pjd() {
   test -s "$out/Module.symvers"
 }
 
-rm -f "$root/bin/rmx5200_drm_modes.ko" "$root/bin/plk110_drm_modes.ko" "$root/bin/pjd110_drm_modes.ko"
+rm -f "$root/bin/rmx5200_drm_modes.ko" "$root/bin/plk110_drm_modes.ko" "$root/bin/plq110_drm_modes.ko" "$root/bin/pjd110_drm_modes.ko"
 mkdir -p "$root/bin"
 
 prepare_rmx "$work/rmx-tree" "$work/rmx-out" "$work/clang19/bin" "$work/build-tools19/bin" "$root/config/kernel/rmx5200-6.12.23-android16-5-gb2a876903b49-ab14541642-4k.config"
@@ -133,11 +166,15 @@ export KERNEL_TREE="$work/rmx-tree" KERNEL_OUT="$work/rmx-out" KERNEL_SYMVERS="$
 sh "$root/src/ko/build.sh" rmx5200
 sh "$root/src/ko/build.sh" plk110
 
+prepare_plq "$work/plq-tree" "$work/plq-out" "$work/clang19/bin" "$work/build-tools19/bin" "$root/config/kernel/plq110-6.6.118-android15-8-g93e223c276e7-abogki500782043-4k.config"
+export KERNEL_TREE="$work/plq-tree" KERNEL_OUT="$work/plq-out" KERNEL_SYMVERS="$work/plq-out/Module.symvers" LLVM_TOOLS="$work/clang19/bin" KBUILD_MODPOST_WARN=1 OUT_DIR="$root/bin"
+sh "$root/src/ko/build.sh" plq110
+
 prepare_pjd_layout "$work/pjd-tree" "$work/pjd-vendor"
 prepare_pjd "$work/pjd-tree" "$work/pjd-out" "$work/clang20/bin" "$work/build-tools20/bin" "$root/config/kernel/pjd110-6.1.141-gd86625c3830b.config"
 export KERNEL_TREE="$work/pjd-tree" KERNEL_OUT="$work/pjd-out" KERNEL_SYMVERS="$work/pjd-out/Module.symvers" LLVM_TOOLS="$work/clang20/bin" KBUILD_MODPOST_WARN=1 PJD_KERNEL_TREE="$work/pjd-tree" PJD_KERNEL_OUT="$work/pjd-out" PJD_DISPLAY_ROOT="$work/pjd-vendor/vendor/qcom/opensource/display-drivers" OUT_DIR="$root/bin"
 sh "$root/src/ko/build.sh" pjd110
 
-for ko in "$root/bin/rmx5200_drm_modes.ko" "$root/bin/plk110_drm_modes.ko" "$root/bin/pjd110_drm_modes.ko"; do
+for ko in "$root/bin/rmx5200_drm_modes.ko" "$root/bin/plk110_drm_modes.ko" "$root/bin/plq110_drm_modes.ko" "$root/bin/pjd110_drm_modes.ko"; do
   test -s "$ko"
 done

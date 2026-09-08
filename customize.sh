@@ -43,8 +43,8 @@ assert_supported_install_model() {
   [ -n "$INSTALL_MODEL" ] || \
     INSTALL_MODEL=$(getprop ro.product.model 2>/dev/null | tr -d '\r\n')
   case "$INSTALL_MODEL" in
-    RMX5200|PLK110|PJD110) ;;
-    *) abort "不支持的机型：${INSTALL_MODEL:-unknown}（仅支持 RMX5200、PLK110、PJD110）" ;;
+    RMX5200|PLK110|PLQ110|PJD110) ;;
+    *) abort "不支持的机型：${INSTALL_MODEL:-unknown}（仅支持 RMX5200、PLK110、PLQ110、PJD110）" ;;
   esac
 }
 

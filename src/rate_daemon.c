@@ -26,7 +26,7 @@
 #define MAX_APPS 200
 #define MAX_PKG_LEN 128
 #define MAX_EXTENSION_RATES 256
-#define RATE_DAEMON_VERSION "2.9.23"
+#define RATE_DAEMON_VERSION "2.9.25"
 #define BOOT_RESOLUTION_SETTLE_TIMEOUT_MS 8000
 #define BOOT_RESOLUTION_SETTLE_SAMPLE_MS 150
 #define BOOT_RESOLUTION_SETTLE_SAMPLES 4
@@ -533,6 +533,7 @@ static void load_extension_rates(const char *base_path) {
 
     if (strcmp(device_model, "RMX5200") == 0) model_key = "rmx5200";
     else if (strcmp(device_model, "PLK110") == 0) model_key = "plk110";
+    else if (strcmp(device_model, "PLQ110") == 0) model_key = "plq110";
     else if (strcmp(device_model, "PJD110") == 0) model_key = "pjd110";
     if (model_key) {
         char key[64];

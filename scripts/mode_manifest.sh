@@ -14,6 +14,8 @@ mode_manifest_model_key() {
     case "$1" in
         RMX5200|rmx5200) printf '%s\n' rmx5200 ;;
         PLK110|plk110) printf '%s\n' plk110 ;;
+        PLQ110|plq110) printf '%s
+' plq110 ;;
         PJD110|pjd110) printf '%s\n' pjd110 ;;
         *) return 1 ;;
     esac
@@ -72,7 +74,7 @@ mode_manifest_validate() {
     [ "$(mode_manifest_value manifest_version)" = 1 ] || return 1
     # RMX5200 and PLK110 have predefined timing sets. PJD110 accepts WebUI
     # runtime specs, so its rate lists intentionally start empty.
-    for mm_model in rmx5200 plk110; do
+    for mm_model in rmx5200 plk110 plq110; do
         mode_manifest_resolution "$mm_model" >/dev/null || return 1
         mm_dtbo_rates=$(mode_manifest_rates "$mm_model" dtbo) || return 1
         mm_drm_rates=$(mode_manifest_rates "$mm_model" drm) || return 1

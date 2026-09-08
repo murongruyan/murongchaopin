@@ -8,6 +8,7 @@ RMX_KO="$ROOT/src/ko/rmx5200_display_modes.c"
 PLK_KO="$ROOT/src/ko/plk110_display_modes.c"
 PLK_FIXTURE="$ROOT/tests/fixtures/plk110_index_input.dts"
 PLK_NO_INDEX_FIXTURE="$ROOT/tests/fixtures/plk110_no_index_input.dts"
+PLQ_FIXTURE="$ROOT/tests/fixtures/plq110_index_input.dts"
 PJD_FIXTURE="$ROOT/tests/fixtures/pjd110_index_input.dts"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
@@ -36,6 +37,10 @@ cc -std=c11 -Wall -Wextra \
     -DPROCESS_DTS_TEST_MODEL=2 \
     -DPROCESS_DTS_TEST_PROJECT_ID=0x1234 \
     "$PROCESS_DTS" -o "$TMP_DIR/process_dts_plk110"
+cc -std=c11 -Wall -Wextra \
+    -DPROCESS_DTS_TEST_MODEL=4 \
+    -DPROCESS_DTS_TEST_PROJECT_ID=0x1234 \
+    "$PROCESS_DTS" -o "$TMP_DIR/process_dts_plq110"
 cc -std=c11 -Wall -Wextra \
     -DPROCESS_DTS_TEST_MODEL=3 \
     -DPROCESS_DTS_TEST_PROJECT_ID=0x5929 \
@@ -87,4 +92,23 @@ if grep -q 'qcom,mdss-dsi-panel-framerate = <0x3c>\|qcom,mdss-dsi-panel-framerat
     exit 1
 fi
 
+mkdir -p "$TMP_DIR/plq110/dtbo_dts"
+cp "$PLQ_FIXTURE" "$TMP_DIR/plq110/dtbo_dts/input.dts"
+(cd "$TMP_DIR/plq110" && "$TMP_DIR/process_dts_plq110" >/dev/null)
+PLQ_OUTPUT="$TMP_DIR/plq110/dtbo_dts/input.dts"
+plq_indexes=$(grep 'cell-index' "$PLQ_OUTPUT" | \
+    sed -n 's/.*<0x\([0-9a-fA-F][0-9a-fA-F]*\)\>.*/\1/p' | \
+    tr 'A-F\n' 'a-f,' | sed 's/,$//')
+[ "$plq_indexes" = '0,1,2,3,4,5,6,7,8,9,a' ] || {
+    echo "FAIL: PLQ110 final cell-index values are not contiguous: $plq_indexes" >&2
+    exit 1
+}
+if grep -q 'timing@sdc_fhd_90\|timing@oplus_fhd_120' "$PLQ_OUTPUT"; then
+    echo 'FAIL: PLQ110 removed modes remain in the final timing table' >&2
+    exit 1
+fi
+if ! grep -q 'timing@sdc_fhd_144' "$PLQ_OUTPUT"; then
+    echo 'FAIL: PLQ110 stock 144Hz timing was dropped unexpectedly' >&2
+    exit 1
+fi
 echo 'PASS: DTBO and DRM-KO mode indices are contiguous and verified'

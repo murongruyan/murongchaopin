@@ -183,6 +183,9 @@ case "${1:-all}" in
 	plk110)
 		build_one plk110_drm_modes plk110_display_modes.c
 		;;
+	plq110)
+		build_one plq110_drm_modes plq110_display_modes.c
+		;;
 	pjd110)
 		build_pjd110
 		;;
@@ -193,6 +196,7 @@ case "${1:-all}" in
 		build_one rmx5200_drm_modes rmx5200_display_modes.c
 		build_one rmx5200_adfr_lock rmx5200_adfr_lock.c
 		build_one plk110_drm_modes plk110_display_modes.c
+		build_one plq110_drm_modes plq110_display_modes.c
 		build_pjd110
 		build_one hmbird hmbird.c
 		;;

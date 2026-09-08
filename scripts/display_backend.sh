@@ -81,6 +81,10 @@ select_ko_profile() {
             KO_PROFILE=plk110
             KO_MODULE_NAME=plk110_drm_modes
             ;;
+        PLQ110)
+            KO_PROFILE=plq110
+            KO_MODULE_NAME=plq110_drm_modes
+            ;;
         PJD110)
             KO_PROFILE=pjd110
             KO_MODULE_NAME=pjd110_drm_modes
@@ -121,6 +125,13 @@ ensure_drm_specs() {
             # manifest; an ABI/layout mismatch still fails closed at insmod.
             mode_manifest_validate || return 1
             mode_manifest_specs PLK110 drm > "$DRM_SPECS_FILE" || return 1
+            ;;
+        plq110)
+            # PLQ110 shares the PLK110 runtime layout discovery and transaction
+            # checks. Keep the input bounded by the shared manifest; an
+            # ABI/layout mismatch still fails closed at insmod.
+            mode_manifest_validate || return 1
+            mode_manifest_specs PLQ110 drm > "$DRM_SPECS_FILE" || return 1
             ;;
         pjd110)
             mode_manifest_validate || return 1
@@ -189,7 +200,7 @@ collect_probe() {
         PROBE_REASON=msm_drm_not_loaded
     elif [ "$PROBE_GET_MAIN_DISPLAY" != available ]; then
         PROBE_REASON=get_main_display_missing
-    elif [ "$KO_PROFILE" != plk110 ] &&
+    elif [ "$KO_PROFILE" != plk110 ] && [ "$KO_PROFILE" != plq110 ] &&
          { [ "$PROBE_DSI_GET_MODES" != available ] ||
            [ "$PROBE_SDE_GET_MODES" != available ]; }; then
         PROBE_REASON=qualcomm_mode_hooks_missing

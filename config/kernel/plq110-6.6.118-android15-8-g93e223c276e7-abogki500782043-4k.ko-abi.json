@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "kernel_release": "6.6.118-android15-8-g93e223c276e7-abogki500782043-4k",
+  "modules": {
+    "plq110_drm_modes": {
+      "versions": {
+        "memset": "0xdcb764ad",
+        "_printk": "0x92997ed8",
+        "copy_from_kernel_nofault": "0x4531ab62",
+        "__stack_chk_fail": "0xf0fdf6cb",
+        "of_find_node_by_name": "0xfaa2ed72",
+        "of_get_property": "0x2dff77a4",
+        "kmemdup": "0x66b4cc41",
+        "__kmalloc": "0xeb233a45",
+        "memcpy": "0x4829a47e",
+        "ksize": "0x04ea5d10",
+        "mutex_lock": "0xd5977bfb",
+        "mutex_unlock": "0xed55cabd",
+        "drm_kms_helper_connector_hotplug_event": "0xe18bac78",
+        "drm_kms_helper_hotplug_event": "0xe2ea6290",
+        "kfree": "0x037a0cba",
+        "fortify_panic": "0xcbd4898c",
+        "strncmp": "0x5a921311",
+        "kmalloc_large": "0x9ed12e20",
+        "strnlen": "0xa916b694",
+        "kmemdup_nul": "0xb3f548ad",
+        "strsep": "0x85df9b6c",
+        "strchr": "0x349cba85",
+        "kstrtouint": "0x3b6c41ea",
+        "kstrtoull": "0x5c3c7387",
+        "__list_del_entry_valid_or_report": "0x9a835040",
+        "drm_mode_vrefresh": "0xf1b5340a",
+        "drm_mode_duplicate": "0xd4c8f28e",
+        "scnprintf": "0x96848186",
+        "drm_mode_probed_add": "0x77d59ba6",
+        "__list_add_valid_or_report": "0x7e19152a",
+        "drm_mode_destroy": "0x49ff1dfb",
+        "param_ops_string": "0xe9149ec5",
+        "param_ops_bool": "0x7b561454",
+        "param_ops_uint": "0x0f24f274",
+        "param_ops_ullong": "0x9ffa5d36",
+        "module_layout": "0x6500052f"
+      }
+    },
+    "plq110_adfr_lock": {
+      "versions": {
+        "__stack_chk_fail": "0xf0fdf6cb",
+        "_printk": "0x92997ed8",
+        "kstrtobool": "0x124bad4d",
+        "module_layout": "0x6500052f",
+        "mutex_lock": "0xd5977bfb",
+        "mutex_unlock": "0xed55cabd",
+        "param_get_bool": "0xca7be765",
+        "param_ops_bool": "0x7b561454",
+        "param_ops_uint": "0x0f24f274",
+        "param_ops_ulong": "0x60de49e3",
+        "register_kprobe": "0x0472cf3b",
+        "unregister_kprobe": "0xeb78b1ed"
+      }
+    }
+  }
+}

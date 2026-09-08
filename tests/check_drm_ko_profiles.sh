@@ -4,6 +4,7 @@ set -eu
 
 [ -f src/ko/rmx5200_display_modes.c ] || exit 1
 [ -f src/ko/plk110_display_modes.c ] || exit 1
+[ -f src/ko/plq110_display_modes.c ] || exit 1
 [ -f src/ko/pjd110_display_modes.c ] || exit 1
 [ -f src/ko/build.sh ] || exit 1
 [ -f bin/rmx5200_drm_modes.ko ] || {
@@ -12,6 +13,10 @@ set -eu
 }
 [ -f bin/plk110_drm_modes.ko ] || {
     echo "FAIL: PLK110 DRM-KO binary is missing" >&2
+    exit 1
+}
+[ -f bin/plq110_drm_modes.ko ] || {
+    echo "FAIL: PLQ110 DRM-KO binary is missing" >&2
     exit 1
 }
 [ -f bin/pjd110_drm_modes.ko ] || {
@@ -61,6 +66,12 @@ grep -q 'OC_PANEL_TOKEN "AA545_P_3_A0005"' src/ko/pjd110_display_modes.c
 grep -q 'offsetof(struct dsi_display, modes)' src/ko/pjd110_display_modes.c
 grep -q 'OC_EXPECT_REMOVED_STOCK_LOW 2U' src/ko/pjd110_display_modes.c
 grep -q 'removed_stock_low_drm_count' src/ko/plk110_display_modes.c
+grep -q 'OC_PROFILE_NAME "plq110"' src/ko/plq110_display_modes.c
+grep -q 'OC_PANEL_TOKEN "AA605_P_7_A0020"' src/ko/plq110_display_modes.c
+grep -q 'OC_NATIVE_WIDTH 1272U' src/ko/plq110_display_modes.c
+grep -q 'mode_manifest_specs PLQ110 drm' scripts/display_backend.sh
+grep -qF 'KO_PROFILE" != plk110 ] && [ "$KO_PROFILE" != plq110' scripts/display_backend.sh
+grep -q 'DRM_SPEC_RES=$(mode_manifest_resolution PLQ110)' scripts/web_handler.sh
 grep -q 'mode_manifest_specs PLK110 drm' scripts/display_backend.sh
 grep -q 'KO_PROFILE" != plk110' scripts/display_backend.sh
 grep -q 'DRM_SPEC_RES=$(mode_manifest_resolution PLK110)' scripts/web_handler.sh
@@ -83,7 +94,11 @@ mode_manifest_validate
   '1272x2772@123;1272x2772@170;1272x2772@175;1272x2772@180;1272x2772@185;1272x2772@190;1272x2772@195;1272x2772@199' ]
 [ "$(mode_manifest_specs PLK110 drm)" = \
   '1272x2772@170;1272x2772@175;1272x2772@180;1272x2772@185;1272x2772@190;1272x2772@195;1272x2772@199' ]
-if grep -q 'oc_default_mode_specs' src/ko/rmx5200_display_modes.c src/ko/plk110_display_modes.c; then
+[ "$(mode_manifest_specs PLQ110 dtbo)" = \
+  '1272x2772@123;1272x2772@170;1272x2772@175;1272x2772@180;1272x2772@185;1272x2772@190;1272x2772@195;1272x2772@199' ]
+[ "$(mode_manifest_specs PLQ110 drm)" = \
+  '1272x2772@170;1272x2772@175;1272x2772@180;1272x2772@185;1272x2772@190;1272x2772@195;1272x2772@199' ]
+if grep -q 'oc_default_mode_specs' src/ko/rmx5200_display_modes.c src/ko/plk110_display_modes.c src/ko/plq110_display_modes.c; then
     echo "FAIL: KO still contains a second compiled default mode manifest" >&2
     exit 1
 fi
@@ -95,4 +110,4 @@ fi
 
 ! grep -Rqi 'hmbird\.ko' scripts post-fs-data.sh customize.sh config/display_mode_manifest.txt
 
-echo "PASS: RMX5200, PLK110 and PJD110 DRM-KO profiles are present; HMBIRD is DTBO-only"
+echo "PASS: RMX5200, PLK110, PLQ110 and PJD110 DRM-KO profiles are present; HMBIRD is DTBO-only"

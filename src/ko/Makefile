@@ -6,6 +6,9 @@ obj-m += rmx5200_adfr_lock.o
 obj-m += plk110_drm_modes.o
 plk110_drm_modes-y := plk110_display_modes.o
 
+obj-m += plq110_drm_modes.o
+plq110_drm_modes-y := plq110_display_modes.o
+
 # PJD110 includes the OnePlus 6.1 private dsi_display ABI and is built through
 # build.sh pjd110, which supplies the vendor headers and generated symbol CRC.
 
