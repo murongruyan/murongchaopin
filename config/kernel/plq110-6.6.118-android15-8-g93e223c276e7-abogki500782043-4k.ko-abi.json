@@ -119,7 +119,7 @@
     "commit": "65b954a773b183a9999b06bb1b2f921f12eaaf11",
     "device_release_suffix": "g93e223c276e7"
   },
-  "config_sha256": "47fbde92e5c111e4baad776ca01e6cbc66c7274cac70624448beb5d479222cb0",
+  "config_sha256": "be2c56715c9d1cb014ec4882fdd6e86f8ddc3c0bdfa2567a1a119dde9337a883",
   "required_config": {
     "CONFIG_MODVERSIONS": "y",
     "CONFIG_MODULE_SIG": "y",
