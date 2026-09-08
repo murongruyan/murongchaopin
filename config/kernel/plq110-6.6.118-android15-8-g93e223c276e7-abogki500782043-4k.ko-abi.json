@@ -40,7 +40,46 @@
         "param_ops_uint": "0x0f24f274",
         "param_ops_ullong": "0x9ffa5d36",
         "module_layout": "0x6500052f"
-      }
+      },
+      "imports": [
+        "__kmalloc",
+        "__list_add_valid_or_report",
+        "__list_del_entry_valid_or_report",
+        "__stack_chk_fail",
+        "_printk",
+        "copy_from_kernel_nofault",
+        "drm_kms_helper_connector_hotplug_event",
+        "drm_kms_helper_hotplug_event",
+        "drm_mode_destroy",
+        "drm_mode_duplicate",
+        "drm_mode_probed_add",
+        "drm_mode_vrefresh",
+        "fortify_panic",
+        "get_main_display",
+        "kfree",
+        "kmalloc_large",
+        "kmemdup",
+        "kmemdup_nul",
+        "ksize",
+        "kstrtouint",
+        "kstrtoull",
+        "memcpy",
+        "memset",
+        "mutex_lock",
+        "mutex_unlock",
+        "of_find_node_by_name",
+        "of_get_property",
+        "param_ops_bool",
+        "param_ops_string",
+        "param_ops_uint",
+        "param_ops_ullong",
+        "scnprintf",
+        "strchr",
+        "strncmp",
+        "strnlen",
+        "strsep"
+      ],
+      "extended_modversions": false
     },
     "plq110_adfr_lock": {
       "versions": {
@@ -56,7 +95,36 @@
         "param_ops_ulong": "0x60de49e3",
         "register_kprobe": "0x0472cf3b",
         "unregister_kprobe": "0xeb78b1ed"
-      }
+      },
+      "imports": [
+        "__stack_chk_fail",
+        "_printk",
+        "kstrtobool",
+        "mutex_lock",
+        "mutex_unlock",
+        "param_get_bool",
+        "param_ops_bool",
+        "param_ops_uint",
+        "param_ops_ulong",
+        "register_kprobe",
+        "unregister_kprobe"
+      ],
+      "extended_modversions": false
     }
+  },
+  "model": "PLQ110",
+  "source": {
+    "repository": "https://github.com/OnePlusOSS/android_kernel_common_oneplus_sm8750.git",
+    "ref": "oneplus/sm8750_b_16.0.0_ace_6",
+    "commit": "65b954a773b183a9999b06bb1b2f921f12eaaf11",
+    "device_release_suffix": "g93e223c276e7"
+  },
+  "config_sha256": "243bf7ac08b19fa50aabc92af3f8194d3500c0df4adf5ccf39fedf2d7a2a5dda",
+  "required_config": {
+    "CONFIG_MODVERSIONS": "y",
+    "CONFIG_MODULE_SIG": "y",
+    "CONFIG_CFI_CLANG": "y",
+    "CONFIG_SHADOW_CALL_STACK": "y",
+    "CONFIG_STACKPROTECTOR_STRONG": "y"
   }
 }
