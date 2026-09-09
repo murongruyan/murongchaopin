@@ -81,7 +81,12 @@ DAILY_IDLE_FILE="$MODDIR/config/rmx5200_ltpo_daily_idle.txt"
 
 ltps_vote_wanted()
 {
-    policy=$(read_policy)
+    # 可选参数供 test-patch 显式指定策略；运行时无参数则读策略文件。
+    if [ "$#" -ge 1 ]; then
+        policy=$1
+    else
+        policy=$(read_policy)
+    fi
     [ "$policy" = "$EXPECTED_POLICY" ] && return 0
     if [ "$policy" = custom_ltpo ]; then
         daily_idle=$(sed -n '1{s/\r$//;p;q;}' "$DAILY_IDLE_FILE" 2>/dev/null |
@@ -150,7 +155,7 @@ patch_semantic_file()
     offset=${5:-$VOTE_PATCH_OFFSET}
 
     [ "$model" = "$EXPECTED_MODEL" ] || return 10
-    ltps_vote_wanted || return 11
+    ltps_vote_wanted "$policy" || return 11
     verify_original "$source" "$offset" || return 12
 
     output_dir=${output%/*}

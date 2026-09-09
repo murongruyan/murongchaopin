@@ -74,6 +74,23 @@ if sh "$HELPER" test-patch WRONG "$POLICY" "$SOURCE" \
     echo 'FAIL: wrong model was accepted' >&2
     exit 1
 fi
+# Daily-idle sub-mode: custom_ltpo with the daily-idle flag must be accepted
+# and produce the same patched bytes as stock_ltps.
+printf 'on\n' > "$ROOT/config/rmx5200_ltpo_daily_idle.txt"
+if sh "$HELPER" test-patch "$MODEL" custom_ltpo "$SOURCE" \
+        "$TMPDIR_TEST/custom_ltpo_daily.bin"; then
+    sh "$HELPER" test-patch "$MODEL" stock_ltps "$SOURCE" \
+        "$TMPDIR_TEST/stock_ltps_reference.bin"
+    cmp -s "$TMPDIR_TEST/stock_ltps_reference.bin" "$TMPDIR_TEST/custom_ltpo_daily.bin" || {
+        echo 'FAIL: daily-idle patch bytes differ from stock_ltps' >&2
+        exit 1
+    }
+else
+    echo 'FAIL: custom_ltpo with daily-idle flag was rejected' >&2
+    rm -f "$ROOT/config/rmx5200_ltpo_daily_idle.txt"
+    exit 1
+fi
+rm -f "$ROOT/config/rmx5200_ltpo_daily_idle.txt"
 for wrong_policy in custom_ltpo adfr_off stock_ltpo_typo; do
     if sh "$HELPER" test-patch "$MODEL" "$wrong_policy" "$SOURCE" \
             "$TMPDIR_TEST/$wrong_policy.bin"; then
