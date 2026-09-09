@@ -2353,6 +2353,12 @@ case "$1" in
             echo "Error: unable to apply ADFR policy ($(sed -n '1p' "$PREMIUM_PATH/config/adfr_lock_state.txt" 2>/dev/null))"
             exit 1
         fi
+        # 两个子方案的息屏 1Hz 都依赖自制 KO；极端情况下（例如开关开启前
+        # 曾停留在 stock_ltps 出厂默认）KO 可能尚未加载，此处幂等补一次。
+        if [ -x "$PREMIUM_PATH/scripts/rmx5200_ltpo_experiment.sh" ]; then
+            sh "$PREMIUM_PATH/scripts/rmx5200_ltpo_experiment.sh" \
+                runtime-apply >/dev/null 2>&1 || true
+        fi
         DAEMON_PID=$(pgrep -f rate_daemon_premium 2>/dev/null | head -n 1)
         [ -n "$DAEMON_PID" ] && kill -USR1 "$DAEMON_PID" 2>/dev/null || true
         echo "Success: daily idle mode $2"
@@ -2488,6 +2494,12 @@ case "$1" in
                 exit 1
             fi
             adfr_apply_for_model on >/dev/null 2>&1 || true
+            # 开机默认 stock_ltps 时自制 KO 未加载；运行时打开开关必须补加载，
+            # 否则息屏 1Hz 状态机在重启前完全失效。已加载时该动作幂等跳过。
+            if [ -x "$PREMIUM_PATH/scripts/rmx5200_ltpo_experiment.sh" ]; then
+                sh "$PREMIUM_PATH/scripts/rmx5200_ltpo_experiment.sh" \
+                    runtime-apply >/dev/null 2>&1 || true
+            fi
         else
             rm -f "$LTPO_DAILY_IDLE_FILE"
             # 关闭开关时如停留在子方案 adfr_off，回到纯自制 LTPO。
