@@ -2107,3 +2107,21 @@ textarea.form-input {
         align-items: center;
     }
 }
+
+/* 息屏 AOD 时长：输入框 + 侧边小保存按钮 */
+.aod-duration-row {
+    display: flex;
+    gap: 8px;
+    align-items: stretch;
+    margin-top: 10px;
+}
+
+.aod-duration-row .form-input {
+    flex: 1;
+    min-width: 0;
+}
+
+.aod-duration-row .btn {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}

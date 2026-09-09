@@ -445,7 +445,7 @@ gate_check() {
     # still receive the paid Hook (settings/game assistant/Scene); their
     # MEMC feature stays denied instead of blocking the whole package.
     if [ "$1" = video_memc ]; then
-        _model=$(getprop ro.product.vendor.model 2>/dev/null)
+        _model=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
         case "$_model" in
             RMX5200) ;;
             *)
@@ -521,7 +521,7 @@ gate_state_print() {
     echo "entitlement=not_purchased"
     echo "license_last4="
     echo "device_bound=0"
-    echo "device_model=$(getprop ro.product.vendor.model 2>/dev/null)"
+    echo "device_model=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')"
     echo "lease_valid=0"
     echo "lease_expires_at=0"
     echo "grace_until=0"
@@ -599,7 +599,7 @@ gate_device_info_print() {
     echo "imei1=${_imei1:-}"
     echo "imei2=${_imei2:-}"
     echo "device_id_hash=${_hash:-}"
-    echo "device_model=$(getprop ro.product.vendor.model 2>/dev/null)"
+    echo "device_model=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')"
     echo "soc_model=$(getprop ro.soc.model 2>/dev/null)"
     echo "build_fingerprint=$(getprop ro.build.fingerprint 2>/dev/null)"
     echo "kernel=$(uname -r 2>/dev/null)"
@@ -879,7 +879,7 @@ gate_package_commit() {
     _manifest_keyid=$(gate_json_field "$_staging/manifest.json" signature_key_id)
     _min_base=$(gate_json_field "$_staging/manifest.json" min_base_version)
     _base=$(sed -n 's/^version=//p' "$GATE_MOD_PATH/module.prop" 2>/dev/null | head -n 1 | tr -d '[:space:]')
-    _model=$(getprop ro.product.vendor.model 2>/dev/null)
+    _model=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
     _soc=$(getprop ro.soc.model 2>/dev/null)
     _kernel=$(uname -r 2>/dev/null)
     _backend=$(sed -n '1{s/\r$//;p;q;}' "$GATE_MOD_PATH/config/dts_backend.txt" 2>/dev/null | tr -d '[:space:]')

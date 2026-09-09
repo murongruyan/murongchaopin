@@ -39,12 +39,12 @@ Prepare_install_tools() {
 }
 
 assert_supported_install_model() {
-  INSTALL_MODEL=$(getprop ro.product.vendor.model 2>/dev/null | tr -d '\r\n')
+  INSTALL_MODEL=$(getprop ro.product.vendor.model| sed 's/^CPH2747$/PLK110/' 2>/dev/null | tr -d '\r\n')
   [ -n "$INSTALL_MODEL" ] || \
-    INSTALL_MODEL=$(getprop ro.product.model 2>/dev/null | tr -d '\r\n')
+    INSTALL_MODEL=$(getprop ro.product.model| sed 's/^CPH2747$/PLK110/' 2>/dev/null | tr -d '\r\n')
   case "$INSTALL_MODEL" in
-    RMX5200|PLK110|PLQ110|PJD110) ;;
-    *) abort "不支持的机型：${INSTALL_MODEL:-unknown}（仅支持 RMX5200、PLK110、PLQ110、PJD110）" ;;
+    RMX5200|PLK110|CPH2747|PLQ110|PJD110) ;;
+    *) abort "不支持的机型：${INSTALL_MODEL:-unknown}（仅支持 RMX5200、PLK110、CPH2747、PLQ110、PJD110）" ;;
   esac
 }
 
@@ -451,7 +451,7 @@ fi
 
 # (2) 超频修改
 ui_print "正在应用超频修改..."
-case "$(getprop ro.product.vendor.model 2>/dev/null)" in
+case "$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')" in
   RMX5200)
     ui_print "RMX5200: 删除目标面板原生 FHD timing，保留 Framework 派生 FHD mode"
     $BIN_DIR/process_dts --rmx5200-drop-stock-fhd

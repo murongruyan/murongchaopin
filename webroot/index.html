@@ -61,6 +61,25 @@
                             <button id="btn-policy-custom" class="seg-btn seg-btn-paid" type="button"><span class="lock"></span>自制 LTPO</button>
                             <button id="btn-policy-adfr" class="seg-btn seg-btn-paid" type="button"><span class="lock"></span>完美禁用 ADFR</button>
                         </div>
+                        <div id="ltpo-daily-idle-row" hidden>
+                            <div class="switch-control">
+                                <label for="ltpo-daily-idle">禁用日常 LTPO（息屏保持 1Hz）</label>
+                                <input id="ltpo-daily-idle" type="checkbox">
+                                <span class="switch-track" aria-hidden="true"><span></span></span>
+                            </div>
+                            <div id="ltpo-daily-idle-modes" class="seg seg-2" role="group" aria-label="亮屏降频方案" hidden>
+                                <button id="btn-daily-stock-ltpo" class="seg-btn" type="button">原厂 LTPS</button>
+                                <button id="btn-daily-adfr-off" class="seg-btn seg-btn-paid" type="button"><span class="lock"></span>完美禁用 ADFR</button>
+                            </div>
+                            <div id="ltpo-aod-duration-row" hidden>
+                                <div class="aod-duration-row">
+                                    <input id="ltpo-aod-duration" class="form-input" type="number" min="0" max="3600" step="10" value="120" inputmode="numeric" aria-label="息屏 AOD 时长（秒）">
+                                    <button id="ltpo-aod-duration-save" class="btn btn-sm btn-secondary" type="button">保存</button>
+                                </div>
+                                <p class="text-hint">全景息屏保持时长：0-3600 秒，0 = 跟随系统，默认 120 秒。</p>
+                            </div>
+                            <p class="text-hint">打开后息屏仍走 LTPO 降到 1Hz；亮屏由所选方案接管：原厂 LTPS（闲置降到 60Hz）或完美禁用 ADFR（锁定所选刷新率）。息屏 AOD 时长默认 120 秒，到时自动熄屏。</p>
+                        </div>
                     </div>
                 </div>
 
@@ -300,7 +319,11 @@
                             </div>
                         </div>
                         <textarea id="log-viewer" readonly class="log-viewer" placeholder="正在读取日志…"></textarea>
-                        <button id="btn-clear-logs" class="btn btn-danger btn-block">清空日志</button>
+                        <div class="btn-row btn-row-2">
+                            <button id="btn-collect-bugpack" class="btn btn-primary">收集并分享日志</button>
+                            <button id="btn-clear-logs" class="btn btn-secondary">清空日志</button>
+                        </div>
+                        <p class="text-hint">收集设备信息、LSPosed 日志、模块运行日志并打包到 Download 目录，可一键调起系统分享发给开发者。</p>
                     </div>
                 </div>
                 <div id="debug-container" class="card debug-card" hidden>

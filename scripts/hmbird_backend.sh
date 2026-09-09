@@ -49,7 +49,7 @@ prepare_hmbird_dtbo() {
         return 1
     }
     HMBIRD_TYPE=$(expected_type "$SOC_MODEL") || return 1
-    DEVICE_MODEL=$(getprop ro.product.vendor.model 2>/dev/null | tr -d '[:space:]')
+    DEVICE_MODEL=$(getprop ro.product.vendor.model| sed 's/^CPH2747$/PLK110/' 2>/dev/null | tr -d '[:space:]')
     case "$DEVICE_MODEL" in
         PJD110)
             PROCESS_DTS_MODE=--pjd110-ko-support

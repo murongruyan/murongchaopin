@@ -70,8 +70,8 @@ validate_profile_runtime() {
 }
 
 select_ko_profile() {
-    PROFILE_MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
-    [ -n "$PROFILE_MODEL" ] || PROFILE_MODEL=$(getprop ro.product.model 2>/dev/null)
+    PROFILE_MODEL=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
+    [ -n "$PROFILE_MODEL" ] || PROFILE_MODEL=$(getprop ro.product.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
     case "$PROFILE_MODEL" in
         RMX5200)
             KO_PROFILE=rmx5200
@@ -171,8 +171,8 @@ has_symbol() {
 }
 
 collect_probe() {
-    PROBE_MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
-    [ -n "$PROBE_MODEL" ] || PROBE_MODEL=$(getprop ro.product.model 2>/dev/null)
+    PROBE_MODEL=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
+    [ -n "$PROBE_MODEL" ] || PROBE_MODEL=$(getprop ro.product.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
     PROBE_DRIVER=not_loaded
     [ -d /sys/module/msm_drm ] && PROBE_DRIVER=loaded
     PROBE_SURFACEFLINGER=not_running

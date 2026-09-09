@@ -75,6 +75,22 @@ read_policy()
         tr -d '[:space:]'
 }
 
+# 原厂 LTPS 子方案（"禁用日常 LTPO"开启，策略保留 custom_ltpo）同样依赖
+# 本补丁放行 60Hz 投票；纯自制 LTPO（标志关闭）仍不应用，OTI 由控制器暂停。
+DAILY_IDLE_FILE="$MODDIR/config/rmx5200_ltpo_daily_idle.txt"
+
+ltps_vote_wanted()
+{
+    policy=$(read_policy)
+    [ "$policy" = "$EXPECTED_POLICY" ] && return 0
+    if [ "$policy" = custom_ltpo ]; then
+        daily_idle=$(sed -n '1{s/\r$//;p;q;}' "$DAILY_IDLE_FILE" 2>/dev/null |
+            tr -d '[:space:]')
+        [ "$daily_idle" = on ] && return 0
+    fi
+    return 1
+}
+
 verify_context()
 {
     file=$1
@@ -134,7 +150,7 @@ patch_semantic_file()
     offset=${5:-$VOTE_PATCH_OFFSET}
 
     [ "$model" = "$EXPECTED_MODEL" ] || return 10
-    [ "$policy" = "$EXPECTED_POLICY" ] || return 11
+    ltps_vote_wanted || return 11
     verify_original "$source" "$offset" || return 12
 
     output_dir=${output%/*}
@@ -162,7 +178,7 @@ patch_semantic_file()
 
 current_model()
 {
-    getprop ro.product.vendor.model 2>/dev/null
+    getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/'
 }
 
 current_boot_id()
@@ -203,7 +219,7 @@ prepare_runtime_patch()
         write_state "skipped:model_${model:-unknown}"
         return 0
     fi
-    if [ "$policy" != "$EXPECTED_POLICY" ]; then
+    if ! ltps_vote_wanted; then
         write_state "skipped:policy_${policy:-unknown}"
         return 0
     fi
@@ -255,7 +271,7 @@ apply_runtime_patch()
         write_state "skipped:model_${model:-unknown}"
         return 0
     fi
-    if [ "$policy" != "$EXPECTED_POLICY" ]; then
+    if ! ltps_vote_wanted; then
         write_state "skipped:policy_${policy:-unknown}"
         return 0
     fi

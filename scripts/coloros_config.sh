@@ -39,8 +39,8 @@ set_status() {
 }
 
 model_supported() {
-    MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
-    [ -n "$MODEL" ] || MODEL=$(getprop ro.product.model 2>/dev/null)
+    MODEL=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
+    [ -n "$MODEL" ] || MODEL=$(getprop ro.product.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
     case "$MODEL" in
         RMX5200|PLK110|PLQ110|PJD110) return 0 ;;
         *) return 1 ;;
@@ -142,7 +142,7 @@ remove_config() {
 }
 
 status_config() {
-    printf 'model=%s\n' "$(getprop ro.product.vendor.model 2>/dev/null)"
+    printf 'model=%s\n' "$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')"
     printf 'vrr_source_hash=%s\n' "$(sha256_file "$VRR_SOURCE")"
     printf 'rate_source_hash=%s\n' "$(sha256_file "$RATE_SOURCE")"
     printf 'vrr_target_hash=%s\n' "$(sha256_file "$VRR_TARGET")"

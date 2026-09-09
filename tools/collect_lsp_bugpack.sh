@@ -32,7 +32,7 @@ dumpsys dropbox --print > "$OUT/dropbox/dropbox.txt" 2>/dev/null || true
 echo "==> Device props"
 getprop > "$OUT/props/props.txt" 2>/dev/null || true
 {
-  echo "model=$(getprop ro.product.vendor.model 2>/dev/null)"
+  echo "model=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')"
   echo "android=$(getprop ro.build.version.release 2>/dev/null)"
   echo "incremental=$(getprop ro.build.version.incremental 2>/dev/null)"
   echo "kernel=$(uname -r 2>/dev/null)"

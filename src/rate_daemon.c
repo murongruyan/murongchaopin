@@ -26,7 +26,7 @@
 #define MAX_APPS 200
 #define MAX_PKG_LEN 128
 #define MAX_EXTENSION_RATES 256
-#define RATE_DAEMON_VERSION "2.9.25"
+#define RATE_DAEMON_VERSION "2.9.26"
 #define BOOT_RESOLUTION_SETTLE_TIMEOUT_MS 8000
 #define BOOT_RESOLUTION_SETTLE_SAMPLE_MS 150
 #define BOOT_RESOLUTION_SETTLE_SAMPLES 4
@@ -357,7 +357,15 @@ static void init_device_model(void) {
         if (fgets(line, sizeof(line), fp)) {
             char *value = trim(line);
             if (*value) {
-                snprintf(device_model, sizeof(device_model), "%s", value);
+                /* CPH2747 (OnePlus 15 OxygenOS) is hardware-identical to
+                 * the PLK110 profile; normalize so every profile check and
+                 * model_key lookup sees PLK110. */
+                if (strcmp(value, "CPH2747") == 0) {
+                    snprintf(device_model, sizeof(device_model), "%s",
+                            "PLK110");
+                } else {
+                    snprintf(device_model, sizeof(device_model), "%s", value);
+                }
                 pclose(fp);
                 log_msg("Display transition profile: model=%s", device_model);
                 return;
@@ -617,7 +625,7 @@ void init_display_modes() {
         }
     }
 
-    log_msg("Loaded %d display modes (HWC) / 已加载 %d 个显示模式 (HWC):", mode_count);
+    log_msg("Loaded %d display modes (HWC) / 已加载 %d 个显示模式 (HWC):", mode_count, mode_count);
     for(int i=0; i<mode_count; i++) {
         log_msg("ID: %d, FPS: %d, Res: %dx%d, Group: %d", modes[i].id,
                 modes[i].fps, modes[i].width, modes[i].height, modes[i].group);

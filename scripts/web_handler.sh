@@ -30,6 +30,7 @@ GAME_ASSISTANT_CONFIG_HELPER="$PREMIUM_PATH/scripts/game_assistant_config_premiu
 ADFR_POLICY_FILE="$MOD_PATH/config/rmx5200_adfr_mode.txt"
 ADFR_TEST_BYPASS_FILE="$MOD_PATH/config/adfr_lock_test_disabled"
 DISPLAY_POLICY_FILE="$MOD_PATH/config/rmx5200_display_policy.txt"
+LTPO_DAILY_IDLE_FILE="$MOD_PATH/config/rmx5200_ltpo_daily_idle.txt"
 LTPO_BOOT_TOKEN_FILE="$MOD_PATH/config/rmx5200_ltpo_boot_test_once"
 LTPO_RISE_TOKEN_FILE="$MOD_PATH/config/rmx5200_ltpo_rise_boot_test_once"
 DTS_BACKEND_FILE="$MOD_PATH/config/dts_backend.txt"
@@ -174,6 +175,24 @@ require_premium_payload() {
     premium_payload_ready "$1" && return 0
     echo "Error: premium runtime component is missing; reinstall the paid package"
     return 1
+}
+
+# ADFR 应用按机型分流：RMX5200/PLK110/PJD110 走 KO 锁；PLQ110（Ace6）
+# 面板驱动自报 ADFR 不支持、KO insmod 必败，走与 PJD110 相同的
+# props 禁用方案（重启后生效）。$1 = on|off。
+adfr_apply_for_model()
+{
+    local model
+    model=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
+    if [ "$model" = PLQ110 ]; then
+        if [ "$1" = off ]; then
+            sh "$GENERIC_ADFR_HELPER" apply >/dev/null 2>&1
+        else
+            sh "$GENERIC_ADFR_HELPER" restore >/dev/null 2>&1
+        fi
+        return $?
+    fi
+    sh "$ADFR_LOCK_HELPER" apply >/dev/null 2>&1
 }
 
 mkdir -p "$(dirname "$CONFIG_FILE")"
@@ -666,7 +685,7 @@ prepare_backend_transition() {
 }
 
 run_process_dts() {
-    MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
+    MODEL=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
     DTS_BACKEND=$(read_dts_backend)
     if [ "$MODEL" = RMX5200 ] && [ "$DTS_BACKEND" = dtbo ]; then
         echo "RMX5200 display mode fix: dropping four native AE084 FHD timings"
@@ -710,7 +729,7 @@ run_process_dts() {
 drm_profile_spec_defaults() {
     DRM_SPEC_RES=""
     DRM_SPEC_DEFAULTS=""
-    MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
+    MODEL=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
     case "$MODEL" in
         RMX5200)
             DRM_SPEC_RES=$(mode_manifest_resolution RMX5200) || return 1
@@ -788,7 +807,7 @@ drm_add_spec() {
         echo "错误：当前机型没有已验证的 DRM-KO 自定义规格路径"; return 1;
     }
     drm_profile_spec_defaults || return 1
-    MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
+    MODEL=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
     if [ "$MODEL" != RMX5200 ] && {
         [ "$TRANSFER" -ne 0 ] 2>/dev/null || [ "$SOURCE_REFRESH" -ne 0 ] 2>/dev/null;
     }; then
@@ -986,7 +1005,7 @@ do_flash() {
 }
 
 do_ko_prepare() {
-    MODEL=$(getprop ro.product.vendor.model)
+    MODEL=$(getprop ro.product.vendor.model| sed 's/^CPH2747$/PLK110/')
     case "$MODEL" in
         RMX5200)
             KO_PROFILE=RMX5200
@@ -1075,7 +1094,7 @@ do_smart_add() {
     SLOT=$(getprop ro.boot.slot_suffix)
     DTBO_PARTITION="/dev/block/by-name/dtbo$SLOT"
 
-    MODEL=$(getprop ro.product.vendor.model)
+    MODEL=$(getprop ro.product.vendor.model| sed 's/^CPH2747$/PLK110/')
     TARGET_PANEL=""
     case "$MODEL" in
         "RMX5200") TARGET_PANEL="qcom,mdss_dsi_panel_AE084_P_3_A0033_dsc_cmd_dvt02" ;;
@@ -1387,7 +1406,7 @@ download_paid_package() {
     DEVICE_IMEI1=$(gate_device_imei1)
     DEVICE_IMEI2=$(gate_device_imei2)
     DEVICE_HASH=$(gate_device_id_hash)
-    DEVICE_MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
+    DEVICE_MODEL=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
     SOC_MODEL=$(getprop ro.soc.model 2>/dev/null)
     BUILD_FINGERPRINT=$(getprop ro.build.fingerprint 2>/dev/null)
     BASE_VERSION=$(sed -n 's/^version=//p' "$MOD_PATH/module.prop" 2>/dev/null | head -n 1 | tr -d '\r')
@@ -1530,7 +1549,7 @@ install_latest_paid_package() {
     DEVICE_IMEI1=$(gate_device_imei1)
     DEVICE_IMEI2=$(gate_device_imei2)
     DEVICE_HASH=$(gate_device_id_hash)
-    DEVICE_MODEL=$(getprop ro.product.vendor.model 2>/dev/null | tr -cd 'A-Za-z0-9._-')
+    DEVICE_MODEL=$(getprop ro.product.vendor.model| sed 's/^CPH2747$/PLK110/' 2>/dev/null | tr -cd 'A-Za-z0-9._-')
     SOC_MODEL=$(getprop ro.soc.model 2>/dev/null | tr -cd 'A-Za-z0-9._-')
     BASE_VERSION=$(sed -n 's/^version=//p' "$MOD_PATH/module.prop" 2>/dev/null |
         head -n 1 | tr -cd '0-9A-Za-z._-')
@@ -1940,7 +1959,7 @@ case "$1" in
         chmod +x dts_tool
         
         # Detect Model and Target Panel
-        MODEL=$(getprop ro.product.vendor.model)
+        MODEL=$(getprop ro.product.vendor.model| sed 's/^CPH2747$/PLK110/')
         TARGET_PANEL=""
         case "$MODEL" in
             "RMX5200") # Realme GT8 Pro
@@ -1999,7 +2018,7 @@ case "$1" in
         chmod +x dts_tool
         
         # Detect Model and Target Panel
-        MODEL=$(getprop ro.product.vendor.model)
+        MODEL=$(getprop ro.product.vendor.model| sed 's/^CPH2747$/PLK110/')
         TARGET_PANEL=""
         case "$MODEL" in
             "RMX5200") TARGET_PANEL="qcom,mdss_dsi_panel_AE084_P_3_A0033_dsc_cmd_dvt02" ;;
@@ -2047,7 +2066,7 @@ case "$1" in
         chmod +x dts_tool
         
         # Detect Model and Target Panel
-        MODEL=$(getprop ro.product.vendor.model)
+        MODEL=$(getprop ro.product.vendor.model| sed 's/^CPH2747$/PLK110/')
         TARGET_PANEL=""
         case "$MODEL" in
             "RMX5200") TARGET_PANEL="qcom,mdss_dsi_panel_AE084_P_3_A0033_dsc_cmd_dvt02" ;;
@@ -2198,7 +2217,7 @@ case "$1" in
         ;;
 
     "get_display_policy")
-        MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
+        MODEL=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
         echo "model=${MODEL:-unknown}"
         case "$MODEL" in
             RMX5200) DISPLAY_PROFILE=rmx5200 ;;
@@ -2233,7 +2252,7 @@ case "$1" in
         ;;
 
     "set_display_policy")
-        MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
+        MODEL=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
         case "$MODEL:$2" in
             RMX5200:stock_ltps|RMX5200:custom_ltpo)
                 TARGET_DISPLAY_POLICY="$2"; TARGET_ADFR_POLICY=on ;;
@@ -2276,8 +2295,71 @@ case "$1" in
         echo "policy=$TARGET_DISPLAY_POLICY"
         ;;
 
+    "set_daily_idle_mode")
+        # 亮屏降频方案仅在"禁用日常 LTPO"开启时可用：把显示策略在
+        # 原厂 LTPO 与完美禁用 ADFR 之间二选一切换（自制 LTPO 的
+        # 禁止降频由 daily_idle 标志负责，两个子方案都保留息屏 1Hz）。
+        MODEL=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
+        [ "$MODEL" = RMX5200 ] || {
+            echo "Error: daily idle mode is only supported on RMX5200"
+            exit 1
+        }
+        VALUE=$(sed -n '1{s/$//;p;q;}' "$LTPO_DAILY_IDLE_FILE" 2>/dev/null | tr -d '[:space:]')
+        case "$VALUE" in
+            on|1|y) ;;
+            *)
+                echo "Error: enable daily idle disable first"
+                exit 1
+                ;;
+        esac
+        case "$2" in
+            # 原厂 LTPS 子方案保留 custom_ltpo 策略：开机继续加载自制 KO，
+            # 1/10/30Hz 档位与息屏 LTPO 1Hz 才存在；亮屏由 daemon 依据
+            # daily_idle 标志让自制状态机完全让位，交给原厂 LTPS 投票。
+            stock_ltps) TARGET_DISPLAY_POLICY=custom_ltpo; TARGET_ADFR_POLICY=on ;;
+            adfr_off) TARGET_DISPLAY_POLICY=adfr_off; TARGET_ADFR_POLICY=off ;;
+            *)
+                echo "Error: mode must be stock_ltps or adfr_off"
+                exit 1
+                ;;
+        esac
+        if [ "$TARGET_DISPLAY_POLICY" = custom_ltpo ]; then
+            require_premium custom_ltpo || exit 1
+            require_premium_payload custom_ltpo || exit 1
+        fi
+        if [ "$TARGET_ADFR_POLICY" = off ]; then
+            require_premium adfr_disable || exit 1
+            require_premium_payload adfr_disable || exit 1
+        fi
+        [ -f "$ADFR_LOCK_HELPER" ] || {
+            echo "Error: ADFR lock helper is missing"
+            exit 1
+        }
+        PREVIOUS_DISPLAY_POLICY=$(read_display_policy)
+        PREVIOUS_ADFR_POLICY=$(read_adfr_policy)
+        write_display_policy "$TARGET_DISPLAY_POLICY" || {
+            echo "Error: unable to persist display policy"
+            exit 1
+        }
+        if ! write_adfr_policy "$TARGET_ADFR_POLICY"; then
+            write_display_policy "$PREVIOUS_DISPLAY_POLICY" >/dev/null 2>&1 || true
+            echo "Error: unable to persist ADFR policy"
+            exit 1
+        fi
+        if ! adfr_apply_for_model "$TARGET_ADFR_POLICY"; then
+            write_display_policy "$PREVIOUS_DISPLAY_POLICY" >/dev/null 2>&1 || true
+            write_adfr_policy "$PREVIOUS_ADFR_POLICY" >/dev/null 2>&1 || true
+            adfr_apply_for_model "$PREVIOUS_ADFR_POLICY" >/dev/null 2>&1 || true
+            echo "Error: unable to apply ADFR policy ($(sed -n '1p' "$PREMIUM_PATH/config/adfr_lock_state.txt" 2>/dev/null))"
+            exit 1
+        fi
+        DAEMON_PID=$(pgrep -f rate_daemon_premium 2>/dev/null | head -n 1)
+        [ -n "$DAEMON_PID" ] && kill -USR1 "$DAEMON_PID" 2>/dev/null || true
+        echo "Success: daily idle mode $2"
+        ;;
+
     "get_adfr_policy")
-        MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
+        MODEL=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
         echo "model=${MODEL:-unknown}"
         if [ "$MODEL" != RMX5200 ]; then
             echo "supported=0"
@@ -2292,8 +2374,139 @@ case "$1" in
         fi
         ;;
 
+    "get_ltpo_aod_duration")
+        MODEL=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
+        [ "$MODEL" = RMX5200 ] || { echo "supported=0"; exit 0; }
+        echo "supported=1"
+        VALUE=$(sed -n '1{s/$//;p;q;}' "$MOD_PATH/config/rmx5200_aod_duration.txt" 2>/dev/null | tr -d '[:space:]')
+        case "$VALUE" in
+            ''|*[!0-9]*) echo "duration=120" ;;
+            *) echo "duration=$VALUE" ;;
+        esac
+        ;;
+
+    "set_ltpo_aod_duration")
+        MODEL=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
+        [ "$MODEL" = RMX5200 ] || {
+            echo "Error: AOD duration is only supported on RMX5200"
+            exit 1
+        }
+        case "$2" in
+            ''|*[!0-9]*) echo "Error: duration must be seconds (0-3600)"; exit 1 ;;
+            *) [ "$2" -le 3600 ] || { echo "Error: duration must be seconds (0-3600)"; exit 1; } ;;
+        esac
+        printf '%s
+' "$2" > "$MOD_PATH/config/rmx5200_aod_duration.txt" || {
+            echo "Error: unable to persist AOD duration"
+            exit 1
+        }
+        chmod 0644 "$MOD_PATH/config/rmx5200_aod_duration.txt" 2>/dev/null
+        DAEMON_PID=$(pgrep -f rate_daemon_premium 2>/dev/null | head -n 1)
+        [ -n "$DAEMON_PID" ] && kill -USR1 "$DAEMON_PID" 2>/dev/null || true
+        echo "Success: aod duration $2"
+        ;;
+
+    "collect_bugpack")
+        # ä¸é®æ¶éè®¾å¤/LSPosed/æ¨¡åè¿è¡æ¥å¿å¹¶æåå°
+        # /sdcard/Downloadï¼ä¾ç¨æ·éè¿èå¤©å·¥å·åç»å¼åèã
+        BUGPACK_OUT=$(sh "$MOD_PATH/scripts/collect_bugpack.sh" 2>/dev/null)
+        BUGPACK_PATH=$(printf '%s
+' "$BUGPACK_OUT" | sed -n 's/^user copy: //p' | tail -n 1)
+        if [ -n "$BUGPACK_PATH" ] && [ -f "$BUGPACK_PATH" ]; then
+            echo "Success: bugpack collected"
+            echo "path=$BUGPACK_PATH"
+        else
+            echo "Error: bugpack collection failed"
+            printf '%s
+' "$BUGPACK_OUT" | tail -n 3
+        fi
+        ;;
+
+    "log_event")
+        # WebUI å¨å±éè¯¯ä¸æ¥ï¼æé¡µé¢ JS ççå®æ¥éåè¿
+        # daemon.logï¼ç¨æ·éè¿æ¥å¿é¡µå°±è½çå°å·ä½åå ã
+        EVENT_TEXT="$2"
+        case "$EVENT_TEXT" in
+            *[\`$]*) EVENT_TEXT="$(printf '%s' "$EVENT_TEXT" | tr -d '`$')" ;;
+        esac
+        printf '[%s] [WebUI] %s
+' "$(date '+%m-%d %H:%M:%S')" "$EVENT_TEXT" >> "$MOD_PATH/daemon.log" 2>/dev/null
+        echo "Success: event logged"
+        ;;
+
+    "get_ltpo_daily_idle")
+        MODEL=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
+        [ "$MODEL" = RMX5200 ] || { echo "supported=0"; exit 0; }
+        echo "supported=1"
+        VALUE=$(sed -n '1{s/$//;p;q;}' "$LTPO_DAILY_IDLE_FILE" 2>/dev/null | tr -d '[:space:]')
+        case "$VALUE" in
+            on|1|y) echo "daily_idle_disabled=1" ;;
+            *) echo "daily_idle_disabled=0"; exit 0 ;;
+        esac
+        # 亮屏降频方案仅在实际禁用了日常 LTPO 时有意义：adfr_off 策略即
+        # 完美禁用 ADFR 子方案；其余（custom_ltpo）一律视为默认的原厂
+        # LTPS 子方案——策略文件保留 custom_ltpo 以维持 KO 与息屏档位。
+        case "$(read_display_policy)" in
+            adfr_off) echo "daily_idle_mode=adfr_off" ;;
+            *) echo "daily_idle_mode=stock_ltps" ;;
+        esac
+        ;;
+
+    "set_ltpo_daily_idle")
+        MODEL=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
+        [ "$MODEL" = RMX5200 ] || {
+            echo "Error: daily idle toggle is only supported on RMX5200"
+            exit 1
+        }
+        require_premium custom_ltpo || exit 1
+        require_premium_payload custom_ltpo || exit 1
+        case "$2" in
+            on) TARGET_VALUE=on ;;
+            off) TARGET_VALUE=off ;;
+            *)
+                echo "Error: value must be on or disable(off)"
+                exit 1
+                ;;
+        esac
+        mkdir -p "$(dirname "$LTPO_DAILY_IDLE_FILE")" || exit 1
+        if [ "$TARGET_VALUE" = on ]; then
+            # 开关打开即进入默认子方案"原厂 LTPS"：不允许不选，二选一始终
+            # 有一个生效（另一个是完美禁用 ADFR）。
+            printf '%s
+' on > "$LTPO_DAILY_IDLE_FILE" || {
+                echo "Error: unable to persist daily idle flag"
+                exit 1
+            }
+            chmod 0644 "$LTPO_DAILY_IDLE_FILE" 2>/dev/null
+            PREVIOUS_DISPLAY_POLICY=$(read_display_policy)
+            PREVIOUS_ADFR_POLICY=$(read_adfr_policy)
+            if ! write_display_policy custom_ltpo ||
+               ! write_adfr_policy on; then
+                write_display_policy "$PREVIOUS_DISPLAY_POLICY" >/dev/null 2>&1 || true
+                write_adfr_policy "$PREVIOUS_ADFR_POLICY" >/dev/null 2>&1 || true
+                echo "Error: unable to persist default sub-mode"
+                exit 1
+            fi
+            adfr_apply_for_model on >/dev/null 2>&1 || true
+        else
+            rm -f "$LTPO_DAILY_IDLE_FILE"
+            # 关闭开关时如停留在子方案 adfr_off，回到纯自制 LTPO。
+            if [ "$(read_display_policy)" = adfr_off ]; then
+                write_display_policy custom_ltpo || true
+                write_adfr_policy on || true
+                adfr_apply_for_model on >/dev/null 2>&1 || true
+            fi
+        fi
+        # The premium daemon re-evaluates the flag on its next tick; the
+        # SIGUSR1 nudge (same channel as the settings bridge) also clears any
+        # pending idle descent so the change takes effect immediately.
+        DAEMON_PID=$(pgrep -f rate_daemon_premium 2>/dev/null | head -n 1)
+        [ -n "$DAEMON_PID" ] && kill -USR1 "$DAEMON_PID" 2>/dev/null || true
+        echo "Success: daily idle $TARGET_VALUE"
+        ;;
+
     "toggle_adfr")
-        MODEL=$(getprop ro.product.vendor.model 2>/dev/null)
+        MODEL=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
         if [ "$MODEL" != RMX5200 ]; then
             echo "Error: ADFR policy is only supported on RMX5200"
             exit 1
@@ -2332,7 +2545,7 @@ case "$1" in
             write_adfr_policy "$PREVIOUS_ADFR_POLICY" >/dev/null 2>&1 || true
             write_display_policy "$PREVIOUS_DISPLAY_POLICY" >/dev/null 2>&1 || true
             sh "$ADFR_LOCK_HELPER" apply >/dev/null 2>&1 || true
-            echo "Error: unable to apply ADFR policy"
+            echo "Error: unable to apply ADFR policy ($(sed -n '1p' "$PREMIUM_PATH/config/adfr_lock_state.txt" 2>/dev/null))"
             exit 1
         fi
 

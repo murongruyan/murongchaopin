@@ -104,6 +104,37 @@ let moduleInitializationComplete = false;
 let moduleInitializationDeferred = false;
 
 // ============================================================
+// 全局错误捕获：用户端报 "Error: Script error." 这类无详情 toast 时，
+// 真实的错误与堆栈写进调试日志和模块日志（日志页可见），便于回报。
+// ============================================================
+let globalErrorReportBusy = false;
+function reportGlobalError(kind, detail) {
+    const text = `[${kind}] ${detail || 'unknown'}`;
+    console.error(text);
+    debugLog(text);
+    if (globalErrorReportBusy) return;
+    globalErrorReportBusy = true;
+    const safe = String(text).replace(/[`$\\"]/g, '');
+    try {
+        ksuExec(`sh "${MOD_DIR}/scripts/web_handler.sh" log_event webui_error ${shellQuote(new Date().toISOString() + ' ' + safe.slice(0, 400))}`, true)
+            .catch(() => {})
+            .finally(() => { globalErrorReportBusy = false; });
+    } catch (error) {
+        globalErrorReportBusy = false;
+    }
+}
+
+window.addEventListener('error', (event) => {
+    reportGlobalError('Uncaught', `${event.message || 'script error'} @ ${event.filename || '?'}:${event.lineno ?? '?'}`);
+});
+window.addEventListener('unhandledrejection', (event) => {
+    const reason = event.reason;
+    const detail = (reason && reason.stack) ? reason.stack
+        : (reason && reason.message) ? reason.message : String(reason);
+    reportGlobalError('UnhandledRejection', detail);
+});
+
+// ============================================================
 // 调试日志
 // ============================================================
 function debugLog(msg) {
@@ -3388,10 +3419,23 @@ function renderDisplayPolicy(policy, activePolicy = policy, busy = false, profil
     const selectedButtonId = (selected === 'stock_ltpo' || selected === 'stock_ltps')
         ? 'btn-policy-stock'
         : (selected === 'custom_ltpo' ? 'btn-policy-custom' : 'btn-policy-adfr');
-    document.querySelectorAll('#policy-card .seg-btn').forEach((button) => {
-        button.classList.toggle('active', button.id === selectedButtonId);
-        button.disabled = busy;
+    document.querySelectorAll('#policy-card .seg').forEach((seg) => {
+        if (seg.id === 'ltpo-daily-idle-modes') return;
+        seg.querySelectorAll('.seg-btn').forEach((button) => {
+            button.classList.toggle('active', button.id === selectedButtonId);
+            button.disabled = busy;
+        });
     });
+    // 禁用日常 LTPO 是自制 LTPO 专属选项：仅当选中自制 LTPO 时出现；
+    // 原厂 LTPS / 完美禁用 ADFR（顶栏按钮）都不显示。
+    const dailyRow = document.getElementById('ltpo-daily-idle-row');
+    if (dailyRow) {
+        dailyRow.hidden = !(isRmx5200 && selected === 'custom_ltpo');
+        if (dailyRow.hidden) {
+            const modes = document.getElementById('ltpo-daily-idle-modes');
+            if (modes) modes.hidden = true;
+        }
+    }
 }
 
 async function loadAdfrPolicy() {
@@ -3405,6 +3449,148 @@ async function loadAdfrPolicy() {
     control.hidden = !supported;
     if (!supported) return;
     renderDisplayPolicy(state.policy, state.active, false, state.profile);
+    await loadLtpoDailyIdle();
+}
+
+async function loadLtpoDailyIdle() {
+    const row = document.getElementById('ltpo-daily-idle-row');
+    const input = document.getElementById('ltpo-daily-idle');
+    if (!row || !input) return;
+    input.disabled = true;
+    if (row.hidden) return;
+    try {
+        const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
+        const result = await ksuExec(`sh "${scriptPath}" get_ltpo_daily_idle`, true);
+        const state = parseKeyValueOutput(result);
+        if (state.supported !== '1') {
+            row.hidden = true;
+            return;
+        }
+        input.checked = state.daily_idle_disabled === '1';
+        input.disabled = !isPremium();
+        const modes = document.getElementById('ltpo-daily-idle-modes');
+        if (modes) modes.hidden = !input.checked;
+        const aodRow = document.getElementById('ltpo-aod-duration-row');
+        if (aodRow) aodRow.hidden = !input.checked;
+        renderDailyIdleMode(input.checked ? (state.daily_idle_mode || 'stock_ltps') : '');
+        if (input.checked) await loadLtpoAodDuration();
+    } catch (error) {
+        row.hidden = true;
+    }
+}
+
+function renderDailyIdleMode(mode, busy = false) {
+    const modes = document.getElementById('ltpo-daily-idle-modes');
+    if (!modes) return;
+    const stock = document.getElementById('btn-daily-stock-ltpo');
+    const adfr = document.getElementById('btn-daily-adfr-off');
+    const current = ['stock_ltps', 'adfr_off'].includes(mode) ? mode : '';
+    if (stock) {
+        stock.classList.toggle('active', current === 'stock_ltps');
+        stock.disabled = busy;
+    }
+    if (adfr) {
+        adfr.classList.toggle('active', current === 'adfr_off');
+        adfr.disabled = busy || authState.package_installed !== 1;
+    }
+}
+
+async function setDailyIdleMode(mode) {
+    if (!['stock_ltps', 'adfr_off'].includes(mode)) return;
+    if (!isPremium()) {
+        openAuthPanel();
+        return;
+    }
+    renderDailyIdleMode(mode, true);
+    const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
+    try {
+        const result = await ksuExec(
+            `sh "${scriptPath}" set_daily_idle_mode "${mode}"`);
+        if (!result.includes('Success:')) {
+            await showConfirm('亮屏降频方案', result || '保存失败', { okLabel: '知道了', single: true });
+        } else {
+            await showConfirm('需要重启', '亮屏降频方案已保存，重启设备后生效。', { okLabel: '知道了', single: true });
+        }
+    } finally {
+        await loadLtpoDailyIdle();
+    }
+}
+
+async function loadLtpoAodDuration() {
+    const row = document.getElementById('ltpo-aod-duration-row');
+    if (!row || row.hidden) return;
+    const input = document.getElementById('ltpo-aod-duration');
+    if (!input) return;
+    try {
+        const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
+        const result = await ksuExec(`sh "${scriptPath}" get_ltpo_aod_duration`, true);
+        const state = parseKeyValueOutput(result);
+        if (state.supported === '1' && state.duration) input.value = state.duration;
+    } catch (error) { /* keep current value */ }
+}
+
+async function setLtpoAodDuration() {
+    const input = document.getElementById('ltpo-aod-duration');
+    const button = document.getElementById('ltpo-aod-duration-save');
+    if (!input || !button) return;
+    const raw = parseInt(input.value, 10);
+    if (Number.isNaN(raw) || raw < 0 || raw > 3600) {
+        await showConfirm('息屏 AOD 时长', '请输入 0-3600 之间的秒数，0 = 跟随系统。', { okLabel: '知道了', single: true });
+        return;
+    }
+    const original = button.innerText;
+    button.disabled = true;
+    const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
+    const result = await ksuExec(`sh "${scriptPath}" set_ltpo_aod_duration ${raw}`);
+    button.disabled = false;
+    if (!result.includes('Success:')) {
+        await showConfirm('息屏 AOD 时长', result || '保存失败', { okLabel: '知道了', single: true });
+        return;
+    }
+    input.value = String(raw);
+    button.innerText = '已保存';
+    setTimeout(() => { button.innerText = original; }, 1500);
+}
+
+
+async function setLtpoDailyIdle(enabled) {
+    const input = document.getElementById('ltpo-daily-idle');
+    if (!isPremium()) {
+        input.checked = false;
+        openAuthPanel();
+        return;
+    }
+    input.disabled = true;
+    const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
+    try {
+        const result = await ksuExec(
+            `sh "${scriptPath}" set_ltpo_daily_idle ${enabled ? 'on' : 'off'}`);
+        if (!result.includes('Success:')) {
+            input.checked = !enabled;
+            await showConfirm('自制 LTPO', result || '保存失败', { okLabel: '知道了', single: true });
+        } else {
+            const modes = document.getElementById('ltpo-daily-idle-modes');
+            if (modes) modes.hidden = !enabled;
+            const aodRow = document.getElementById('ltpo-aod-duration-row');
+            if (aodRow) aodRow.hidden = !enabled;
+            if (enabled) {
+                // 打开即默认原厂 LTPS 子方案，二选一不允许不选。
+                renderDailyIdleMode('stock_ltps');
+                await loadLtpoAodDuration();
+                await showConfirm('自制 LTPO',
+                    '日常 LTPO 已禁用：息屏仍降到 1Hz，亮屏默认由原厂 LTPS 接管（闲置降到 60Hz），也可切换为完美禁用 ADFR。',
+                    { okLabel: '知道了', single: true });
+            } else {
+                await showConfirm('自制 LTPO',
+                    '日常 LTPO 已恢复：亮屏空闲后自动逐档降频。',
+                    { okLabel: '知道了', single: true });
+            }
+        }
+    } catch (error) {
+        input.checked = !enabled;
+    } finally {
+        input.disabled = false;
+    }
 }
 
 async function setDisplayPolicy(policy) {
@@ -4699,6 +4885,37 @@ async function removeAppConfig(pkg) {
 // ============================================================
 // 日志页
 // ============================================================
+async function collectBugpack() {
+    const button = document.getElementById('btn-collect-bugpack');
+    if (!button) return;
+    const original = button.innerText;
+    button.disabled = true;
+    button.innerText = '收集中…';
+    showToast('正在收集日志，可能需要几秒…');
+    const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
+    try {
+        const result = await ksuExec(`sh "${scriptPath}" collect_bugpack`, false, 60000);
+        const path = (parseKeyValueOutput(result).path) || '';
+        if (!result.includes('Success:') || !path) {
+            showToast(result || '日志收集失败');
+            return;
+        }
+        showToast('已生成：' + path);
+        debugLog('[Bugpack] ' + path);
+        // 调起系统分享；不支持时用户可从 Download 目录手动发送。
+        try {
+            await ksuExec(`am start -a android.intent.action.SEND -t application/gzip ` +
+                `--eu android.intent.extra.STREAM "file://${path}" ` +
+                `--es android.intent.extra.SUBJECT "慕容显示增强诊断包"`, true, 10000);
+        } catch (shareError) { /* 分享失败不影响文件已生成 */ }
+    } catch (error) {
+        showToast('日志收集失败：' + (error.message || error));
+    } finally {
+        button.disabled = false;
+        button.innerText = original;
+    }
+}
+
 async function refreshLogs() {
     const viewer = document.getElementById('log-viewer');
     if (!viewer) return;
@@ -4753,6 +4970,10 @@ function bindStaticEvents() {
     safeBind('btn-policy-stock', 'onclick', () => setDisplayPolicy(displayPolicyProfile === 'rmx5200' ? 'stock_ltps' : 'stock_ltpo'));
     safeBind('btn-policy-custom', 'onclick', () => setDisplayPolicy('custom_ltpo'));
     safeBind('btn-policy-adfr', 'onclick', () => setDisplayPolicy('adfr_off'));
+    safeBind('ltpo-daily-idle', 'onchange', (event) => setLtpoDailyIdle(event.target && event.target.checked));
+    safeBind('ltpo-aod-duration-save', 'click', () => setLtpoAodDuration());
+    safeBind('btn-daily-stock-ltpo', 'onclick', () => setDailyIdleMode('stock_ltps'));
+    safeBind('btn-daily-adfr-off', 'onclick', () => setDailyIdleMode('adfr_off'));
     safeBind('btn-backend-dtbo', 'onclick', () => setDtsBackend('dtbo'));
     safeBind('btn-backend-drm', 'onclick', () => setDtsBackend('drm'));
     safeBind('btn-oc-scan', 'onclick', scanWorkspace);
@@ -4776,6 +4997,7 @@ function bindStaticEvents() {
     safeBind('video-motion-target', 'onchange', refreshVideoMotionTargetDetail);
     safeBind('btn-refresh-logs', 'onclick', refreshLogs);
     safeBind('btn-clear-logs', 'onclick', clearLogs);
+    safeBind('btn-collect-bugpack', 'onclick', collectBugpack);
     safeBind('btn-toggle-debug', 'onclick', toggleDebug);
     safeBind('theme-system', 'onclick', () => applyTheme('system'));
     safeBind('theme-light', 'onclick', () => applyTheme('light'));

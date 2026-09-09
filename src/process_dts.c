@@ -591,7 +591,7 @@ void detect_device_model() {
     if (strstr(model, "RMX5200")) {
         g_current_model = MODEL_RMX5200;
         printf("Identified as Realme GT8 Pro (RMX5200)\n");
-    } else if (strstr(model, "PLK110")) {
+    } else if (strstr(model, "PLK110") || strstr(model, "CPH2747")) {
         g_current_model = MODEL_PLK110;
         printf("Identified as OnePlus 15 (PLK110)\n");
     } else if (strstr(model, "PLQ110")) {
