@@ -455,7 +455,7 @@ display_policy_for_model() {
                 *) printf 'stock_ltps\n' ;;
             esac
             ;;
-        PLK110|PJD110)
+        PLK110|PJD110|PLQ110)
             case "$POLICY_VALUE" in
                 adfr_off) printf 'adfr_off\n' ;;
                 *) printf 'stock_ltpo\n' ;;
@@ -2519,8 +2519,8 @@ case "$1" in
 
     "toggle_adfr")
         MODEL=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
-        if [ "$MODEL" != RMX5200 ]; then
-            echo "Error: ADFR policy is only supported on RMX5200"
+        if [ "$MODEL" != RMX5200 ] && [ "$MODEL" != PLQ110 ] && [ "$MODEL" != PLK110 ] && [ "$MODEL" != PJD110 ]; then
+            echo "Error: ADFR policy is only supported on RMX5200, PLK110, PLQ110 and PJD110"
             exit 1
         fi
         case "$2" in
@@ -2553,6 +2553,35 @@ case "$1" in
             exit 1
         }
         rm -f "$ADFR_TEST_BYPASS_FILE"
+        # PLQ110（Ace6）面板驱动自报 ADFR 不支持，KO insmod 必败：
+        # 走 props 禁用方案（重启后生效），校验逻辑与 KO 锁不同。
+        if [ "$MODEL" = PLQ110 ]; then
+            GENERIC_ACTION=restore
+            if [ "$TARGET_ADFR_POLICY" = off ]; then
+                GENERIC_ACTION=apply
+            fi
+            if ! sh "$GENERIC_ADFR_HELPER" "$GENERIC_ACTION" >/dev/null 2>&1; then
+                write_adfr_policy "$PREVIOUS_ADFR_POLICY" >/dev/null 2>&1 || true
+                write_display_policy "$PREVIOUS_DISPLAY_POLICY" >/dev/null 2>&1 || true
+                sh "$GENERIC_ADFR_HELPER" restore >/dev/null 2>&1 || true
+                echo "Error: unable to apply ADFR policy ($(sed -n '1p' "$PREMIUM_PATH/runtime/generic_adfr/status.txt" 2>/dev/null))"
+                exit 1
+            fi
+            if [ "$TARGET_ADFR_POLICY" = off ]; then
+                [ -f "$PREMIUM_PATH/runtime/generic_adfr/active" ] || {
+                    write_adfr_policy "$PREVIOUS_ADFR_POLICY" >/dev/null 2>&1 || true
+                    write_display_policy "$PREVIOUS_DISPLAY_POLICY" >/dev/null 2>&1 || true
+                    echo "Error: ADFR props did not become active"
+                    exit 1
+                }
+                echo "Success: ADFR disabled (重启后生效)"
+            else
+                rm -f "$PREMIUM_PATH/runtime/generic_adfr/active" 2>/dev/null || true
+                echo "Success: ADFR enabled (原厂 LTPO 已恢复)"
+            fi
+            sh "$GENERIC_ADFR_HELPER" status 2>/dev/null
+            exit 0
+        fi
         if ! sh "$ADFR_LOCK_HELPER" apply >/dev/null 2>&1; then
             write_adfr_policy "$PREVIOUS_ADFR_POLICY" >/dev/null 2>&1 || true
             write_display_policy "$PREVIOUS_DISPLAY_POLICY" >/dev/null 2>&1 || true
