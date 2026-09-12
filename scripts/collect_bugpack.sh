@@ -110,7 +110,7 @@ mkdir -p "$WORK/module/premium_config" "$WORK/display" 2>/dev/null
 for f in "$MODDIR/premium/config/adfr_lock_state.txt"          "$MODDIR/premium/config/adfr_lock.log"          "$MODDIR/premium/config/adfr_lock/oti_pause_last"          "$MODDIR/premium/config/adfr_lock/oti_pause_owner"; do
   [ -f "$f" ] && cp "$f" "$WORK/module/premium_config/" 2>/dev/null
 done
-[ -d "$MODDIR/runtime/generic_adfr" ] &&   cp -a "$MODDIR/runtime/generic_adfr" "$WORK/module/premium_config/" 2>/dev/null
+[ -d "$MODDIR/premium/runtime/generic_adfr" ] &&   cp -a "$MODDIR/premium/runtime/generic_adfr" "$WORK/module/premium_config/" 2>/dev/null
 {
   echo "lsmod_plq110=$(lsmod 2>/dev/null | grep -c plq110_adfr_lock)"
   echo "lsmod_rmx_adfr=$(lsmod 2>/dev/null | grep -c rmx5200_adfr_lock)"

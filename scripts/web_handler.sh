@@ -2241,8 +2241,8 @@ case "$1" in
                 echo "active=adfr_off"
             elif [ "$MODEL" = RMX5200 ]; then
                 echo "active=stock_ltps"
-            elif [ -f "$MOD_PATH/runtime/generic_adfr/active" ] &&
-                 [ "$(cat "$MOD_PATH/runtime/generic_adfr/active" 2>/dev/null)" =
+            elif [ -f "$PREMIUM_PATH/runtime/generic_adfr/active" ] &&
+                 [ "$(cat "$PREMIUM_PATH/runtime/generic_adfr/active" 2>/dev/null)" =
                    "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" ]; then
                 echo "active=adfr_off"
             else
