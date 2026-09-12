@@ -90,6 +90,22 @@ done
   done
 }
 ls -la "$MODDIR/bin" "$MODDIR/premium/bin" > "$WORK/module/binaries.txt" 2>/dev/null
+# ColorOS 刷新率/分辨率策略配置与运行状态（排查分辨率/DPI 振荡类问题：
+# 挂载冲突、配置内容、生效设置值一包看全）。
+for f in config/coloros/refresh_rate_config.xml config/coloros/oplus_vrr_config.json          config/custom_refresh_rates.txt; do
+  [ -f "$MODDIR/$f" ] && mkdir -p "$WORK/module/$(dirname "$f")" &&         cp "$MODDIR/$f" "$WORK/module/$f" 2>/dev/null
+done
+[ -d "$MODDIR/runtime/coloros_config" ] &&         cp -a "$MODDIR/runtime/coloros_config" "$WORK/module/coloros_config_runtime" 2>/dev/null
+{
+  echo "user_preferred_screen_index=$(settings get secure user_preferred_screen_index 2>/dev/null)"
+  echo "oplus_customize_screen_resolution_adjust=$(settings get secure oplus_customize_screen_resolution_adjust 2>/dev/null)"
+  echo "user_preferred_resolution_width=$(settings get global user_preferred_resolution_width 2>/dev/null)"
+  echo "user_preferred_resolution_height=$(settings get global user_preferred_resolution_height 2>/dev/null)"
+  echo "peak_refresh_rate=$(settings get system peak_refresh_rate 2>/dev/null)"
+  echo "min_refresh_rate=$(settings get system min_refresh_rate 2>/dev/null)"
+} > "$WORK/module/resolution_settings.txt" 2>/dev/null
+wm size > "$WORK/module/wm_size.txt" 2>/dev/null || true
+wm density > "$WORK/module/wm_density.txt" 2>/dev/null || true
 # pixelworks æ¸¸æå¢å¼ºéç½®å¨æï¼åæºåååä¸åï¼éè¦ç»æå¯¹æ¯ï¼
 for f in /my_product/vendor/etc/multimedia_pixelworks_game_apps.xml          /vendor/etc/multimedia_pixelworks_game_apps.xml; do
   [ -f "$f" ] && cp "$f" "$WORK/module/" 2>/dev/null && break

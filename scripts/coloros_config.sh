@@ -131,6 +131,19 @@ apply_config() {
         set_status error:post_bind_verify
         return 1
     fi
+    # 其他 zygisk 模块（如温控伪装类）可能在各进程命名空间里卸载这两个
+    # 配置文件，导致系统组件看到的刷新率/分辨率策略互相矛盾——表现为
+    # 分辨率/DPI 反复变化、屏幕闪烁。这里检测 system_server 的挂载视图：
+    # 全局挂载存在而 system_server 视图缺失，即存在卸载型冲突。
+    SS_PID=$(pidof system_server 2>/dev/null | tr ' ' '\n' | head -n 1)
+    if [ -n "$SS_PID" ] && [ -r "/proc/$SS_PID/mountinfo" ] &&
+       grep -q "my_product/etc/refresh_rate_config.xml" /proc/self/mountinfo 2>/dev/null &&
+       ! grep -q "my_product/etc/refresh_rate_config.xml" \
+           "/proc/$SS_PID/mountinfo" 2>/dev/null; then
+        set_status applied:unmount_conflict
+        log_line "conflict: another zygisk module unmounts the coloros display config in system_server; expect resolution/DPI flapping"
+        return 0
+    fi
     set_status applied:coloros_config
     return 0
 }
