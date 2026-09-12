@@ -2380,6 +2380,16 @@ case "$1" in
         fi
         ;;
 
+    "get_module_notices")
+        # WebUI 弹窗与状态页共用的模块健康提示：实时收集（与开机
+        # module_status.sh refresh 同一套检查），行数即提示数。
+        MODULE_STATUS_HELPER="$MOD_PATH/scripts/module_status.sh"
+        if [ -f "$MODULE_STATUS_HELPER" ]; then
+            sh "$MODULE_STATUS_HELPER" collect 2>/dev/null
+        fi
+        exit 0
+        ;;
+
     "get_ltpo_aod_duration")
         MODEL=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
         [ "$MODEL" = RMX5200 ] || { echo "supported=0"; exit 0; }

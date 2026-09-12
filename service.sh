@@ -28,6 +28,11 @@ until [ "$(getprop sys.boot_completed)" = "1" ]; do
     sleep 1
 done
 
+# 模块健康状态：收集错误/冲突（如显示配置被其他模块卸载）并同步到
+# module.prop 的 description，KSU 模块列表即可直接看到异常提示。
+MODULE_STATUS_HELPER="$MODDIR/scripts/module_status.sh"
+[ ! -f "$MODULE_STATUS_HELPER" ] || sh "$MODULE_STATUS_HELPER" refresh >/dev/null 2>&1 || true
+
 # 自动诊断：如果最近一次开机出现过 system_server watchdog（死机/热重启/安全
 # 模式常见诱因），或存在手动触发标记，就自动收集诊断包到 /sdcard/Download，
 # 用户无需任何操作，直接把压缩包发回来即可。

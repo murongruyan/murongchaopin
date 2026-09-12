@@ -3438,6 +3438,29 @@ function renderDisplayPolicy(policy, activePolicy = policy, busy = false, profil
     }
 }
 
+// 模块健康提示：每次 WebUI 会话最多弹一次（会话内状态变化由刷新时再次
+// 触发）。空输出 = 无异常，不打扰用户。
+let moduleNoticesShown = false;
+
+async function showModuleNoticesOnce() {
+    if (moduleNoticesShown) return;
+    moduleNoticesShown = true;
+    try {
+        const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
+        const result = await ksuExec(`sh "${scriptPath}" get_module_notices`, true);
+        const notices = (result || '')
+            .split('\n')
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0);
+        if (notices.length === 0) return;
+        await showConfirm('模块状态提示',
+            notices.join('\n\n'),
+            { okLabel: '知道了', single: true });
+    } catch (e) {
+        debugLog(`module notices load failed: ${e.message}`);
+    }
+}
+
 async function loadAdfrPolicy() {
     const control = document.getElementById('policy-card');
     if (!control) return;
@@ -5168,6 +5191,7 @@ async function initializeModuleData() {
         await runStage('display policy', loadAdfrPolicy);
         await runStage('display backend', loadDtsBackend);
         await runStage('system status', loadSystemStatus);
+        await runStage('module notices', showModuleNoticesOnce);
         authorizationRefreshedAt = Date.now();
         syncAppliedModePolling();
         moduleInitializationComplete = true;
