@@ -45,6 +45,18 @@ adfr_lock_error()
     esac
 }
 
+generic_adfr_error()
+{
+    # props 禁用方案（PLQ110/PJD110）最近一次应用失败（如 resetprop
+    # 缺失、备份失败），完美禁用 ADFR 不会生效。
+    STATUS_FILE="$MODDIR/premium/runtime/generic_adfr/status.txt"
+    [ -f "$STATUS_FILE" ] || return 1
+    case "$(sed -n '1{s/\r$//;p;q;}' "$STATUS_FILE" 2>/dev/null | tr -d '[:space:]')" in
+        error:*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 premium_payload_broken()
 {
     MANIFEST="$MODDIR/premium/manifest.json"
@@ -68,6 +80,11 @@ collect_notices()
     fi
     if adfr_lock_error; then
         printf 'ADFR 内核锁加载失败，完美禁用 ADFR 走 props 方案或不可用（详见日志页）'
+    fi
+    if generic_adfr_error; then
+        REASON=$(sed -n '1{s/\r$//;p;q;}' "$MODDIR/premium/runtime/generic_adfr/status.txt" 2>/dev/null |
+            tr -d '[:space:]')
+        printf '完美禁用 ADFR 的 props 方案应用失败（%s）；resetprop 缺失时需更换/更新 root 方案，详见日志页' "${REASON:-unknown}"
     fi
     if premium_payload_broken; then
         printf '付费组件文件缺失，请在授权页重新安装最新付费包'

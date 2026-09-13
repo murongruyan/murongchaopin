@@ -106,6 +106,28 @@ done
 } > "$WORK/module/resolution_settings.txt" 2>/dev/null
 wm size > "$WORK/module/wm_size.txt" 2>/dev/null || true
 wm density > "$WORK/module/wm_density.txt" 2>/dev/null || true
+
+# props 禁用方案现场诊断：boot_id 对比、marker 新旧、gate 实测、现场重跑 apply
+GA_DIR="$MODDIR/premium/runtime/generic_adfr"
+{
+  echo "current_boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+  echo "marker_boot_id=$(cat "$GA_DIR/active" 2>/dev/null)"
+  [ "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" = "$(cat "$GA_DIR/active" 2>/dev/null)" ] && echo marker_current=yes || echo marker_current=NO_STALE
+  ls -la "$GA_DIR" 2>/dev/null
+  echo "--- gate_check live ---"
+  . "$MODDIR/scripts/display_license_gate.sh" 2>/dev/null
+  gate_check adfr_disable >/dev/null 2>&1; echo "gate_check_adfr_rc=$?"
+  echo "--- resetprop ---"
+  command -v resetprop 2>/dev/null; ls -la /data/adb/ksu/bin/resetprop 2>/dev/null || echo no_ksu_resetprop
+  echo "--- live apply rerun ---"
+  sh "$MODDIR/premium/scripts/generic_adfr_policy.sh" apply 2>&1 | head -5
+  echo "apply_rc=$?"
+  echo "status_after=$(cat "$GA_DIR/status.txt" 2>/dev/null)"
+  echo "marker_after=$(cat "$GA_DIR/active" 2>/dev/null)"
+  echo "--- module_notices ---"
+  cat "$MODDIR/config/module_notices.txt" 2>/dev/null
+} > "$WORK/module/generic_adfr_live.txt" 2>/dev/null
+
 # pixelworks æ¸¸æå¢å¼ºéç½®å¨æï¼åæºåååä¸åï¼éè¦ç»æå¯¹æ¯ï¼
 for f in /my_product/vendor/etc/multimedia_pixelworks_game_apps.xml          /vendor/etc/multimedia_pixelworks_game_apps.xml; do
   [ -f "$f" ] && cp "$f" "$WORK/module/" 2>/dev/null && break
