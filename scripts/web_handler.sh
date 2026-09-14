@@ -2241,12 +2241,22 @@ case "$1" in
                 echo "active=adfr_off"
             elif [ "$MODEL" = RMX5200 ]; then
                 echo "active=stock_ltps"
-            elif [ -f "$PREMIUM_PATH/runtime/generic_adfr/active" ] &&
-                 [ "$(cat "$PREMIUM_PATH/runtime/generic_adfr/active" 2>/dev/null)" =
-                   "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" ]; then
-                echo "active=adfr_off"
             else
-                echo "active=stock_ltpo"
+                # props 方案：persist 属性跨重启保留，最后一次成功应用
+                # （status=active:*）即代表禁用在生效；marker 与 boot_id
+                # 一致只作为"本开机已重新写入"的优先判定，不作为唯一依据。
+                GENERIC_STATE=$(sed -n '1{s/\r$//;p;q;}' \
+                    "$PREMIUM_PATH/runtime/generic_adfr/status.txt" 2>/dev/null |
+                    tr -d '[:space:]')
+                if [ -f "$PREMIUM_PATH/runtime/generic_adfr/active" ] &&
+                   case "$GENERIC_STATE" in
+                       active:*) true ;;
+                       *) false ;;
+                   esac; then
+                    echo "active=adfr_off"
+                else
+                    echo "active=stock_ltpo"
+                fi
             fi
         fi
         ;;

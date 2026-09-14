@@ -108,6 +108,24 @@ done
 wm size > "$WORK/module/wm_size.txt" 2>/dev/null || true
 wm density > "$WORK/module/wm_density.txt" 2>/dev/null || true
 
+# UI 判定链现场证据：handler 实际输出（含 stderr）、安装版脚本指纹、
+# 语法检查、CRLF 检查——定位"待重启"误显示的关键段。
+WH="$MODDIR/scripts/web_handler.sh"
+{
+  echo "--- get_display_policy (stdout+stderr) ---"
+  sh "$WH" get_display_policy 2>&1
+  echo "--- sh -n syntax ---"
+  sh -n "$WH" 2>&1 && echo syntax_ok || echo SYNTAX_FAIL
+  echo "--- CRLF check ---"
+  head -c 400 "$WH" | od -c | grep -m1 '\r' && echo HAS_CRLF || echo no_crlf
+  echo "--- active-check fingerprint ---"
+  grep -n "generic_adfr/active" "$WH" 2>/dev/null
+  grep -c "PREMIUM_PATH/runtime/generic_adfr/active" "$WH" 2>/dev/null
+  echo "--- version ---"
+  grep -E "^(version|versionCode)=" "$MODDIR/module.prop" 2>/dev/null
+} > "$WORK/module/display_policy_live.txt" 2>/dev/null
+
+
 # props 禁用方案现场诊断：boot_id 对比、marker 新旧、gate 实测、现场重跑 apply
 GA_DIR="$MODDIR/premium/runtime/generic_adfr"
 {
