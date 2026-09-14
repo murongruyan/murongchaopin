@@ -35,6 +35,7 @@ getprop > "$WORK/props/all_props.txt" 2>/dev/null
 echo "==> module versions"
 {
   echo "free_module:"
+  grep -E "^(version|versionCode|id)=" "$MODDIR/module.prop" 2>/dev/null
   sed -n 's/^\(version\|versionCode\|id\)=/\1=/p' "$MODDIR/module.prop" 2>/dev/null
   echo "free_hook:"
   dumpsys package com.murongchaopin.displayhook 2>/dev/null | grep -E 'versionCode|versionName'
