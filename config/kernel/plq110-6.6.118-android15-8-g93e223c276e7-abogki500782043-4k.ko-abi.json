@@ -15,7 +15,7 @@
         "mutex_lock": "0xd5977bfb",
         "mutex_unlock": "0xed55cabd",
         "drm_kms_helper_hotplug_event": "0x2608ea51",
-        "kfree": "0x37a0cba",
+        "kfree": "0x037a0cba",
         "fortify_panic": "0xcbd4898c",
         "strncmp": "0x5a921311",
         "kmalloc_large": "0x9ed12e20",
