@@ -92,14 +92,16 @@
         "kthread_stop": "0xd2ef8b35",
         "msleep_interruptible": "0xcc5005fe",
         "scnprintf": "0x96848186",
-        "kstrtoint": "0x8c8569cb",
-        "kstrtouint": "0x3b6c41ea"
+        "kstrtouint": "0x3b6c41ea",
+        "fortify_panic": "0xcbd4898c",
+        "strnlen": "0xa916b694"
       },
       "imports": [
         "__stack_chk_fail",
         "_printk",
         "filp_close",
         "filp_open_block",
+        "fortify_panic",
         "kernel_read",
         "kernel_write",
         "kstrtobool",
@@ -107,11 +109,13 @@
         "kthread_create_on_node",
         "kthread_should_stop",
         "kthread_stop",
+        "msleep_interruptible",
         "mutex_lock",
         "mutex_unlock",
         "param_ops_bool",
         "param_ops_uint",
         "scnprintf",
+        "strnlen",
         "wake_up_process"
       ],
       "extended_modversions": false
