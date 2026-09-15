@@ -49,9 +49,9 @@ const DEVICE_DISPLAY_PROFILES = {
         tiers: [[166, 'overclock', '超出原厂档位：170-199 为模块扩展档']]
     },
     PLQ110: {
-        stockMax: 120, ocBoundary: 120, specialOc: [],
-        lowLabel: '1080P (FHD+)', highLabel: '1.5K (1272x2800)',
-        tiers: [[121, 'overclock', '超出原厂档位：170-199 为模块扩展档']]
+        stockMax: 165, ocBoundary: 165, specialOc: [],
+        lowLabel: '1080P (FHD+)', highLabel: '1.5K (1272x2800)', adfrCap: true,
+        tiers: [[166, 'overclock', '超出原厂档位：170-199 需启用 ADFR']]
     },
     PJD110: {
         stockMax: 120, ocBoundary: 122, specialOc: [],
@@ -4243,6 +4243,17 @@ async function uninstallModule() {
 // ============================================================
 // 刷新率页：分辨率 / 模式 / 应用独立配置
 // ============================================================
+function adfrCapWarning(rate) {
+    // 完美禁用 ADFR 时面板被钳制在原厂上限：Ace6 的 170-199 属于 ADFR
+    // 拉升档，禁用 ADFR 后这些档位无法生效（面板回落到原生最高 165Hz）。
+    const profile = deviceDisplayProfile();
+    if (profile.stockMax !== 165 || !profile.adfrCap)
+        return null;
+    return rate > profile.stockMax
+        ? `完美禁用 ADFR 时面板最高 ${profile.stockMax}Hz；${rate}Hz 需要启用 ADFR（切换为原厂 LTPO 后可用）`
+        : null;
+}
+
 async function changeResolution(width) {
     if (globalModeWriteBusy) {
         showToast("正在切换，请稍候");
@@ -4437,6 +4448,11 @@ async function commitGlobalMode(previousMode = currentMode,
         return;
     }
     if (globalModeWriteBusy) return;
+    const modeObj = displayModes.find(mode => mode.id === currentMode);
+    const capWarn = modeObj ? adfrCapWarning(modeObj.fps) : null;
+    if (capWarn) {
+        await showConfirm('策略与刷新率冲突', capWarn, { okLabel: '知道了', single: true });
+    }
     globalModeWriteBusy = true;
     const requestedMode = currentMode;
     showToast(resolutionChange ? "正在切换分辨率…" : "正在切换刷新率…");
