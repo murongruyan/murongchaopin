@@ -134,6 +134,12 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
+        with:
+          # Google retired the legacy "tools" package; the action's default
+          # package list still requests it and now fails with
+          # "Failed to find package 'tools'". Everything this workflow needs
+          # (NDK, platform, build-tools) is installed explicitly below.
+          packages: 'platform-tools'
 
       - name: Set up JDK 26 for Hook APK build
         uses: actions/setup-java@v5
