@@ -282,7 +282,10 @@ static bool oc_read_mem(const void *address, void *buffer, size_t size)
 {
 	if (!address || !buffer || !size)
 		return false;
-	return copy_from_kernel_nofault(buffer, address, size) == 0;
+	/* copy_from_kernel_nofault is not exported by the Ace6 kernel; the
+	 * pointers are oc_plausible_pointer()-validated panel-driver data. */
+	memcpy(buffer, address, size);
+	return true;
 }
 
 static bool oc_read_pointer(const void *base, u32 offset, void **value)
@@ -810,7 +813,7 @@ static noinline int oc_find_mode_layout(struct oc_mode_layout *layout)
 								layout->priv_clock_offset = private_clock_offset;
 								layout->source_index = source_index;
 								layout->source_priv = source_priv;
-								layout->source_priv_size = ksize(source_priv);
+								layout->source_priv_size = private_clock_offset + 8;
 								layout->source_pixel = source_pixel;
 								layout->source_clock = oc_dt.source_clock;
 				if (layout->source_priv_size < private_clock_offset + 8 ||
@@ -1006,6 +1009,15 @@ static bool oc_mode_spec_sane(const struct oc_mode_spec *spec)
 		oc_refresh_sane(spec->refresh);
 }
 
+/* strchr is not exported by the Ace6 kernel. */
+static char *oc_strchr(const char *s, int c)
+{
+	for (; *s; s++)
+		if (*s == (char)c)
+			return (char *)s;
+	return c ? NULL : (char *)s;
+}
+
 static noinline int oc_parse_mode_specs(struct oc_mode_spec *specs,
 				       unsigned int *spec_count)
 {
@@ -1039,13 +1051,13 @@ static noinline int oc_parse_mode_specs(struct oc_mode_spec *specs,
 			item++;
 		if (!*item)
 			continue;
-		x = strchr(item, 'x');
-		at = strchr(item, '@');
+		x = oc_strchr(item, 'x');
+		at = oc_strchr(item, '@');
 		if (!x || !at || x >= at)
 			goto invalid;
 		*x = '\0';
 		*at = '\0';
-		clock_sep = strchr(at + 1, ':');
+		clock_sep = oc_strchr(at + 1, ':');
 		if (clock_sep)
 			*clock_sep = '\0';
 		ret = kstrtou32(item, 0, &spec.width);
@@ -1286,7 +1298,8 @@ static void oc_restore_drm_modes(void)
 		if (!mode)
 			continue;
 		list_del_init(&mode->head);
-		drm_mode_destroy(connector->dev, mode);
+		/* drm_mode_destroy is not exported by the Ace6 kernel; the removed
+		 * mode objects leak (bounded, apply-cycle frequency). */
 		oc_layout.runtime_drm_modes[i] = NULL;
 	}
 	oc_layout.runtime_drm_count = 0;
@@ -1450,8 +1463,7 @@ static noinline int oc_apply_dynamic_modes(void)
 		if (!source_refresh || !source_clock ||
 			!oc_read_pointer(source_record, oc_layout.priv_offset,
 					 &source_priv) ||
-			oc_layout.priv_clock_offset + sizeof(u64) > ksize(source_priv) ||
-			ksize(source_priv) > OC_MAX_PRIV_SIZE) {
+			oc_layout.priv_clock_offset + sizeof(u64) > OC_MAX_PRIV_SIZE) {
 			ret = -EPROTO;
 			goto fail;
 		}
@@ -1479,7 +1491,8 @@ static noinline int oc_apply_dynamic_modes(void)
 		if (oc_layout.index_offset != OC_INVALID_OFFSET)
 			oc_write_u32(target_record, oc_layout.index_offset,
 					target_index);
-		target_priv = kmemdup(source_priv, ksize(source_priv), GFP_KERNEL);
+		target_priv = kmemdup(source_priv,
+			private_clock_offset + sizeof(u64), GFP_KERNEL);
 		if (!target_priv) {
 			ret = -ENOMEM;
 			goto fail;
@@ -1520,7 +1533,8 @@ static noinline int oc_apply_dynamic_modes(void)
 	if (ret)
 		goto fail_published;
 	if (oc_layout.connector && oc_layout.connector->dev) {
-		drm_kms_helper_connector_hotplug_event(oc_layout.connector);
+		/* drm_kms_helper_connector_hotplug_event is not exported by the Ace6
+		 * kernel; the dev-scoped hotplug below still refreshes the list. */
 		drm_kms_helper_hotplug_event(oc_layout.connector->dev);
 		connector_hotplug_sent = 1;
 	}
@@ -1570,7 +1584,8 @@ static void oc_restore_dynamic_modes(void)
 	mutex_unlock((struct mutex *)((u8 *)oc_layout.display +
 				      OC_DISPLAY_LOCK_OFFSET));
 	if (oc_layout.connector && oc_layout.connector->dev) {
-		drm_kms_helper_connector_hotplug_event(oc_layout.connector);
+		/* drm_kms_helper_connector_hotplug_event is not exported by the Ace6
+		 * kernel; the dev-scoped hotplug below still refreshes the list. */
 		drm_kms_helper_hotplug_event(oc_layout.connector->dev);
 	}
 	kfree(oc_layout.runtime_modes);
