@@ -108,6 +108,24 @@ done
 wm size > "$WORK/module/wm_size.txt" 2>/dev/null || true
 wm density > "$WORK/module/wm_density.txt" 2>/dev/null || true
 
+# UI 判定链现场证据：handler 实际输出（含 stderr）、安装版脚本指纹、
+# 语法检查、CRLF 检查——定位"待重启"误显示的关键段。
+WH="$MODDIR/scripts/web_handler.sh"
+{
+  echo "--- get_display_policy (stdout+stderr) ---"
+  sh "$WH" get_display_policy 2>&1
+  echo "--- sh -n syntax ---"
+  sh -n "$WH" 2>&1 && echo syntax_ok || echo SYNTAX_FAIL
+  echo "--- CRLF check ---"
+  head -c 400 "$WH" | od -c | grep -m1 '\r' && echo HAS_CRLF || echo no_crlf
+  echo "--- active-check fingerprint ---"
+  grep -n "generic_adfr/active" "$WH" 2>/dev/null
+  grep -c "PREMIUM_PATH/runtime/generic_adfr/active" "$WH" 2>/dev/null
+  echo "--- version ---"
+  grep -E "^(version|versionCode)=" "$MODDIR/module.prop" 2>/dev/null
+} > "$WORK/module/display_policy_live.txt" 2>/dev/null
+
+
 # props 禁用方案现场诊断：boot_id 对比、marker 新旧、gate 实测、现场重跑 apply
 GA_DIR="$MODDIR/premium/runtime/generic_adfr"
 {
@@ -177,6 +195,53 @@ done
   done
 } > "$WORK/module/display_backend/drm_params.txt" 2>/dev/null
 ls -la "$MODDIR/runtime/" > "$WORK/module/display_backend/runtime_listing.txt" 2>/dev/null
+
+echo "===> kcore CRC extractor (definitive: reads __kcrctab from live kernel)"
+KC=/proc/kcore
+KS=/proc/kallsyms
+NEED_SYMS="module_layout memset _printk copy_from_kernel_nofault ksize strchr drm_mode_destroy drm_kms_helper_connector_hotplug_event drm_kms_helper_hotplug_event of_find_node_by_name of_get_property param_get_bool param_ops_ulong param_ops_uint param_ops_ullong param_ops_string param_ops_bool register_kprobe unregister_kprobe kstrtobool kstrtouint kstrtoull mutex_lock mutex_unlock __kmalloc kfree memcpy kmemdup"
+if [ ! -r "$KC" ]; then echo "kcore_unreadable"; else
+  echo "kptr_restrict=$(cat /proc/sys/kernel/kptr_restrict 2>/dev/null)"
+  PHOFF=$(od -An -tu8 -j32 -N8 "$KC" 2>/dev/null | tr -d " ")
+  PHENT=$(od -An -tu2 -j54 -N2 "$KC" 2>/dev/null | tr -d " ")
+  PHNUM=$(od -An -tu2 -j56 -N2 "$KC" 2>/dev/null | tr -d " ")
+  echo "kcore phoff=$PHOFF phent=$PHENT phnum=$PHNUM"
+  read_kcore32()
+  {
+    AHEX=$1; VAL=""
+    i=0
+    while [ "$i" -lt "$PHNUM" ]; do
+      PO=$(($PHOFF + i * $PHENT))
+      PT=$(od -An -tu4 -j"$PO" -N4 "$KC" 2>/dev/null | tr -d " ")
+      if [ "$PT" = "1" ]; then
+        POFF=$(od -An -tx8 -j$((PO + 8)) -N8 "$KC" 2>/dev/null | tr -d " ")
+        PV=$(od -An -tx8 -j$((PO + 16)) -N8 "$KC" 2>/dev/null | tr -d " ")
+        PSZ=$(od -An -tu8 -j$((PO + 32)) -N8 "$KC" 2>/dev/null | tr -d " ")
+        if [ "${AHEX}" \> "${PV}" ] && [ "${AHEX}" != "${PV}" ]; then
+          case "$AHEX" in "$PV"*) ;; esac
+        fi
+        if [ "$AHEX" \> "$PV" ] 2>/dev/null || [ "$AHEX" = "$PV" ]; then
+          D=$(($AHEX - 16#$PV))
+          if [ "$D" -ge 0 ] && [ "$D" -lt "$PSZ" ]; then
+            VAL=$(od -An -tx1 -j$(($POFF + D)) -N4 "$KC" 2>/dev/null | tr -d " 
+")
+            break
+          fi
+        fi
+      fi
+      i=$((i + 1))
+    done
+    echo "$VAL"
+  }
+  for sym in $NEED_SYMS; do
+    AHEX=$(grep -w "__crc_$sym" "$KS" 2>/dev/null | head -1 | cut -d" " -f1)
+    case "$AHEX" in ""|*[*!-]*) echo "$sym: kallsyms_no_addr"; continue;; esac
+    while [ ${#AHEX} -lt 16 ]; do AHEX="0$AHEX"; done
+    V=$(read_kcore32 "$AHEX")
+    case "$V" in "") echo "$sym: kcore_read_fail"; continue;; esac
+    echo "$sym: kcrc_bytes=$V"
+  done
+fi
 
 echo "===> pstore (persist kernel console)"
 mkdir -p "$WORK/pstore"
