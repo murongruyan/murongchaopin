@@ -75,3 +75,4 @@ docs/付费组件拆分基线.md
 docs/baselines/
 packaging/build_paid_package.ps1
 packaging/feature-components.json
+.gradle-home/

@@ -32,6 +32,38 @@ let appConfigs = {};
 let allPackages = [];
 let appLabels = {};
 let currentResolutionWidth = 1080;
+
+// 每机型显示参数：原厂最高刷新率、超频判定边界、分辨率档位标签、
+// 风险分档文案。阈值与警告来自对应机型实测，禁止跨机型复用。
+const DEVICE_DISPLAY_PROFILES = {
+    RMX5200: {
+        stockMax: 120, ocBoundary: 144, specialOc: [123],
+        lowLabel: '1080P (FHD+)', highLabel: '2K (QHD+)',
+        tiers: [[180, 'critical', '严重风险：GT8 Pro 样机实测大面积花屏'],
+                [175, 'edge', '边缘档：GT8 Pro 样机实测有细线花屏'],
+                [170, 'high', '超出原厂档位：请按屏幕体质测试']]
+    },
+    PLK110: {
+        stockMax: 165, ocBoundary: 165, specialOc: [],
+        lowLabel: '1080P (FHD+)', highLabel: '2K (QHD+)',
+        tiers: [[166, 'overclock', '超出原厂档位：170-199 为模块扩展档']]
+    },
+    PLQ110: {
+        stockMax: 120, ocBoundary: 120, specialOc: [],
+        lowLabel: '1080P (FHD+)', highLabel: '1.5K (1272x2800)',
+        tiers: [[121, 'overclock', '超出原厂档位：170-199 为模块扩展档']]
+    },
+    PJD110: {
+        stockMax: 120, ocBoundary: 122, specialOc: [],
+        lowLabel: '1080P (FHD+)', highLabel: '2K (QHD+)',
+        tiers: [[123, 'overclock', '超出原厂档位']]
+    }
+};
+
+function deviceDisplayProfile() {
+    const model = String(deviceInfo?.device_model || '').toUpperCase();
+    return DEVICE_DISPLAY_PROFILES[model] || DEVICE_DISPLAY_PROFILES.RMX5200;
+}
 let globalModeWriteBusy = false;
 let currentDtsBackend = 'dtbo';
 let dtsBackendBusy = false;
@@ -337,13 +369,15 @@ function resolutionLabel(width, height) {
     const numericWidth = Number(width);
     const numericHeight = Number(height) || (displayModes.find(mode => mode.width === numericWidth) || {}).height;
     const widths = [...new Set(displayModes.map(mode => Number(mode.width)).filter(value => value > 0))].sort((left, right) => left - right);
-    if (numericHeight > 0 && numericWidth !== 1080 && numericWidth !== 1440 &&
-        numericWidth !== widths[0] && numericWidth !== widths[widths.length - 1]) {
+    const profile = deviceDisplayProfile();
+    const highWidth = widths[widths.length - 1] || 0;
+    const lowWidth = widths[0] || 0;
+    if (numericHeight > 0 && numericWidth !== lowWidth && numericWidth !== highWidth) {
         return `${numericWidth}x${numericHeight}`;
     }
-    if (numericWidth === widths[widths.length - 1] && widths.length > 1) return '2K (QHD+)';
-    if (numericWidth === widths[0] && widths.length > 1) return '1080P (FHD+)';
-    return numericWidth >= 1200 ? '2K (QHD+)' : '1080P (FHD+)';
+    if (numericWidth === highWidth && widths.length > 1) return profile.highLabel;
+    if (numericWidth === lowWidth && widths.length > 1) return profile.lowLabel;
+    return numericWidth >= (lowWidth + highWidth) / 2 ? profile.highLabel : profile.lowLabel;
 }
 
 function availableResolutionWidths() {
@@ -415,10 +449,12 @@ function videoMotionTargetLabel(rate) {
 }
 
 function nodeStability(fps) {
-    if (fps >= 180) return { level: 'critical', text: '严重风险' };
-    if (fps >= 175) return { level: 'edge', text: '边缘档' };
-    if (fps >= 170) return { level: 'high', text: '超出原厂档' };
-    if (fps === 123 || fps > 144) return { level: 'overclock', text: '超频档' };
+    const profile = deviceDisplayProfile();
+    for (const [threshold, level, text] of profile.tiers) {
+        if (fps >= threshold) return { level, text };
+    }
+    if (profile.specialOc.includes(fps) || fps > profile.ocBoundary)
+        return { level: 'overclock', text: '超频档' };
     return { level: 'safe', text: '稳定' };
 }
 
@@ -4009,7 +4045,7 @@ async function runApplyChanges() {
         term.log("  1. 校验 RMX5200 Qualcomm DRM injector", 'info');
         term.log("  2. 重启时按运行时档位自动加载 DRM-KO", 'info');
         term.log("  3. 从原厂基线写入仅含风驰节点的兼容 DTBO", 'info');
-        term.log("  4. DTBO 不写高刷 timing；1080p 144Hz 与 WQHD 保留", 'info');
+        term.log("  4. DTBO 不写高刷 timing；原厂档位全部保留", 'info');
     } else {
         term.log("  1. 打包 new_dtbo.img（合并所有修改）", 'info');
         term.log("  2. 合并官方 AVB 信息", 'info');
@@ -4080,7 +4116,7 @@ async function runFlashDtbo(customRate) {
         term.log("  2. 校验 RMX5200 Qualcomm DRM injector", 'info');
         term.log("  3. 重启时按运行时档位自动加载 DRM-KO", 'info');
         term.log("  4. 从原厂基线写入仅含风驰节点的兼容 DTBO", 'info');
-        term.log("  5. DTBO 不写高刷 timing；1080p 144Hz 与 WQHD 保留", 'info');
+        term.log("  5. DTBO 不写高刷 timing；原厂档位全部保留", 'info');
     } else {
         term.log("  2. 打包 new_dtbo.img", 'info');
         term.log("  3. 合并官方 AVB 签名（免解锁）", 'info');
@@ -4238,6 +4274,12 @@ async function changeResolution(width) {
 }
 
 function renderResolutionSeg() {
+    const profile = deviceDisplayProfile();
+    const widths = availableResolutionWidths();
+    const low = document.getElementById('btn-res-1080');
+    const high = document.getElementById('btn-res-1440');
+    if (low && widths[0]) low.innerText = profile.lowLabel;
+    if (high && widths[widths.length - 1]) high.innerText = profile.highLabel;
     ['1080', '1440'].forEach(w => {
         const btn = document.getElementById(`btn-res-${w}`);
         if (btn) btn.classList.toggle('active', currentResolutionWidth === effectiveResolutionWidth(Number(w)));
@@ -4359,16 +4401,11 @@ function renderDisplayModes() {
         const item = document.createElement('div');
         const isSelected = mode.id === currentMode;
         const isApplied = mode.id === appliedMode;
-        const risk = mode.fps >= 180
-            ? '严重风险：RMX5200 样机实测大面积花屏'
-            : mode.fps >= 175
-                ? '边缘档：RMX5200 样机实测有细线花屏'
-                : mode.fps >= 170
-                    ? '超出原厂档位：请按屏幕体质测试'
-                    : '';
+        const tier = nodeStability(mode.fps);
+        const risk = tier.level === 'safe' ? '' : `${tier.text}`;
         item.className = `mode-item ${isSelected ? 'selected' : ''}`;
         item.onclick = () => selectMode(mode.id);
-        const origin = mode.fps === 123 || mode.fps > 144 ? '超频' : '原生';
+        const origin = nodeStability(mode.fps).level === 'safe' ? '原生' : '超频';
         item.innerHTML = `
             <div class="mode-fps">${mode.fps}Hz</div>
             ${risk ? `<div class="mode-risk">${risk}</div>` : ''}
