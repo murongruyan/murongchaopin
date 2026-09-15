@@ -97,20 +97,27 @@
         "kthread_stop": "0xd2ef8b35",
         "msleep_interruptible": "0xcc5005fe",
         "scnprintf": "0x96848186",
-        "kstrtoint": "0x8c8569cb"
+        "kstrtoint": "0x8c8569cb",
+        "kstrtouint": "0x3b6c41ea"
       },
       "imports": [
         "__stack_chk_fail",
         "_printk",
+        "filp_close",
+        "filp_open_block",
+        "kernel_read",
+        "kernel_write",
         "kstrtobool",
+        "kstrtouint",
+        "kthread_create_on_node",
+        "kthread_should_stop",
+        "kthread_stop",
         "mutex_lock",
         "mutex_unlock",
-        "param_get_bool",
         "param_ops_bool",
         "param_ops_uint",
-        "param_ops_ulong",
-        "register_kprobe",
-        "unregister_kprobe"
+        "scnprintf",
+        "wake_up_process"
       ],
       "extended_modversions": false
     }

@@ -1492,7 +1492,7 @@ static noinline int oc_apply_dynamic_modes(void)
 			oc_write_u32(target_record, oc_layout.index_offset,
 					target_index);
 		target_priv = kmemdup(source_priv,
-			private_clock_offset + sizeof(u64), GFP_KERNEL);
+			oc_layout.priv_clock_offset + sizeof(u64), GFP_KERNEL);
 		if (!target_priv) {
 			ret = -ENOMEM;
 			goto fail;
