@@ -150,6 +150,13 @@
                         <div id="mode-list" class="mode-grid">
                             <div class="loading">正在加载显示模式…</div>
                         </div>
+
+                        <div class="card-head">
+                            <span class="card-title">面板实测</span>
+                            <span id="panel-rate-status" class="status-badge">未实测</span>
+                        </div>
+                        <p class="text-hint">按应用逐帧回调实测当前档位真正交付的刷新率（与 Chrome TestUFO 同一原理）。请求高于面板时序表上限的档位会在这里暴露实际值。</p>
+                        <button id="btn-probe-rate" class="btn btn-primary btn-block" type="button">实测当前刷新率</button>
                     </div>
                 </div>
 

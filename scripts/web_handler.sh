@@ -2466,6 +2466,25 @@ case "$1" in
         echo "Success: event logged"
         ;;
 
+    "panel_rate_probe")
+        # WebUI 逐帧实测结果落盘，供日志脚本取证：请求值 / 实测值 / 档位 id。
+        case "$2" in
+            ''|*[!0-9]*) echo "Error: invalid requested rate"; exit 1 ;;
+        esac
+        case "$3" in
+            ''|*[!0-9]*) echo "Error: invalid measured rate"; exit 1 ;;
+        esac
+        mkdir -p "$MOD_PATH/runtime" 2>/dev/null
+        {
+            printf 'time=%s\n' "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+            printf 'requested_hz=%s\n' "$2"
+            printf 'measured_hz=%s\n' "$3"
+            printf 'mode_id=%s\n' "${4:-}"
+            printf 'model=%s\n' "$(getprop ro.product.vendor.model 2>/dev/null)"
+        } > "$MOD_PATH/runtime/panel_rate_probe.txt" 2>/dev/null
+        echo "Success: panel rate probe recorded"
+        ;;
+
     "get_ltpo_daily_idle")
         MODEL=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
         [ "$MODEL" = RMX5200 ] || { echo "supported=0"; exit 0; }

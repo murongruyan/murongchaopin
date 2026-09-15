@@ -176,6 +176,32 @@ done
   echo "oplus_display_nodes:"; ls /sys/kernel/oplus_display/ 2>/dev/null | head -40
 } > "$WORK/module/premium_config/probe.txt" 2>/dev/null
 
+# 面板真实档位取证：DT 里声明了哪些 timing（模块扩展档是 AP 侧克隆节点），
+# 以及厂端/框架各自报的刷新率，用来区分「面板没跟上」和「框架把应用限流」。
+{
+  echo "--- oplus_display nodes (full) ---"
+  ls /sys/kernel/oplus_display/ 2>/dev/null
+  echo "--- oplus_display sysfs live ---"
+  for n in adfr_config min_fps dump_info test_te test_te_config dynamic_float_te \
+           dynamic_osc_clock panel_id esd_status power_status; do
+    printf '%s=' "$n"
+    cat "/sys/kernel/oplus_display/$n" 2>&1 | head -2
+    echo
+  done
+  echo "--- declared panel timings in the applied DT ---"
+  for f in /proc/device-tree/fragment@*/__overlay__/*/qcom,mdss-dsi-display-timings \
+           /proc/device-tree/soc/*/qcom,mdss-dsi-display-timings; do
+    [ -d "$f" ] || continue
+    echo "$f: $(ls "$f" 2>/dev/null | tr '\n' ' ')"
+  done
+  echo "--- WebUI rAF probe (requested/measured Hz) ---"
+  cat "$MODDIR/runtime/panel_rate_probe.txt" 2>/dev/null || echo "no-probe"
+  echo "--- SurfaceFlinger display modes ---"
+  dumpsys SurfaceFlinger 2>/dev/null | grep -E "activeMode=|\{id=.*vsyncRate" | head -40
+  echo "--- RefreshRateSelector policy (app-visible ranges) ---"
+  dumpsys SurfaceFlinger 2>/dev/null | grep -E "RefreshRateSelector|Ranges|renderRate" | tail -25
+} > "$WORK/display/panel_rate.txt" 2>/dev/null
+
 echo "===> xml/files probe (game config discovery)"
 for d in /my_product/vendor/etc /my_product/etc /vendor/etc /odm/etc /odm/vendor/etc /data/system; do
     ls -la "$d" 2>/dev/null | grep -iE "xml" | sed "s|^|$d/|" >> "$WORK/module/premium_config/probe.txt"

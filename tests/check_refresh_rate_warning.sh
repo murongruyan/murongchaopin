@@ -12,10 +12,18 @@ CSS="${3:-webroot/css/style.css}"
 
 grep -q 'refresh-risk-notice' "$HTML"
 grep -q '开机第一段和第二段动画交界处' "$HTML"
-grep -q 'mode.fps >= 180' "$JS"
-grep -q 'mode.fps >= 175' "$JS"
-grep -q 'mode.fps >= 170' "$JS"
 grep -q 'mode-risk' "$CSS"
+
+# Tiers are model-driven now: the renderer must read the per-model profile
+# instead of the retired hardcoded GT8 Pro thresholds.
+grep -q 'for (const \[threshold, level, text\] of profile.tiers)' "$JS"
+grep -q 'profile.specialOc.includes(fps) || fps > profile.ocBoundary' "$JS"
+
+# Rates above the panel's own timing table must be reported by measurement,
+# not asserted by the mode write.
+grep -q 'panelCeiling' "$JS"
+grep -q 'panel-rate-status' "$HTML"
+grep -q 'btn-probe-rate' "$JS"
 
 # The warning is additive: the renderer must continue iterating every mode.
 grep -q 'filteredModes.forEach' "$JS"

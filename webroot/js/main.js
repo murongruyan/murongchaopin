@@ -49,9 +49,13 @@ const DEVICE_DISPLAY_PROFILES = {
         tiers: [[166, 'overclock', '超出原厂档位：170-199 为模块扩展档']]
     },
     PLQ110: {
-        stockMax: 165, ocBoundary: 165, specialOc: [],
-        lowLabel: '1080P (FHD+)', highLabel: '1.5K (1272x2800)', adfrCap: true,
-        tiers: [[166, 'overclock', '超出原厂档位：170-199 需启用 ADFR']]
+        // 一加 Ace 6（PLQ110）面板 AA605_P_7_A0020：原厂 DTBO 只有
+        // 60/90/120/144/165 五个 timing，165Hz 就是面板时序表的上限。
+        // 170-199 是模块用 165Hz 节点复制出来的 AP 侧时序，面板侧没有
+        // 对应档位命令，实测仍停在 165Hz（与 ADFR / 原厂 LTPO 无关）。
+        stockMax: 165, ocBoundary: 165, specialOc: [], panelCeiling: 165,
+        lowLabel: '1080P (FHD+)', highLabel: '1.5K (1272x2800)',
+        tiers: [[166, 'overclock', 'AP 时序档：面板时序表最高 165Hz']]
     },
     PJD110: {
         stockMax: 120, ocBoundary: 122, specialOc: [],
@@ -4243,15 +4247,96 @@ async function uninstallModule() {
 // ============================================================
 // 刷新率页：分辨率 / 模式 / 应用独立配置
 // ============================================================
-function adfrCapWarning(rate) {
-    // 完美禁用 ADFR 时面板被钳制在原厂上限：Ace6 的 170-199 属于 ADFR
-    // 拉升档，禁用 ADFR 后这些档位无法生效（面板回落到原生最高 165Hz）。
+// 面板时序表上限：来自机型原厂 DTBO 的 panel timing 节点，禁止跨机型复用。
+function panelRateCeiling() {
     const profile = deviceDisplayProfile();
-    if (profile.stockMax !== 165 || !profile.adfrCap)
-        return null;
-    return rate > profile.stockMax
-        ? `完美禁用 ADFR 时面板最高 ${profile.stockMax}Hz；${rate}Hz 需要启用 ADFR（切换为原厂 LTPO 后可用）`
-        : null;
+    return Number.isFinite(profile.panelCeiling) ? profile.panelCeiling : null;
+}
+
+// 高于面板时序表上限的档位只改 AP 侧 DSI 时序（panel-clockrate /
+// framerate / mdp-transfer-time），面板拿不到对应档位命令，实测仍停在原厂
+// 上限。ADFR / 原厂 LTPO 只影响自适应与空闲降档，无法凭空造出面板档位。
+function panelCeilingNotice(rate, measured) {
+    const ceiling = panelRateCeiling();
+    if (!ceiling || !(rate > ceiling)) return null;
+    const measuredText = measured > 0 ? `，当前实测 ${measured}Hz` : '';
+    return `本机面板时序表最高 ${ceiling}Hz（原厂只有 60/90/120/144/165）。`
+        + `${rate}Hz 档位只改变 AP 侧时序，面板仍按 ${ceiling}Hz 扫描`
+        + `${measuredText}；这与「完美禁用 ADFR」无关，切回原厂 LTPO 也不会出现 ${rate}Hz。`;
+}
+
+let measuredRefreshRate = 0;
+let refreshProbeBusy = false;
+
+function refreshRateFromIntervals(intervals) {
+    const samples = intervals
+        .filter(value => Number.isFinite(value) && value > 2 && value < 200)
+        .sort((a, b) => a - b);
+    if (samples.length < 20) return 0;
+    // 丢两端 10% 抖动，取中位间隔换算刷新率。
+    const cut = Math.floor(samples.length * 0.1);
+    const trimmed = samples.slice(cut, samples.length - cut);
+    const median = trimmed[Math.floor(trimmed.length / 2)];
+    if (!median) return 0;
+    return Math.round(1000 / median);
+}
+
+// 与 Chrome TestUFO 同一原理：统计 requestAnimationFrame 的逐帧间隔，
+// 得到应用实际拿到的刷新率（面板没跟上时这里会露馅）。
+function measureRefreshRate(durationMs = 1200) {
+    return new Promise(resolve => {
+        const intervals = [];
+        let previous = 0;
+        const started = performance.now();
+        const step = timestamp => {
+            if (previous > 0) intervals.push(timestamp - previous);
+            previous = timestamp;
+            if (timestamp - started < durationMs) {
+                requestAnimationFrame(step);
+                return;
+            }
+            resolve(refreshRateFromIntervals(intervals));
+        };
+        requestAnimationFrame(step);
+    });
+}
+
+function renderPanelRateStatus(text) {
+    const badge = document.getElementById('panel-rate-status');
+    if (badge) badge.textContent = text;
+}
+
+async function probeRefreshRate() {
+    if (refreshProbeBusy) return measuredRefreshRate;
+    refreshProbeBusy = true;
+    renderPanelRateStatus('实测中…');
+    try {
+        await new Promise(resolve =>
+            requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const rate = await measureRefreshRate();
+        measuredRefreshRate = rate;
+        renderPanelRateStatus(rate > 0 ? `实测 ${rate}Hz` : '实测失败');
+        const modeObj = displayModes.find(mode => mode.id === currentMode);
+        const requested = modeObj ? modeObj.fps : 0;
+        debugLog(`refresh probe: requested=${requested}Hz measured=${rate}Hz`);
+        // 落盘给日志脚本取证：用户跑一次实测，反馈包里就带着面板真实档位。
+        if (rate > 0 && requested > 0) {
+            ksuExec(`sh "${MOD_DIR}/scripts/web_handler.sh" panel_rate_probe `
+                + `"${requested}" "${rate}" "${currentMode}"`, true)
+                .catch(error => debugLog(`panel rate probe record failed: ${error.message}`));
+        }
+        if (rate > 0) {
+            const notice = panelCeilingNotice(requested, rate);
+            await showConfirm('实测刷新率',
+                `请求 ${requested}Hz，实测 ${rate}Hz。` +
+                (notice ? `\n\n${notice}`
+                        : '\n\n实测与请求一致，该档位在本机生效。'),
+                { okLabel: '知道了', single: true });
+        }
+        return rate;
+    } finally {
+        refreshProbeBusy = false;
+    }
 }
 
 async function changeResolution(width) {
@@ -4449,9 +4534,11 @@ async function commitGlobalMode(previousMode = currentMode,
     }
     if (globalModeWriteBusy) return;
     const modeObj = displayModes.find(mode => mode.id === currentMode);
-    const capWarn = modeObj ? adfrCapWarning(modeObj.fps) : null;
+    const capWarn = modeObj
+        ? panelCeilingNotice(modeObj.fps, 0) : null;
     if (capWarn) {
-        await showConfirm('策略与刷新率冲突', capWarn, { okLabel: '知道了', single: true });
+        await showConfirm('超出面板时序表', capWarn,
+            { okLabel: '继续切换', single: true });
     }
     globalModeWriteBusy = true;
     const requestedMode = currentMode;
@@ -4473,6 +4560,13 @@ async function commitGlobalMode(previousMode = currentMode,
             // lightweight config poll still catches an external change.
             refreshAppliedMode().catch(error =>
                 debugLog(`mode confirmation failed: ${error.message}`));
+            // 档位高过面板时序表上限时不靠日志自证：直接实测应用侧帧率，
+            // 把「面板实际跑多少」摆到界面上。
+            if (!resolutionChange && requestedModeObj
+                    && panelCeilingNotice(requestedModeObj.fps, 0)) {
+                probeRefreshRate().catch(error =>
+                    debugLog(`refresh probe failed: ${error.message}`));
+            }
         } else {
             currentMode = previousMode;
             currentResolutionWidth = previousWidth;
@@ -5060,6 +5154,7 @@ function bindStaticEvents() {
     safeBind('btn-add-rate', 'onclick', openAddRateDialog);
     safeBind('btn-res-1080', 'onclick', () => changeResolution(1080));
     safeBind('btn-res-1440', 'onclick', () => changeResolution(1440));
+    safeBind('btn-probe-rate', 'onclick', () => probeRefreshRate());
     safeBind('app-search', 'oninput', filterAppList);
     safeBind('show-system-apps', 'onchange', toggleSystemApps);
     safeBind('btn-save-video-target', 'onclick', saveVideoMotionTarget);
