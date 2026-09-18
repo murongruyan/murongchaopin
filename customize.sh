@@ -436,6 +436,20 @@ case "$DTBO_ROUTE" in
 
     # 5. 执行选择的显示后端流程（DRM-KO 不向 DTBO 写高刷 timing）
     if [ "$SKIP_DISPLAY_BACKEND" = 0 ]; then
+    # 安装阶段必须保证能开机：PLQ110 的 DRM 注入 KO（未真机验证 + 内核
+    # panic_on_oops）不在刷机界面提供，选到也自动改回 DTBO；实验入口只在
+    # WebUI（有风险确认 + 开机自保护）。
+    if [ "$INSTALL_BACKEND" = "drm" ]; then
+      INSTALL_MODEL=$(getprop ro.product.vendor.model 2>/dev/null |
+        sed 's/^CPH2747$/PLK110/')
+      if [ "$INSTALL_MODEL" = PLQ110 ]; then
+        ui_print "⚠ PLQ110（一加 Ace 6）：安装阶段不提供 DRM-KO 后端"
+        ui_print "  该注入路径尚未通过真机验证，已自动改回 DTBO 后端（原厂档位方案）。"
+        ui_print "  如确需实验：装好后在 WebUI「超频 → 显示应用后端」里显式切换。"
+        INSTALL_BACKEND=dtbo
+        printf '%s\n' "$INSTALL_BACKEND" > "$MODPATH/config/dts_backend.txt" 2>/dev/null
+      fi
+    fi
     if [ "$INSTALL_BACKEND" = "dtbo" ]; then
   # 切换到 bin 目录以确保工具能找到相对路径资源
   cd "$BIN_DIR" || abort "无法进入 bin 目录"
@@ -504,14 +518,6 @@ ui_print "正在刷入修改后的 DTBO..."
   fi
 else
   ui_print "已选择 DRM-KO：高刷 timing 仅由 KO 注入"
-  INSTALL_MODEL=$(getprop ro.product.vendor.model 2>/dev/null |
-    sed 's/^CPH2747$/PLK110/')
-  if [ "$INSTALL_MODEL" = PLQ110 ]; then
-    ui_print "⚠ Ace6 提示：PLQ110 的 DRM 注入 KO 仍属未真机验证路径"
-    ui_print "  万一内核注入阶段崩了会表现为开机卡住：长按电源键强制关机再开机，"
-    ui_print "  模块自带的开机自保护会在第二次开机自动跳过 KO 注入，正常进系统。"
-    printf 'on\n' > "$MODPATH/config/plq110_drm_ko_experiment.txt" 2>/dev/null
-  fi
   ui_print "正在生成不含显示改动的兼容 DTBO（PJD110 含解容）..."
   if sh "$MODPATH/scripts/hmbird_backend.sh" prepare-dtbo "$DTBO_PARTITION"; then
     ui_print "KO 配套 DTBO 写入成功，原厂显示 timing 保持不变"
