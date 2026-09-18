@@ -204,6 +204,31 @@ jobs:
               "src/$source.c"
           done
 
+          # The free daemon is built here instead of being taken from the
+          # committed bin/rate_daemon copy: that copy silently shipped a stale
+          # daemon whenever the source changed without a local rebuild.
+          RAW_CLANG="$TOOLCHAIN/bin/clang"
+          DAEMON_VERSION="$(sed -n 's/^#define RATE_DAEMON_VERSION "\([^"]*\)"/\1/p' src/rate_daemon.c)"
+          test -n "$DAEMON_VERSION"
+          echo "Building rate_daemon (free core, static, version $DAEMON_VERSION)"
+          "$RAW_CLANG" \
+            --target=aarch64-linux-android30 \
+            -O3 \
+            -static \
+            -DMURONG_FREE_BUILD \
+            "src/rate_daemon.c" \
+            -o "$OUT_DIR/rate_daemon"
+          test -s "$OUT_DIR/rate_daemon"
+          file "$OUT_DIR/rate_daemon" | grep -F 'ARM aarch64'
+          strings "$OUT_DIR/rate_daemon" | grep -Fx "$DAEMON_VERSION"
+          for probe in 'Video temporary mode' 'MEMC Iris ESD' 'RMX5200 LTPO touch fast path'; do
+            if strings "$OUT_DIR/rate_daemon" | grep -Fq "$probe"; then
+              echo "Paid-only code leaked into the free daemon: $probe" >&2
+              exit 1
+            fi
+          done
+          echo "free daemon built: $DAEMON_VERSION" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Validate scripts and Web backup isolation
         shell: bash
         run: |
@@ -461,8 +486,19 @@ jobs:
           install -m 0755 build/bin/dts_tool "$STAGE_DIR/bin/dts_tool"
           install -m 0755 build/bin/pack_dtbo "$STAGE_DIR/bin/pack_dtbo"
           install -m 0755 build/bin/unpack_dtbo "$STAGE_DIR/bin/unpack_dtbo"
-          chmod 0755 "$STAGE_DIR/bin/rate_daemon"
+          # Always ship the daemon compiled in this run; the repository copy is
+          # only a convenience for local builds and must never win here.
+          install -m 0755 build/bin/rate_daemon "$STAGE_DIR/bin/rate_daemon"
           test -x "$STAGE_DIR/bin/rate_daemon"
+          PACKAGED_DAEMON_VERSION="$(sed -n 's/^#define RATE_DAEMON_VERSION "\([^"]*\)"/\1/p' src/rate_daemon.c)"
+          strings "$STAGE_DIR/bin/rate_daemon" | grep -Fx "$PACKAGED_DAEMON_VERSION"
+          if [ "${{ steps.release_meta.outputs.is_release }}" = 'true' ]; then
+            MODULE_VERSION="$(sed -n 's/^version=//p' "$STAGE_DIR/module.prop")"
+            if [ "$PACKAGED_DAEMON_VERSION" != "$MODULE_VERSION" ]; then
+              echo "Packaged daemon $PACKAGED_DAEMON_VERSION does not match module.prop $MODULE_VERSION" >&2
+              exit 1
+            fi
+          fi
 
           chmod 0755 \
             "$STAGE_DIR/action.sh" \
