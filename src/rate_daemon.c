@@ -26,7 +26,7 @@
 #define MAX_APPS 200
 #define MAX_PKG_LEN 128
 #define MAX_EXTENSION_RATES 256
-#define RATE_DAEMON_VERSION "2.9.32"
+#define RATE_DAEMON_VERSION "2.9.33"
 #define BOOT_RESOLUTION_SETTLE_TIMEOUT_MS 8000
 #define BOOT_RESOLUTION_SETTLE_SAMPLE_MS 150
 #define BOOT_RESOLUTION_SETTLE_SAMPLES 4
@@ -84,6 +84,7 @@
 #define RMX5200_LTPO_TOUCH_DIRECT_GRACE_MS 3200
 #define RMX5200_LTPO_TOUCH_DIRECT_TIMEOUT_MS 4500
 #define RMX5200_LTPO_PENDING_POLL_MS 20
+#define RMX5200_OTI_PAUSE_KEEPALIVE_MS 500
 #define RMX5200_LTPO_DROP_TIMEOUT_MS 1800
 #define RMX5200_LTPO_SUPERSEDED_DROP_GUARD_MS 5000
 #define RMX5200_LTPO_CEILING_DWELL_MS 3000
@@ -230,6 +231,10 @@ static int rmx5200_ltpo_runtime_transition = 0;
 static int rmx5200_ltpo_runtime_target_id = -1;
 static int rmx5200_ltpo_ordered_rise_active = 0;
 static int rmx5200_ltpo_oti_pause_override = 0;
+/* Set once from argv[1] in main(). Helpers that run without an explicit module
+ * path (OTI pause re-asserts, OTI shared-state files) resolve through this so a
+ * relocated module keeps reading and writing its own state. */
+static const char *daemon_base_path = NULL;
 static int extension_rates[MAX_EXTENSION_RATES];
 static int extension_rate_count = 0;
 
@@ -263,6 +268,8 @@ static void load_extension_rates(const char *base_path);
 static int adfr_lock_test_bypassed(const char *base_path);
 static int adfr_lock_requested(const char *base_path);
 static int set_surfaceflinger_oti_pause(const char *base_path, int paused);
+static int oti_pause_required(const char *base_path);
+static void reassert_oti_pause_if_required(const char *base_path);
 static void sync_oti_pause_policy(const char *base_path, int force);
 #ifndef MURONG_FREE_BUILD
 static void set_rmx5200_ltpo_oti_owner(const char *base_path, int owned);
@@ -1409,6 +1416,11 @@ static int apply_mode_transaction(int target_id, int resolution_change,
     if (resolution_change) {
         sync_android_resolution_settings(target_id);
     }
+    /* A panel mode transaction is exactly the event that clears the
+     * SurfaceFlinger-side OTI pause, so re-assert it here instead of waiting
+     * for the next heartbeat tick. Only ever re-assert the pause: releasing it
+     * stays a deliberate decision of the video/LTPO state machines. */
+    reassert_oti_pause_if_required(NULL);
     return 1;
 }
 
@@ -2480,13 +2492,18 @@ static void sync_android_resolution_settings(int id) {
             id, width, height, adjust);
 }
 
+static const char *rmx5200_oti_base_path(const char *base_path) {
+    if (base_path && *base_path) return base_path;
+    if (daemon_base_path && *daemon_base_path) return daemon_base_path;
+    return "/data/adb/modules/murongchaopin";
+}
+
 static int ensure_rmx5200_oti_state_dir(const char *base_path) {
     char config_path[PATH_MAX];
     char state_path[PATH_MAX];
-    const char *root = base_path;
+    const char *root = rmx5200_oti_base_path(base_path);
     struct stat state;
 
-    if (!root || !*root) root = "/data/adb/modules/murongchaopin";
     if (snprintf(config_path, sizeof(config_path), "%s/config", root)
             >= (int)sizeof(config_path)
             || snprintf(state_path, sizeof(state_path),
@@ -2534,7 +2551,8 @@ static int read_surfaceflinger_oti_pause_state(const char *base_path) {
     FILE *fp;
 
     if (!ensure_rmx5200_oti_state_dir(base_path)) return -1;
-    rmx5200_oti_state_path(path, sizeof(path), base_path, "oti_pause_last");
+    rmx5200_oti_state_path(path, sizeof(path),
+                           rmx5200_oti_base_path(base_path), "oti_pause_last");
     fp = fopen(path, "r");
     if (!fp) return -1;
     if (!fgets(line, sizeof(line), fp)) {
@@ -2553,7 +2571,8 @@ static void write_surfaceflinger_oti_pause_state(const char *base_path,
     FILE *fp;
 
     if (!ensure_rmx5200_oti_state_dir(base_path)) return;
-    rmx5200_oti_state_path(path, sizeof(path), base_path, "oti_pause_last");
+    rmx5200_oti_state_path(path, sizeof(path),
+                           rmx5200_oti_base_path(base_path), "oti_pause_last");
     fp = fopen(path, "w");
     if (!fp) {
         log_msg("RMX5200 OTI shared state write failed: %s", strerror(errno));
@@ -2585,7 +2604,7 @@ static void set_rmx5200_ltpo_oti_owner(const char *base_path, int owned) {
 }
 #endif
 
-static int set_surfaceflinger_oti_pause(const char *base_path, int paused) {
+static int issue_surfaceflinger_oti_pause(int paused) {
     const char *command = paused
         ? "service call SurfaceFlinger 22015 i32 1 i32 1 >/dev/null 2>&1"
         : "service call SurfaceFlinger 22015 i32 1 i32 0 >/dev/null 2>&1";
@@ -2598,21 +2617,88 @@ static int set_surfaceflinger_oti_pause(const char *base_path, int paused) {
                 paused, rc);
         return 0;
     }
+    return 1;
+}
+
+static int set_surfaceflinger_oti_pause(const char *base_path, int paused) {
+    if (!issue_surfaceflinger_oti_pause(paused)) return 0;
     write_surfaceflinger_oti_pause_state(base_path, paused);
     log_msg("RMX5200 OTI policy synchronized: %s",
             paused ? "paused for fixed refresh" : "running for LTPO");
     return 1;
 }
 
+static int oti_pause_required(const char *base_path) {
+    if (strcmp(device_model, "RMX5200") != 0) return 0;
+    return video_override_active || video_handoff_active ||
+            adfr_lock_requested(base_path) ||
+            rmx5200_ltpo_oti_pause_override;
+}
+
+/* The vendor OTI pause is volatile. SurfaceFlinger drops it on its own panel
+ * mode transactions, when the vendor MEMC path releases its screen-rate vote,
+ * and across screen-off/on cycles, while this daemon's own state file keeps
+ * reporting "paused". The OTI director then casts its 60Hz vote about five
+ * seconds into an idle screen; the VRR director maps that vote onto the FHD
+ * group (mode 9, 1080x2352@60) instead of the same-geometry 1440p60 mode, so
+ * the panel reconfigures, SensorService reports a screen change, OTI leaves
+ * idle immediately and the daemon restores 1440p165. That cycle repeats every
+ * five seconds and reads as a black/bright flicker with the whole UI snapping
+ * between sw411dp and sw309dp.
+ *
+ * Re-issue the pause on a heartbeat instead of trusting the recorded file. The
+ * cadence sits far below the OTI idle timeout, the call is a no-op when the
+ * pause was never lost, and the summary is rate limited so field logs stay
+ * readable. */
+static int keepalive_surfaceflinger_oti_pause(const char *base_path) {
+    static long long window_start_ms = 0;
+    static int reassert_count = 0;
+    long long now_ms;
+
+    if (!issue_surfaceflinger_oti_pause(1)) return 0;
+    write_surfaceflinger_oti_pause_state(base_path, 1);
+    reassert_count++;
+    now_ms = monotonic_ms();
+    if (window_start_ms == 0) window_start_ms = now_ms;
+    if (now_ms - window_start_ms >= 60000) {
+        log_msg("RMX5200 OTI pause keepalive active: reasserts=%d window=%lldms",
+                reassert_count, now_ms - window_start_ms);
+        window_start_ms = now_ms;
+        reassert_count = 0;
+    }
+    return 1;
+}
+
+/* Quiet re-assert for the events that are known to drop the vendor pause: real
+ * touch-up edges and completed panel mode transactions. This must cover every
+ * fixed-rate policy, not only the custom LTPO controller: with "完美禁用 ADFR"
+ * the durable ADFR lock keeps the framework floor high, yet the OTI director
+ * still casts its own 60Hz vote about 1.5s after touch-up because it lives in
+ * SurfaceFlinger, outside the vendor lock. */
+static void reassert_oti_pause_if_required(const char *base_path) {
+    if (!oti_pause_required(base_path)) return;
+    keepalive_surfaceflinger_oti_pause(base_path);
+}
+
 static void sync_oti_pause_policy(const char *base_path, int force) {
     static int last_pause = -1;
+    static long long last_keepalive_ms = 0;
+    long long now_ms;
     int pause;
     int recorded_pause;
 
     if (strcmp(device_model, "RMX5200") != 0) return;
-    pause = video_override_active || video_handoff_active ||
-            adfr_lock_requested(base_path) ||
-            rmx5200_ltpo_oti_pause_override;
+    pause = oti_pause_required(base_path);
+    now_ms = monotonic_ms();
+    /* Heartbeat first: the recorded file is written by this daemon only, so it
+     * cannot prove SurfaceFlinger still holds the pause. */
+    if (!force && pause && last_pause == pause &&
+            now_ms - last_keepalive_ms >= RMX5200_OTI_PAUSE_KEEPALIVE_MS) {
+        if (keepalive_surfaceflinger_oti_pause(base_path)) {
+            last_keepalive_ms = now_ms;
+            return;
+        }
+    }
     recorded_pause = read_surfaceflinger_oti_pause_state(base_path);
     if (!force && pause == last_pause && pause == recorded_pause) return;
     if (!force && last_pause == pause && recorded_pause != pause) {
@@ -2621,7 +2707,10 @@ static void sync_oti_pause_policy(const char *base_path, int force) {
                 recorded_pause < 0 ? "unknown" :
                     (recorded_pause ? "paused" : "running"));
     }
-    if (set_surfaceflinger_oti_pause(base_path, pause)) last_pause = pause;
+    if (set_surfaceflinger_oti_pause(base_path, pause)) {
+        last_pause = pause;
+        last_keepalive_ms = now_ms;
+    }
 }
 
 /* ColorOS can write min_fps after service.sh has applied the default-off
@@ -3549,9 +3638,11 @@ static void rmx5200_ltpo_touch_released(int was_down) {
     /* A complete swipe can re-arm OplusTouchIdle even while the controller's
      * shared owner state still says paused. Reassert the vendor pause on the
      * real down -> up edge so OTI cannot cast its 60 Hz vote one second later.
-     * The controller's own three-second dwell remains authoritative. */
-    if (rmx5200_ltpo.active && rmx5200_ltpo_oti_pause_override)
-        set_surfaceflinger_oti_pause(NULL, 1);
+     * This applies to every fixed-rate policy: with "完美禁用 ADFR" the custom
+     * LTPO controller is inactive, so gating the reassert on the controller
+     * left the user's most common configuration unprotected. The controller's
+     * own three-second dwell remains authoritative when it is active. */
+    reassert_oti_pause_if_required(NULL);
 }
 
 static void handle_rmx5200_touch_input(void) {
@@ -5117,6 +5208,7 @@ int main(int argc, char *argv[]) {
     }
 
     char *base_path = argv[1];
+    daemon_base_path = base_path;
 #ifndef MURONG_FREE_BUILD
     premium_base_path = base_path;
 #endif
@@ -5200,6 +5292,11 @@ int main(int argc, char *argv[]) {
         while (waitpid(-1, NULL, WNOHANG) > 0) {
             // Reap completed bridge helpers without breaking synchronous system().
         }
+        /* Heartbeat the volatile SurfaceFlinger OTI pause from the main loop
+         * instead of relying on the one-second policy tick further below, so a
+         * pause that SurfaceFlinger dropped is repaired well inside the
+         * vendor's post-touch 60Hz vote window. */
+        sync_oti_pause_policy(base_path, 0);
         // 使用 select 实现 "等待事件 或 超时"
         if (inotify_fd >= 0 || hook_server_fd >= 0 ||
                 rmx5200_ltpo.touch_fd >= 0) {
