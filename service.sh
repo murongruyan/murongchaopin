@@ -28,6 +28,18 @@ until [ "$(getprop sys.boot_completed)" = "1" ]; do
     sleep 1
 done
 
+# 开机自保护：系统启动完成、再观察一段时间确认没有在服务阶段崩掉之后，才把
+# 本次 boot_id 记为"已走完"。post-fs-data 下次会拿它和上次的 boot_id 比对，
+# 不一致就跳过内核模块注入——这样任何阶段的内核崩溃都只会影响一次开机。
+(
+    sleep "${MURONG_BOOT_SETTLE_SECONDS:-90}"
+    if [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ]; then
+        mkdir -p "$MODDIR/runtime" 2>/dev/null
+        cat /proc/sys/kernel/random/boot_id 2>/dev/null |
+            tr -d '[:space:]' > "$MODDIR/runtime/boot_completed_id" 2>/dev/null
+    fi
+) &
+
 # 模块健康状态：收集错误/冲突（如显示配置被其他模块卸载）并同步到
 # module.prop 的 description，KSU 模块列表即可直接看到异常提示。
 MODULE_STATUS_HELPER="$MODDIR/scripts/module_status.sh"

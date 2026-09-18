@@ -504,6 +504,14 @@ ui_print "正在刷入修改后的 DTBO..."
   fi
 else
   ui_print "已选择 DRM-KO：高刷 timing 仅由 KO 注入"
+  INSTALL_MODEL=$(getprop ro.product.vendor.model 2>/dev/null |
+    sed 's/^CPH2747$/PLK110/')
+  if [ "$INSTALL_MODEL" = PLQ110 ]; then
+    ui_print "⚠ Ace6 提示：PLQ110 的 DRM 注入 KO 仍属未真机验证路径"
+    ui_print "  万一内核注入阶段崩了会表现为开机卡住：长按电源键强制关机再开机，"
+    ui_print "  模块自带的开机自保护会在第二次开机自动跳过 KO 注入，正常进系统。"
+    printf 'on\n' > "$MODPATH/config/plq110_drm_ko_experiment.txt" 2>/dev/null
+  fi
   ui_print "正在生成不含显示改动的兼容 DTBO（PJD110 含解容）..."
   if sh "$MODPATH/scripts/hmbird_backend.sh" prepare-dtbo "$DTBO_PARTITION"; then
     ui_print "KO 配套 DTBO 写入成功，原厂显示 timing 保持不变"

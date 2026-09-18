@@ -7,6 +7,44 @@ GATE_HELPER="$MODDIR/scripts/display_license_gate.sh"
 PREMIUM_POST_FS="$MODDIR/premium/scripts/premium_post_fs_data.sh"
 LTPS_VOTE_HELPER="$MODDIR/scripts/surfaceflinger_ltps_vote_patch.sh"
 
+# ── 开机自保护（防砖）─────────────────────────────────────────────────
+# 内核模块注入发生在 post-fs-data；Ace6 这类内核是 PANIC_ON_OOPS + 无自动重启
+# 超时，KO 一旦崩就是永久 panic（表现为"刷入后不开机"）。机制：本阶段记下本次
+# boot_id，service.sh 在系统启动完成并稳定一段时间后写入同一个 boot_id；下次
+# 开机若发现两者不一致（上一次没走完），本次就只跑用户态部分、跳过所有内核模块
+# 注入（付费侧退回 props 方案），保证设备一定能起来。
+RUNTIME_DIR="$MODDIR/runtime"
+BOOT_ATTEMPT_FILE="$RUNTIME_DIR/boot_attempt_id"
+BOOT_COMPLETED_FILE="$RUNTIME_DIR/boot_completed_id"
+BOOT_GUARD_FILE="$RUNTIME_DIR/boot_guard.txt"
+BOOT_ID=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '[:space:]')
+BOOT_GUARD=0
+mkdir -p "$RUNTIME_DIR" 2>/dev/null
+# 判断"上一次开机是否走完"：post-fs-data 记下本次 boot_id，service.sh 在系统
+# 起来一段时间后写下同一个 boot_id；两者不一致（或只有 attempt 没有 completed）
+# 说明上一次开机中途崩了，本次启用保护。
+if [ -n "$BOOT_ID" ]; then
+    PREV_ATTEMPT=$(sed -n '1p' "$BOOT_ATTEMPT_FILE" 2>/dev/null | tr -d '[:space:]')
+    PREV_COMPLETED=$(sed -n '1p' "$BOOT_COMPLETED_FILE" 2>/dev/null | tr -d '[:space:]')
+    if [ -n "$PREV_ATTEMPT" ] && [ "$PREV_COMPLETED" != "$PREV_ATTEMPT" ]; then
+        BOOT_GUARD=1
+    fi
+    if [ "$BOOT_GUARD" = "1" ]; then
+        {
+            printf 'detected=%s\n' "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+            printf 'previous_boot_id=%s\n' \
+                "$(sed -n '1p' "$BOOT_ATTEMPT_FILE" 2>/dev/null | tr -d '[:space:]')"
+            printf 'previous_completed_id=%s\n' \
+                "$(sed -n '1p' "$BOOT_COMPLETED_FILE" 2>/dev/null | tr -d '[:space:]')"
+            printf 'action=skip-kernel-module-injection-this-boot\n'
+        } > "$BOOT_GUARD_FILE" 2>/dev/null
+    else
+        rm -f "$BOOT_GUARD_FILE" 2>/dev/null
+    fi
+    printf '%s\n' "$BOOT_ID" > "$BOOT_ATTEMPT_FILE" 2>/dev/null
+fi
+export MURONG_BOOT_GUARD="$BOOT_GUARD"
+
 # Write the premium authorization bridge (frozen contract 16.4). Root writes
 # this after lease verification; the paid Hook and paid daemon read it as their
 # ONLY authorization source (never written from the WebUI). It is reset to 0
@@ -61,8 +99,13 @@ fi
 # the overclock modes first, then the paid LTPO provider appends 30/10/1Hz to
 # that live mode array.  The LTPO helper no longer treats the DRM module as an
 # error; loading it after DRM is the supported RMX5200 composition.
-if [ ! -d /sys/module/rmx5200_drm_modes ]; then
-    sh "$DISPLAY_HELPER" boot-apply >/dev/null 2>&1
+if [ "$BOOT_GUARD" = "1" ]; then
+    printf '%s boot-guard: skipped display kernel-module injection\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" >> "$MODDIR/daemon.log" 2>/dev/null
+else
+    if [ ! -d /sys/module/rmx5200_drm_modes ]; then
+        sh "$DISPLAY_HELPER" boot-apply >/dev/null 2>&1
+    fi
 fi
 
 if [ -f "$PREMIUM_POST_FS" ]; then

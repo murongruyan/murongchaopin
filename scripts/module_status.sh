@@ -73,8 +73,19 @@ premium_payload_broken()
     [ -n "$MISSING" ]
 }
 
+boot_guard_active()
+{
+    # post-fs-data 在开机注入内核模块前写标记、service.sh 启动完成后清除；
+    # 标记残留说明上一次开机没走完（多半是 KO 注入阶段崩了），本次已被
+    # 开机的防砖逻辑跳过。
+    [ -f "$MODDIR/runtime/boot_guard.txt" ]
+}
+
 collect_notices()
 {
+    if boot_guard_active; then
+        printf '检测到上次开机未完成，本次已自动跳过内核模块注入（防砖保护）；若反复出现请在日志页打包发给开发者'
+    fi
     if coloros_unmount_conflict; then
         printf '显示配置被其他模块卸载（常见于温控伪装类 zygisk 模块），自定义节点可能无效且分辨率/DPI 会闪烁'
     fi

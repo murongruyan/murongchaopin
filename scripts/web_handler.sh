@@ -2679,6 +2679,18 @@ case "$1" in
             dtbo) ;;
             *) echo "Error: backend must be dtbo or drm"; exit 1 ;;
         esac
+        # PLQ110 的 DRM 注入 KO 属于未真机验证路径（Ace6 内核 panic_on_oops，
+        # 崩一次就是不开机）。切到 DRM-KO 视为用户显式接受实验风险，落盘
+        # opt-in 后 display_backend.sh 才允许在开机时注入；切回 DTBO 立即撤销。
+        PLQ_MODEL=$(getprop ro.product.vendor.model 2>/dev/null |
+            sed 's/^CPH2747$/PLK110/')
+        if [ "$PLQ_MODEL" = PLQ110 ]; then
+            if [ "$2" = drm ]; then
+                printf 'on\n' > "$MOD_PATH/config/plq110_drm_ko_experiment.txt" 2>/dev/null
+            else
+                rm -f "$MOD_PATH/config/plq110_drm_ko_experiment.txt" 2>/dev/null
+            fi
+        fi
         if write_dts_backend "$2"; then
             if [ "$2" = dtbo ] && [ -f "$DISPLAY_HELPER" ]; then
                 sh "$DISPLAY_HELPER" mark-dtbo >/dev/null 2>&1

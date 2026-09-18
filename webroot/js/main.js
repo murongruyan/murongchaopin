@@ -3752,6 +3752,24 @@ async function loadDtsBackend() {
 async function setDtsBackend(backend) {
     if (!['dtbo', 'drm'].includes(backend) || dtsBackendBusy) return;
     if (backend === currentDtsBackend) return;
+    // PLQ110（Ace6）的 DRM 注入 KO 还没真机验证过：Ace6 内核是
+    // panic_on_oops + 无自动重启超时，注入阶段崩一次就是"刷入后不开机"。
+    // 让用户明确知道风险；模块自带的开机自保护会在第二次开机自动跳过 KO。
+    if (backend === 'drm') {
+        const model = String(deviceInfo?.device_model || '').toUpperCase();
+        const risky = model === 'PLQ110';
+        const message = risky
+            ? 'Ace6 的 DRM 扩展档位仍在真机验证阶段：\n\n'
+                + '· 极端情况会在开机注入内核模块时崩溃，表现为开机卡住；\n'
+                + '· 真出现时长按电源键强制关机再开机，'
+                + '模块会在第二次开机自动跳过 KO 注入并正常进系统（防砖保护）；\n'
+                + '· 现在最稳的档位方案是 DTBO 后端。\n\n'
+                + '确认切换到 DRM-KO 吗？'
+            : '点击下方“应用”后写入配套 DTBO，整机重启后切换生效。\n\n确认切换吗？';
+        const confirmed = await showConfirm('切换显示应用后端', message,
+            { okLabel: risky ? '仍要切换（实验）' : '继续', cancelLabel: '取消' });
+        if (!confirmed) return;
+    }
     const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
     const buttons = ['btn-backend-dtbo', 'btn-backend-drm']
         .map(id => document.getElementById(id)).filter(Boolean);

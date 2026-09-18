@@ -97,6 +97,19 @@ select_ko_profile() {
     [ -n "$KO_MODULE_NAME" ] && KO_MODULE="$BIN_DIR/${KO_MODULE_NAME}.ko" || KO_MODULE=""
 }
 
+# PLQ110 (Ace6) 的 DRM 注入 KO 属于未真机验证路径。Ace6 内核是
+# CONFIG_PANIC_ON_OOPS=y + PANIC_TIMEOUT=-1 + KASAN(HW tags)，KO 里任何一次
+# 坏指针/KASAN 命中都会变成"永久 panic"，表现就是刷入后不开机。因此默认不
+# 加载，只有用户在安装器里按音量键明确选择 DRM-KO、或在 WebUI 切到 DRM-KO
+# 时（两者都会写 config/plq110_drm_ko_experiment.txt=on）才允许注入。
+plq110_drm_ko_enabled() {
+    local value
+    value=$(sed -n '1{s/\r$//;p;q;}' \
+        "$MOD_DIR/config/plq110_drm_ko_experiment.txt" 2>/dev/null |
+        tr -d '[:space:]')
+    [ "$value" = on ]
+}
+
 ensure_drm_specs() {
     if [ -s "$DRM_SPECS_FILE" ]; then
         if [ "$KO_PROFILE" != pjd110 ]; then
@@ -242,12 +255,24 @@ probe_backend() {
 
 apply_drm_at_boot() {
     select_ko_profile
+    # 上一次开机没走完（post-fs-data 的标记残留）：本次不注入任何内核模块，
+    # 保证设备一定能起来；下一个完整开机后标记会被清掉并恢复正常。
+    if [ -f "$MOD_DIR/runtime/boot_guard.txt" ]; then
+        set_status blocked:boot_guard_previous_boot_incomplete
+        log_line "drm-load skipped: previous boot did not complete (boot guard)"
+        return 0
+    fi
     collect_probe
     write_probe
     log_line "boot-probe backend=drm uptime=$PROBE_UPTIME driver=$PROBE_DRIVER surfaceflinger=$PROBE_SURFACEFLINGER result=$PROBE_REASON"
 
     if [ "$PROBE_REASON" != ok ]; then
         set_status "unsupported:drm:$PROBE_REASON"
+        return 0
+    fi
+    if [ "$KO_PROFILE" = plq110 ] && ! plq110_drm_ko_enabled; then
+        set_status blocked:plq110_drm_ko_experiment_required
+        log_line "drm-load skipped: PLQ110 injection needs the explicit experiment opt-in"
         return 0
     fi
     if [ -z "$KO_MODULE" ] || [ ! -r "$KO_MODULE" ]; then
