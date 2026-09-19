@@ -91,7 +91,21 @@ else
     exit 1
 fi
 rm -f "$ROOT/config/rmx5200_ltpo_daily_idle.txt"
-for wrong_policy in custom_ltpo adfr_off stock_ltpo_typo; do
+# 完美禁用 ADFR 同样需要这层过滤：关闭"超级帧率"后厂商的 AP-scale / scale_up
+# 映射表会残留在插帧时的 123Hz 档，SurfaceFlinger 会把 144fps 解析成
+# 1080x2352@123（mode 11），面板被拖到 FHD 组再被拉回来就是黑闪。
+# 必须与 stock_ltps 产出完全相同的补丁字节。
+if sh "$HELPER" test-patch "$MODEL" adfr_off "$SOURCE" \
+        "$TMPDIR_TEST/adfr_off.bin"; then
+    cmp -s "$TMPDIR_TEST/stock_ltps_reference.bin" "$TMPDIR_TEST/adfr_off.bin" || {
+        echo 'FAIL: adfr_off patch bytes differ from stock_ltps' >&2
+        exit 1
+    }
+else
+    echo 'FAIL: adfr_off policy was rejected' >&2
+    exit 1
+fi
+for wrong_policy in custom_ltpo stock_ltpo_typo; do
     if sh "$HELPER" test-patch "$MODEL" "$wrong_policy" "$SOURCE" \
             "$TMPDIR_TEST/$wrong_policy.bin"; then
         echo "FAIL: wrong policy was accepted: $wrong_policy" >&2

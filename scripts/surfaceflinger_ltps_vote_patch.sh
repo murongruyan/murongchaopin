@@ -88,6 +88,12 @@ ltps_vote_wanted()
         policy=$(read_policy)
     fi
     [ "$policy" = "$EXPECTED_POLICY" ] && return 0
+    # 完美禁用 ADFR 同样需要这层过滤：关闭"超级帧率"（插帧）后，厂商的
+    # AP-scale / scale_up 映射表会残留在插帧时的 123Hz 档，SurfaceFlinger 会把
+    # 144fps 的解析（连 default 投票也是）指向 mode 11（1080x2352@123），面板被
+    # 拖到 FHD 组、模块再把 1440p144 拉回来，来回翻转就是黑闪。补丁自带源码契约
+    # 校验，机型或系统版本不匹配时会落到 skipped/rejected，不会挂上错误二进制。
+    [ "$policy" = adfr_off ] && return 0
     if [ "$policy" = custom_ltpo ]; then
         daily_idle=$(sed -n '1{s/\r$//;p;q;}' "$DAILY_IDLE_FILE" 2>/dev/null |
             tr -d '[:space:]')
