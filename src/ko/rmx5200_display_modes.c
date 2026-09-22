@@ -2497,7 +2497,8 @@ static bool oc_private_transfer_matches(const u8 *records, void **privs,
 }
 
 static bool oc_private_phy_layout_matches(const u8 *records, u32 count,
-					  u32 priv_offset)
+					  u32 priv_offset,
+					  u32 values_offset, u32 length_offset)
 {
 	u32 i;
 
@@ -2513,10 +2514,10 @@ static bool oc_private_phy_layout_matches(const u8 *records, u32 count,
 			return false;
 		priv_size = ksize(priv);
 		if (!priv_size || priv_size > OC_MAX_PRIV_SIZE ||
-		    OC_PRIV_PHY_VALUES_OFFSET + sizeof(void *) > priv_size ||
-		    OC_PRIV_PHY_LENGTH_OFFSET + sizeof(length) > priv_size ||
-		    !oc_read_pointer(priv, OC_PRIV_PHY_VALUES_OFFSET, &values) ||
-		    !oc_read_mem((u8 *)priv + OC_PRIV_PHY_LENGTH_OFFSET,
+		    values_offset + sizeof(void *) > priv_size ||
+		    length_offset + sizeof(length) > priv_size ||
+		    !oc_read_pointer(priv, values_offset, &values) ||
+		    !oc_read_mem((u8 *)priv + length_offset,
 				 &length, sizeof(length)) ||
 		    length != OC_PHY_TIMING_LENGTH ||
 		    !oc_read_mem(values, timing, sizeof(timing)))
@@ -2525,21 +2526,68 @@ static bool oc_private_phy_layout_matches(const u8 *records, u32 count,
 	return true;
 }
 
+/*
+ * Locate the MIPI PHY timing table inside one private timing record.  The
+ * vendor struct changed between ColorOS releases, so the historical offset is
+ * only tried first; this search keeps the module working after an OTA moves it.
+ * Nothing is written: a candidate is accepted only when the descriptor points
+ * at a readable table of exactly OC_PHY_TIMING_LENGTH words.
+ */
+static bool oc_find_phy_layout(const void *priv, u32 *values_offset,
+			       u32 *length_offset)
+{
+	u32 candidate;
+
+	for (candidate = 0; candidate + 16 <= OC_MAX_PRIV_SCAN;
+	     candidate += 8) {
+		void *values = NULL;
+		u32 length = 0;
+		u32 timing[OC_PHY_TIMING_LENGTH];
+
+		if (!oc_read_pointer(priv, candidate, &values))
+			continue;
+		if (!oc_read_mem((u8 *)priv + candidate + sizeof(void *),
+				 &length, sizeof(length)))
+			break;
+		if (length != OC_PHY_TIMING_LENGTH)
+			continue;
+		if (!oc_read_mem(values, timing, sizeof(timing)))
+			continue;
+		*values_offset = candidate;
+		*length_offset = candidate + sizeof(void *);
+		return true;
+	}
+	return false;
+}
+
 static u32 oc_live_mode_count(void)
 {
 	void *panel;
 	u32 count;
 	u32 next_count;
+	u32 candidates[2] = { 0x5a0U, 0x5d0U };
+	unsigned int index;
 
 	if (!oc_layout.display ||
 	    !oc_read_pointer(oc_layout.display, 0x108, &panel) ||
-	    !panel ||
-	    !oc_read_mem((u8 *)panel + 0x5a0, &count, sizeof(count)) ||
-	    !oc_read_mem((u8 *)panel + 0x5a4, &next_count, sizeof(next_count)) ||
-	    count != next_count || count < oc_dt.count ||
-	    count > OC_MAX_RUNTIME_MODES)
+	    !panel)
 		return oc_dt.count;
-	return count;
+	/* The two equal parsed-count fields moved between vendor builds
+	 * (0x5a0 on ColorOS 16, 0x5d0 on ColorOS 17).  Probing both keeps the
+	 * free DRM backend and the paid LTPO provider in agreement when one of
+	 * them already rewrote the counts. */
+	for (index = 0; index < ARRAY_SIZE(candidates); index++) {
+		if (!oc_read_mem((u8 *)panel + candidates[index], &count,
+				 sizeof(count)) ||
+		    !oc_read_mem((u8 *)panel + candidates[index] + 4, &next_count,
+				 sizeof(next_count)))
+			break;
+		if (count != next_count || count < oc_dt.count ||
+		    count > OC_MAX_RUNTIME_MODES)
+			continue;
+		return count;
+	}
+	return oc_dt.count;
 }
 
 static bool oc_find_private_layout(const u8 *records, u32 stride, u32 count,
@@ -2626,6 +2674,135 @@ static bool oc_find_private_layout(const u8 *records, u32 stride, u32 count,
 	return false;
 }
 
+/*
+ * The ColorOS 17 (Android 17) msm_drm build moved the parsed timing array and
+ * grew the private timing record, so the historical blind scan no longer finds
+ * them.  These are the values measured on that vendor build; they are tried
+ * first but only accepted when every record matches the device tree, which
+ * keeps a stale hint harmless on any other release.
+ */
+#define OC_HINT_DEFAULT_OFFSET 0x338U
+#define OC_HINT_DEFAULT_STRIDE 0xc8U
+
+static unsigned int oc_hint_offset = OC_HINT_DEFAULT_OFFSET;
+module_param_named(layout_hint_offset, oc_hint_offset, uint, 0644);
+MODULE_PARM_DESC(layout_hint_offset,
+	"Display offset holding the parsed timing array (0xffffffff disables)");
+static unsigned int oc_hint_stride = OC_HINT_DEFAULT_STRIDE;
+module_param_named(layout_hint_stride, oc_hint_stride, uint, 0644);
+MODULE_PARM_DESC(layout_hint_stride,
+	"Record stride of that timing array (0 disables the fast path)");
+
+/* Field offsets inside one parsed timing record, measured on the live kernel. */
+#define OC_HINT_WIDTH_OFFSET 0x00U
+#define OC_HINT_HEIGHT_OFFSET 0x18U
+#define OC_HINT_REFRESH_OFFSET 0x2cU
+#define OC_HINT_CLOCK_OFFSET 0x30U
+
+/* Stage that rejected the candidate; reported by the caller.  1 = no source
+ * record, 2 = device-tree multiset mismatch, 3 = private layout, 4 = PHY
+ * table, 5 = private size, 6 = PHY table discovered at a new offset. */
+static unsigned int oc_hint_stage;
+
+/*
+ * Evaluate one verified (display offset, stride) candidate.  The candidate is
+ * only accepted when every record carries a timing that the device tree
+ * describes, when the private layout validates and when the PHY timing table
+ * has the expected shape, so a stale hint can never be applied.
+ */
+static int oc_try_layout_hint(const u8 *records, void *modes, u32 stride,
+			      u32 count, struct oc_mode_layout *layout)
+{
+	u32 source_index = OC_INVALID_OFFSET;
+	u32 index_offset = OC_INVALID_OFFSET;
+	u32 pixel_offset = OC_INVALID_OFFSET;
+	u32 source_pixel = 0;
+	u32 priv_offset = OC_INVALID_OFFSET;
+	u32 private_clock_offset = OC_INVALID_OFFSET;
+	u32 private_transfer_offset = OC_INVALID_OFFSET;
+	void *source_priv = NULL;
+	u32 phy_values_offset;
+	u32 phy_length_offset;
+	u32 i;
+
+	for (i = 0; i < count; i++) {
+		const u8 *record = records + i * OC_MAX_MODE_STRIDE;
+
+		if (oc_buf_u32(record, OC_HINT_WIDTH_OFFSET) != OC_NATIVE_WIDTH ||
+		    oc_buf_u32(record, OC_HINT_HEIGHT_OFFSET) != OC_NATIVE_HEIGHT ||
+		    oc_buf_u32(record, OC_HINT_REFRESH_OFFSET) != OC_SOURCE_FPS ||
+		    oc_buf_u64(record, OC_HINT_CLOCK_OFFSET) != oc_dt.source_clock)
+			continue;
+		source_index = i;
+		break;
+	}
+	if (source_index == OC_INVALID_OFFSET) {
+		oc_hint_stage = 1;
+		return -EPROTO;
+	}
+	if (!oc_validate_mode_candidate(records, stride, count,
+			OC_HINT_WIDTH_OFFSET, OC_HINT_HEIGHT_OFFSET,
+			OC_HINT_REFRESH_OFFSET, OC_HINT_CLOCK_OFFSET, source_index)) {
+		oc_hint_stage = 2;
+		return -EPROTO;
+	}
+	oc_find_index_offset(records, stride, count, &index_offset);
+	oc_find_pixel_offset(records, stride, count, source_index,
+			OC_HINT_WIDTH_OFFSET, OC_HINT_HEIGHT_OFFSET,
+			OC_HINT_CLOCK_OFFSET, &pixel_offset, &source_pixel);
+	if (!oc_find_private_layout(records, stride, count, source_index,
+			OC_HINT_WIDTH_OFFSET, OC_HINT_HEIGHT_OFFSET,
+			OC_HINT_REFRESH_OFFSET, OC_HINT_CLOCK_OFFSET,
+			&priv_offset, &private_clock_offset,
+			&private_transfer_offset, &source_priv)) {
+		oc_hint_stage = 3;
+		return -EPROTO;
+	}
+	phy_values_offset = OC_PRIV_PHY_VALUES_OFFSET;
+	phy_length_offset = OC_PRIV_PHY_LENGTH_OFFSET;
+	if (!oc_private_phy_layout_matches(records, count, priv_offset,
+					   phy_values_offset, phy_length_offset)) {
+		if (!oc_find_phy_layout(source_priv, &phy_values_offset,
+					&phy_length_offset) ||
+		    !oc_private_phy_layout_matches(records, count, priv_offset,
+						   phy_values_offset,
+						   phy_length_offset)) {
+			oc_hint_stage = 4;
+			return -EPROTO;
+		}
+		oc_hint_stage = 6;
+	}
+
+	layout->modes = modes;
+	layout->stride = stride;
+	layout->count = count;
+	layout->width_offset = OC_HINT_WIDTH_OFFSET;
+	layout->height_offset = OC_HINT_HEIGHT_OFFSET;
+	layout->refresh_offset = OC_HINT_REFRESH_OFFSET;
+	layout->clock_offset = OC_HINT_CLOCK_OFFSET;
+	layout->pixel_offset = pixel_offset;
+	layout->index_offset = index_offset;
+	layout->priv_offset = priv_offset;
+	layout->priv_clock_offset = private_clock_offset;
+	layout->priv_transfer_offset = private_transfer_offset;
+	layout->priv_phy_values_offset = phy_values_offset;
+	layout->priv_phy_length_offset = phy_length_offset;
+	layout->priv_phy_length = OC_PHY_TIMING_LENGTH;
+	layout->source_index = source_index;
+	layout->source_priv = source_priv;
+	layout->source_priv_size = ksize(source_priv);
+	layout->source_pixel = source_pixel;
+	layout->source_clock = oc_dt.source_clock;
+	if (layout->source_priv_size < private_clock_offset + 8 ||
+	    layout->source_priv_size < private_transfer_offset + 4 ||
+	    layout->source_priv_size < phy_values_offset + 16 ||
+	    layout->source_priv_size > OC_MAX_PRIV_SIZE) {
+		oc_hint_stage = 5;
+		return -EPROTO;
+	}
+	return 0;
+}
+
 static noinline int oc_find_mode_layout(struct oc_mode_layout *layout)
 {
 	u8 *records;
@@ -2635,6 +2812,42 @@ static noinline int oc_find_mode_layout(struct oc_mode_layout *layout)
 	records = kmalloc(OC_MAX_RUNTIME_MODES * OC_MAX_MODE_STRIDE, GFP_KERNEL);
 	if (!records)
 		return -ENOMEM;
+	if (oc_hint_offset != OC_INVALID_OFFSET && oc_hint_stride >= 8) {
+		void *hint_modes = NULL;
+		bool readable = true;
+		u32 i;
+
+		if (!oc_read_pointer(oc_layout.display, oc_hint_offset, &hint_modes) ||
+		    !hint_modes) {
+			pr_info("rmx5200_display_runtime_modes: layout hint off=0x%x has no pointer\n",
+				oc_hint_offset);
+		} else {
+			for (i = 0; i < live_count; i++) {
+				if (oc_read_mem((u8 *)hint_modes + i * oc_hint_stride,
+						records + i * OC_MAX_MODE_STRIDE,
+						oc_hint_stride))
+					continue;
+				readable = false;
+				break;
+			}
+			if (!readable) {
+				pr_info("rmx5200_display_runtime_modes: layout hint off=0x%x stride=0x%x unreadable\n",
+					oc_hint_offset, oc_hint_stride);
+			} else if (!oc_try_layout_hint(records, hint_modes,
+						       oc_hint_stride, live_count,
+						       layout)) {
+				pr_info("rmx5200_display_runtime_modes: verified vendor layout off=0x%x stride=0x%x count=%u phy=%s\n",
+					oc_hint_offset, oc_hint_stride, live_count,
+					oc_hint_stage == 6 ? "discovered" : "stock");
+				kfree(records);
+				return 0;
+			} else {
+				pr_info("rmx5200_display_runtime_modes: layout hint off=0x%x stride=0x%x rejected stage=%u\n",
+					oc_hint_offset, oc_hint_stride,
+					oc_hint_stage);
+			}
+		}
+	}
 	for (display_offset = 0; display_offset <= OC_MAX_DISPLAY_SCAN;
 	     display_offset += 8) {
 		void *modes;
@@ -2695,6 +2908,10 @@ static noinline int oc_find_mode_layout(struct oc_mode_layout *layout)
 								u32 private_clock_offset = OC_INVALID_OFFSET;
 								u32 private_transfer_offset = OC_INVALID_OFFSET;
 								void *source_priv = NULL;
+								u32 phy_values_offset =
+									OC_PRIV_PHY_VALUES_OFFSET;
+								u32 phy_length_offset =
+									OC_PRIV_PHY_LENGTH_OFFSET;
 
 								if (hpos[hi] == vpos[vi] ||
 								    hpos[hi] == fpos[fi] ||
@@ -2724,8 +2941,18 @@ static noinline int oc_find_mode_layout(struct oc_mode_layout *layout)
 											 &source_priv))
 									continue;
 								if (!oc_private_phy_layout_matches(records,
-														 live_count, priv_offset))
-									continue;
+										live_count, priv_offset,
+										phy_values_offset,
+										phy_length_offset)) {
+									if (!oc_find_phy_layout(source_priv,
+											&phy_values_offset,
+											&phy_length_offset) ||
+									    !oc_private_phy_layout_matches(records,
+											live_count, priv_offset,
+											phy_values_offset,
+											phy_length_offset))
+										continue;
+								}
 								layout->modes = modes;
 								layout->stride = stride;
 								layout->count = live_count;
@@ -2739,9 +2966,9 @@ static noinline int oc_find_mode_layout(struct oc_mode_layout *layout)
 								layout->priv_clock_offset = private_clock_offset;
 								layout->priv_transfer_offset = private_transfer_offset;
 								layout->priv_phy_values_offset =
-									OC_PRIV_PHY_VALUES_OFFSET;
+									phy_values_offset;
 								layout->priv_phy_length_offset =
-									OC_PRIV_PHY_LENGTH_OFFSET;
+									phy_length_offset;
 								layout->priv_phy_length =
 									OC_PHY_TIMING_LENGTH;
 								layout->source_index = source_index;
@@ -2751,6 +2978,7 @@ static noinline int oc_find_mode_layout(struct oc_mode_layout *layout)
 								layout->source_clock = oc_dt.source_clock;
 				if (layout->source_priv_size < private_clock_offset + 8 ||
 				    layout->source_priv_size < private_transfer_offset + 4 ||
+				    layout->source_priv_size < phy_values_offset + 16 ||
 				    layout->source_priv_size > OC_MAX_PRIV_SIZE)
 					continue;
 				kfree(records);
@@ -2782,20 +3010,31 @@ static noinline int oc_find_panel_layout(void)
 	/* RMX5200's 6.12 dsi_display keeps the parsed panel at +0x108.
 	 * Prefer this verified ABI over a blind scan; retain the scan below as a
 	 * fail-closed fallback for minor vendor layout changes. */
-	if (oc_read_pointer(oc_layout.display, 0x108, &known_panel) &&
-	    oc_read_mem((u8 *)known_panel + 0x5a0, &known_a, sizeof(known_a)) &&
-	    oc_read_mem((u8 *)known_panel + 0x5a4, &known_b, sizeof(known_b)) &&
-	    known_a == live_count && known_b == live_count) {
-		oc_layout.panel = known_panel;
-		oc_layout.panel_count_offsets[0] = 0x5a0;
-		oc_layout.panel_count_offsets[1] = 0x5a4;
-		oc_layout.panel_count_values[0] = known_a;
-		oc_layout.panel_count_values[1] = known_b;
-		oc_layout.panel_count_fields = 2;
-		display_panel_offset = 0x108;
-		panel_count_offset = 0x5a0;
-		panel_count_fields = 2;
-		return 0;
+	if (oc_read_pointer(oc_layout.display, 0x108, &known_panel) && known_panel) {
+		u32 candidates[2] = { 0x5a0U, 0x5d0U };
+		unsigned int index;
+
+		for (index = 0; index < ARRAY_SIZE(candidates); index++) {
+			u32 offset = candidates[index];
+
+			if (!oc_read_mem((u8 *)known_panel + offset, &known_a,
+					 sizeof(known_a)) ||
+			    !oc_read_mem((u8 *)known_panel + offset + 4, &known_b,
+					 sizeof(known_b)))
+				break;
+			if (known_a != live_count || known_b != live_count)
+				continue;
+			oc_layout.panel = known_panel;
+			oc_layout.panel_count_offsets[0] = offset;
+			oc_layout.panel_count_offsets[1] = offset + 4;
+			oc_layout.panel_count_values[0] = known_a;
+			oc_layout.panel_count_values[1] = known_b;
+			oc_layout.panel_count_fields = 2;
+			display_panel_offset = 0x108;
+			panel_count_offset = offset;
+			panel_count_fields = 2;
+			return 0;
+		}
 	}
 
 	for (display_offset = 0; display_offset <= OC_MAX_DISPLAY_SCAN;
