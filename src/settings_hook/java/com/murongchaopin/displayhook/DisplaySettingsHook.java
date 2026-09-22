@@ -46,8 +46,6 @@ public class DisplaySettingsHook extends XposedModule {
                 return;
             } else if (KERNELSU.equals(packageName)) {
                 KernelSuWebUiHooks.install(this, param.getClassLoader());
-            } else if (SETTINGS.equals(packageName)) {
-                SettingsRefreshRateHooks.install(this, param.getClassLoader());
             } else if (SYSTEM_UI.equals(packageName)) {
                 SystemUiStabilityHooks.install(this, param.getClassLoader());
             }
