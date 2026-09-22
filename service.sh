@@ -8,6 +8,7 @@ SETTINGS_BRIDGE_HELPER="$MODDIR/scripts/display_settings_bridge.sh"
 GATE_HELPER="$MODDIR/scripts/display_license_gate.sh"
 PREMIUM_SERVICE="$MODDIR/premium/scripts/premium_service.sh"
 LTPS_VOTE_HELPER="$MODDIR/scripts/surfaceflinger_ltps_vote_patch.sh"
+RAPID_RATE_HELPER="$MODDIR/scripts/display_rapid_rate.sh"
 DISPLAY_HOOK_PACKAGE="com.murongchaopin.displayhook"
 
 # The free and premium daemons share OTI pause ownership through this private
@@ -21,6 +22,12 @@ chmod 0700 "$MODDIR/config/adfr_lock" 2>/dev/null
 # post-fs-data and service.sh different mount namespaces.
 if [ -f "$COLOROS_CONFIG_HELPER" ]; then
     sh "$COLOROS_CONFIG_HELPER" apply >/dev/null 2>&1 || true
+fi
+
+# The coloros menu reads this vendor property when the page is opened; keep it
+# in sync in the service namespace too (idempotent, never lowers the value).
+if [ -f "$RAPID_RATE_HELPER" ]; then
+    sh "$RAPID_RATE_HELPER" apply >/dev/null 2>&1 || true
 fi
 
 # 等待系统启动完成

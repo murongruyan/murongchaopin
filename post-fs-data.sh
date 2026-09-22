@@ -119,6 +119,15 @@ else
     fi
 fi
 
+# ColorOS 17 gates its "refresh rate setting" menu on a vendor property that
+# the realme builds leave unset, which makes the row inert and hides every rate
+# the display backend published.  Publish the panel maximum right after the
+# backend ran so the system menu offers those modes.
+RAPID_RATE_HELPER="$MODDIR/scripts/display_rapid_rate.sh"
+if [ -f "$RAPID_RATE_HELPER" ]; then
+    sh "$RAPID_RATE_HELPER" apply >/dev/null 2>&1 || true
+fi
+
 if [ -f "$PREMIUM_POST_FS" ]; then
     . "$GATE_HELPER" 2>/dev/null
     gate_normalize_premium_scripts >/dev/null 2>&1 || true
