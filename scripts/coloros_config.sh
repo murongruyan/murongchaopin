@@ -60,7 +60,10 @@ validate_source() {
     for RATE in 120 90 60 30 10 1; do
         grep -q "\"$RATE\"" "$VRR_SOURCE" || return 1
     done
-    grep -Eq '<refresh_rate_config[^>]*version="20260225"' "$RATE_SOURCE" || return 1
+    # ColorOS 17 ships version 20260811; the mounted file is a copy of that
+    # stock config so every new vendor entry (per-app override limits, game
+    # settings) stays intact.
+    grep -Eq '<refresh_rate_config[^>]*version="20260811"' "$RATE_SOURCE" || return 1
     grep -Eq '<config[^>]*maxrefreshsettings="3"' "$RATE_SOURCE" || return 1
     grep -q '<config[^>]*defaultMaxRate=' "$RATE_SOURCE" && return 1
     grep -q '<config[^>]*extremeHighEnable=' "$RATE_SOURCE" && return 1
