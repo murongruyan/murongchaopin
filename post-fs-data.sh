@@ -45,6 +45,17 @@ if [ -n "$BOOT_ID" ]; then
 fi
 export MURONG_BOOT_GUARD="$BOOT_GUARD"
 
+# Kernel symbol contract guard: describe this boot's kernel once so both the
+# free DRM backend and the paid helpers load modules that match it.  The shared
+# state directory is exported so the paid payload reuses this scan.
+KO_ABI_HELPER="$MODDIR/scripts/ko_abi_guard.sh"
+if [ -r "$KO_ABI_HELPER" ]; then
+    . "$KO_ABI_HELPER"
+    export KO_ABI_STATE_DIR KO_ABI_BIN
+    ko_abi_reset
+    ko_abi_prepare || true
+fi
+
 # Write the premium authorization bridge (frozen contract 16.4). Root writes
 # this after lease verification; the paid Hook and paid daemon read it as their
 # ONLY authorization source (never written from the WebUI). It is reset to 0

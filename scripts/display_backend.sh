@@ -18,6 +18,11 @@ DRM_SPECS_FILE="$MOD_DIR/runtime/drm_modes.txt"
 
 mkdir -p "$STATE_DIR" 2>/dev/null
 [ -r "$MODE_MANIFEST_HELPER" ] && . "$MODE_MANIFEST_HELPER"
+KO_ABI_MOD_DIR="$MOD_DIR"
+KO_ABI_HELPER="$MOD_DIR/scripts/ko_abi_guard.sh"
+# The DRM module is built against a published vendor kernel; its recorded
+# symbol CRCs are checked against the running kernel before every load.
+[ -r "$KO_ABI_HELPER" ] && . "$KO_ABI_HELPER"
 
 now() {
     date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo unknown-time
@@ -303,11 +308,17 @@ apply_drm_at_boot() {
         return 0
     }
     log_line "drm-load profile=$KO_PROFILE phy_profile=$DRM_PHY_PROFILE"
+    ko_abi_resolve "$KO_MODULE" || {
+        set_status "blocked:drm_abi_${ko_abi_plan}${ko_abi_reason:+_$ko_abi_reason}"
+        return 0
+    }
+    [ "$ko_abi_plan" = adapted ] && \
+        log_line "drm-load abi-adapted reason=$ko_abi_reason"
     if [ "$KO_PROFILE" = pjd110 ]; then
-        insmod "$KO_MODULE" probe_only=0 drop_stock_low=1 \
+        insmod "$KO_ABI_RESOLVED" probe_only=0 drop_stock_low=1 \
             mode_specs="$DRM_MODE_SPECS" >/dev/null 2>&1
     else
-        insmod "$KO_MODULE" probe_only=0 drop_stock_fhd=1 \
+        insmod "$KO_ABI_RESOLVED" probe_only=0 drop_stock_fhd=1 \
             mode_specs="$DRM_MODE_SPECS" \
             phy_profile="$DRM_PHY_PROFILE" >/dev/null 2>&1
     fi
