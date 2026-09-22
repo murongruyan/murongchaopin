@@ -31,7 +31,10 @@ grep -q 'list_move_tail' src/ko/rmx5200_display_modes.c
 grep -q 'oc_clone_runtime_priv' src/ko/rmx5200_display_modes.c
 grep -q 'runtime_phy_expected' src/ko/rmx5200_display_modes.c
 grep -q 'OC_DROP_STOCK_FHD_DEFAULT false' src/ko/rmx5200_display_modes.c
-grep -q 'insmod "$KO_MODULE" probe_only=0 drop_stock_fhd=1' scripts/display_backend.sh
+# The DRM module is loaded through the kernel symbol guard, which resolves the
+# file that actually matches the running kernel (shipped or adapted copy).
+grep -q 'ko_abi_resolve "$KO_MODULE"' scripts/display_backend.sh
+grep -q 'insmod "$KO_ABI_RESOLVED" probe_only=0 drop_stock_fhd=1' scripts/display_backend.sh
 grep -q 'oc_prepare_runtime_base' src/ko/rmx5200_display_modes.c
 grep -q 'oc_hide_stock_fhd_drm_modes' src/ko/rmx5200_display_modes.c
 grep -q 'removed_stock_fhd_count' src/ko/rmx5200_display_modes.c

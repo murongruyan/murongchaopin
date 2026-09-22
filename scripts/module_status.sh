@@ -81,10 +81,25 @@ boot_guard_active()
     [ -f "$MODDIR/runtime/boot_guard.txt" ]
 }
 
+ko_abi_incompatible()
+{
+    # 内核符号契约守卫在本次开机跳过了某个内核模块（符号缺失或无法适配）：
+    # 说明这台机器的内核 ABI 与模块内置模块不再匹配，需要更新模块而不是
+    # 强行加载。
+    STATUS_FILE="$MODDIR/runtime/ko_abi/status.txt"
+    [ -f "$STATUS_FILE" ] || return 1
+    grep -q 'skipped:abi_rejected' "$STATUS_FILE" 2>/dev/null ||
+        grep -q 'skipped:adapt_failed' "$STATUS_FILE" 2>/dev/null ||
+        grep -q 'skipped:missing' "$STATUS_FILE" 2>/dev/null
+}
+
 collect_notices()
 {
     if boot_guard_active; then
         printf '检测到上次开机未完成，本次已自动跳过内核模块注入（防砖保护）；若反复出现请在日志页打包发给开发者'
+    fi
+    if ko_abi_incompatible; then
+        printf '当前系统内核符号与本模块不匹配，内核增强已安全跳过；请更新模块或把日志发给我'
     fi
     if coloros_unmount_conflict; then
         printf '显示配置被其他模块卸载（常见于温控伪装类 zygisk 模块），自定义节点可能无效且分辨率/DPI 会闪烁'

@@ -229,6 +229,22 @@ jobs:
           done
           echo "free daemon built: $DAEMON_VERSION" >> "$GITHUB_STEP_SUMMARY"
 
+          # Device-side kernel symbol contract guard: it reads the symbol CRCs
+          # out of the vendor DLKM modules the running kernel booted with and
+          # adapts our kernel modules to that contract at load time.
+          echo "Building ko_abi_guard"
+          "$RAW_CLANG" \
+            --target=aarch64-linux-android30 \
+            -O2 \
+            -static \
+            -Wall \
+            -Wextra \
+            "src/ko_abi_guard.c" \
+            -o "$OUT_DIR/ko_abi_guard"
+          test -s "$OUT_DIR/ko_abi_guard"
+          file "$OUT_DIR/ko_abi_guard" | grep -F 'ARM aarch64'
+          strings "$OUT_DIR/ko_abi_guard" | grep -F 'KO_ABI_CHECK'
+
       - name: Validate scripts and Web backup isolation
         shell: bash
         run: |
@@ -241,6 +257,7 @@ jobs:
             late-load.sh \
             scripts/dtbo_avb.sh \
             scripts/display_backend.sh \
+            scripts/ko_abi_guard.sh \
             scripts/hmbird_backend.sh \
             scripts/coloros_config.sh \
             scripts/display_license_gate.sh \
@@ -254,6 +271,7 @@ jobs:
             tests/check_dtbo_apply_lock.sh \
             tests/check_install_tool_permissions.sh \
             tests/check_volume_key_parser.sh \
+            tests/check_ko_abi_guard.sh \
             tests/check_module_update_preservation.sh; do
             sh -n "$script"
           done
@@ -283,6 +301,7 @@ jobs:
           sh tests/check_premium_script_line_endings.sh
           sh tests/check_package_kernel_compat.sh
           sh tests/check_screen_on_reapply.sh
+          sh tests/check_ko_abi_guard.sh
 
       - name: Configure Hook signing
         id: hook_signing
@@ -492,6 +511,12 @@ jobs:
           test -x "$STAGE_DIR/bin/rate_daemon"
           PACKAGED_DAEMON_VERSION="$(sed -n 's/^#define RATE_DAEMON_VERSION "\([^"]*\)"/\1/p' src/rate_daemon.c)"
           strings "$STAGE_DIR/bin/rate_daemon" | grep -Fx "$PACKAGED_DAEMON_VERSION"
+          # The symbol contract guard is rebuilt here for the same reason: a
+          # stale committed copy would silently ship an outdated contract
+          # reader after an Android/vendor OTA.
+          install -m 0755 build/bin/ko_abi_guard "$STAGE_DIR/bin/ko_abi_guard"
+          test -x "$STAGE_DIR/bin/ko_abi_guard"
+          strings "$STAGE_DIR/bin/ko_abi_guard" | grep -Fq 'KO_ABI_CHECK'
           if [ "${{ steps.release_meta.outputs.is_release }}" = 'true' ]; then
             MODULE_VERSION="$(sed -n 's/^version=//p' "$STAGE_DIR/module.prop")"
             if [ "$PACKAGED_DAEMON_VERSION" != "$MODULE_VERSION" ]; then
