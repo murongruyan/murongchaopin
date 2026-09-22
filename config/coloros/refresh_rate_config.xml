@@ -5,7 +5,7 @@
     setting mode: auto  ,90hz     ,60hz  ,120hz
     refresh rate: 120hz ,90hz,  60hz  ,120hz
 -->
-<refresh_rate_config ratemagic="8350R60_90_120" version="20260225">
+<refresh_rate_config ratemagic="8350R60_90_120" version="20260811">
     <enableAwlaysOriginal package="android.graphics.cts" />
     <enableAwlaysOriginal package="android.display.cts" />
     <enableAwlaysOriginal package="android.view.cts" />
@@ -456,6 +456,7 @@
     <item activity="com.oplus.aod/com.oplus.aod.activity.AodHomeActivity" package="com.oplus.aod" rateId="3-1-2-3" />
 <item package="com.google.android.permissioncontroller" rateId="3-2-2-3" /> <!--设置-安全与隐私-->
 <item package="com.oplus.vip" rateId="3-2-2-3" /> <!--设置-账号-->
+<item package="com.coloros.gamesettings" rateId="3-1-2-3" /> <!--游戏设置-->
 <item package="com.nearme.instant.platfor" rateId="3-2-2-3" /> <!--游戏中心-->
 <item package="com.oneplus.bbs" rateId="3-2-2-3" /> <!--bbs-->
 <item package="com.google.android.contacts" rateId="3-2-2-3" /> <!--contacts-->
@@ -1119,7 +1120,7 @@
     <item package="com.fugo.wow" rateId="2-2-2-2" /> <!--Words of Wonders-->
     <item package="com.wildspike.wormszone" rateId="2-2-2-2" disableViewOverride="true"/> <!--Worms Zone .io - Hungry Snake-->
     <item package="com.ludo.king" rateId="2-2-2-2" disableViewOverride="true"/> <!--Ludo King™-->
-    <item package="com.kitkagames.fallbuddies" rateId="2-2-2-2" disableViewOverride="true"/> <!--Stumble Guys-->
+    <item package="com.kitkagames.fallbuddies" rateId="3-1-2-3" disableViewOverride="true"/> <!--Stumble Guys-->
     <item package="com.yy.hiyo" rateId="2-2-2-2" /> <!--Hago- Party, Chat & Games-->
     <item package="com.maleo.bussimulatorid" rateId="2-2-2-2" disableViewOverride="true"/> <!--Bus Simulator Indonesia-->
     <item package="com.PlayMax.playergames" rateId="2-2-2-2" disableViewOverride="true"/> <!--Stickman Party 2 3 4 MiniGames-->
@@ -2561,5 +2562,9 @@
     <item activity="com.google.android.apps.wellbeing/com.google.android.apps.wellbeing.applimits.ui.AppLimitsActivity" package="com.google.android.apps.wellbeing" rateId="3-1-2-3" /><!-- 数字健康与家长控制 应用定时器  -->
     <item activity="com.google.android.apps.wellbeing/com.google.android.apps.wellbeing.mindfulnudge.ui.MindfulNudgeActivity" package="com.google.android.apps.wellbeing" rateId="3-1-2-3" /><!-- 数字健康与家长控制 屏幕使用时间提醒  -->
     <item activity="com.google.android.apps.wellbeing/com.google.android.apps.wellbeing.walkingdetection.ui.WalkingDetectionSettingsActivity" package="com.google.android.apps.wellbeing" rateId="3-1-2-3" /><!-- 数字健康与家长控制 看路提醒  -->
+
+<!--notSupportOverride: 设置页面不支持自定义刷新率-->
+    <notSupportOverride package="com.imangi.templerun2" />
+    <notSupportOverride package="com.kitkagames.fallbuddies" />
 
 </refresh_rate_config>

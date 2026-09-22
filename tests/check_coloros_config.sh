@@ -40,7 +40,9 @@ assert set(merged.get("frtc_framerate_ranges", [])) == expected_frtc
 
 root = ET.parse(rate_path).getroot()
 assert root.tag == "refresh_rate_config"
-assert int(root.attrib["version"]) == 20260225
+# The mounted refresh-rate config tracks the ColorOS 17 stock revision so new
+# vendor entries (notSupportOverride, game settings) are preserved.
+assert int(root.attrib["version"]) == 20260811
 config = root.find("config")
 assert config is not None
 assert config.attrib.get("maxrefreshsettings") == "3"

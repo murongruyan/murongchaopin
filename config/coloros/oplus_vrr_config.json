@@ -15,7 +15,7 @@
         "feature_osync": 0
     },
     {
-        "feature_hybrid_acc" : true
+        "feature_hybrid_acc": true
     },
     {
         "sa_backlight": true,
@@ -523,7 +523,10 @@
     },
     {
         "ambient": true,
-        "ambient_thresholds": [0,8000]
+        "ambient_thresholds": [
+            0,
+            8000
+        ]
     },
     {
         "touch_idle": true,
@@ -532,21 +535,33 @@
         "ambient_enable": true,
         "144_to_120_enable": true,
         "sw_whitelist_3rd": {
-            "com.ss.android.ugc.aweme": [30],
-            "com.ss.android.ugc.aweme.lite":[30],
-            "com.ss.android.ugc.live":[30],
-            "com.smile.gifmaker": [30],
-            "com.kuaishou.nebula":[30],
-            "com.tencent.wemeet.app":[30]
+            "com.ss.android.ugc.aweme": [
+                30
+            ],
+            "com.ss.android.ugc.aweme.lite": [
+                30
+            ],
+            "com.ss.android.ugc.live": [
+                30
+            ],
+            "com.smile.gifmaker": [
+                30
+            ],
+            "com.kuaishou.nebula": [
+                30
+            ],
+            "com.tencent.wemeet.app": [
+                30
+            ]
         },
         "sw_whitelist_3rd_force": {
             "com.ss.android.ugc.aweme": 30
         },
         "adfr_enable": true,
         "timeout": 3500,
-        "content_threshold":10,
-        "content_gap_ms":800,
-        "content_gap_loop_percent":25,
+        "content_threshold": 10,
+        "content_gap_ms": 800,
+        "content_gap_loop_percent": 25,
         "hw_nit_limit": 50,
         "hw_nit_limit_pwm": 50,
         "adfr_to_hw": [
@@ -1057,7 +1072,7 @@
         "vrr_info_record": true,
         "panel_idle_time": 70,
         "sf_idle_time": 1000,
-        "max_mixerlayernum" : 11,
+        "max_mixerlayernum": 11,
         "sf_framerate_ranges": [
             "120",
             "90",
@@ -1091,12 +1106,9 @@
         "touch_frame_change": true,
         "strategy": 0,
         "frtc_capability": 0,
-        "whitelist": [
-        ],
-        "blacklist": [
-        ],
-        "min_framerate_map": {
-        }
+        "whitelist": [],
+        "blacklist": [],
+        "min_framerate_map": {}
     },
     {
         "debug_overlay": [
@@ -1128,7 +1140,6 @@
         "big_data": true,
         "re_cache_miss": true,
         "collect_re_shader_param": false,
-        "re_shader_allowlist": [
-        ]
+        "re_shader_allowlist": []
     }
 ]
