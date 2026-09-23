@@ -950,6 +950,19 @@ static int write_setting_int(const char *table, const char *key, int value) {
     return rc == 0;
 }
 
+/* Publish a setting only when it actually changes.  ColorOS reacts to a
+ * resolution/density key write by re-applying the display configuration, which
+ * is visible as a DPI flash, so identical values must not be rewritten. */
+static int write_setting_int_if_changed(const char *table, const char *key, int value) {
+    int current = 0;
+
+    if (read_setting_int(table, key, &current) && current == value) {
+        log_msg("settings %s/%s already %d, write skipped", table, key, value);
+        return 0;
+    }
+    return write_setting_int(table, key, value) ? 1 : 0;
+}
+
 static int delete_setting(const char *table, const char *key) {
     char cmd[256];
     int rc;
@@ -1161,10 +1174,16 @@ static int commit_refresh_step(int mode_id) {
         log_msg("Refresh ladder step failed: mode=%d fps=%d", mode_id,
                 mode_fps(mode_id));
         active_id = get_current_system_mode();
-        if (is_valid_mode(active_id) &&
-                !rmx5200_ltpo_runtime_transition) {
-            sync_android_settings(active_id);
-        }
+        /* ColourOS reads the framework refresh policy back as its own tier
+         * request, so publishing the mode this step happened to land on makes
+         * the platform chase a rate the user never selected; every following
+         * transaction then fights the panel and the display flips geometry.
+         * Keep the user's policy untouched and let the caller re-drive the
+         * requested target instead. */
+        if (is_valid_mode(active_id) && active_id != mode_id)
+            log_msg("Refresh ladder stray mode ignored: observed=%d/%dHz "
+                    "target=%d/%dHz policy_kept=1",
+                    active_id, mode_fps(active_id), mode_id, mode_fps(mode_id));
         return 0;
     }
     /* Give the panel one vblank interval beyond verification before issuing an
@@ -1323,6 +1342,19 @@ static int apply_refresh_ladder(int target_id) {
     if (active_id == target_id) return 1;
 
     if (target_fps > mode_fps(active_id)) {
+        /* ColourOS' tier table resolves the stock 144 Hz rung to whatever mode
+         * sits in that slot of the current resolution group, and the vendor OTI
+         * vote re-asserts that mapping right after the transaction, so a stock
+         * rung above 120 never survives: the panel parks in the other resolution
+         * group until the next retry.  An overclock target therefore goes
+         * straight to the requested mode; commit_refresh_step still verifies the
+         * result and fails closed if the panel refuses the timing. */
+        if (is_overclock_mode(target_id) && mode_fps(active_id) >= 120) {
+            log_msg("Refresh ladder up direct for overclock target: %d/%dHz -> "
+                    "%d/%dHz", active_id, mode_fps(active_id), target_id,
+                    target_fps);
+            return commit_refresh_step(target_id);
+        }
         while (mode_fps(active_id) < target_fps) {
             int next_id = next_refresh_ladder_step(active_id, target_id);
             if (next_id >= 0 && !is_overclock_mode(next_id)) {
@@ -2478,18 +2510,27 @@ static void sync_android_resolution_settings(int id) {
     int width = get_mode_width(id);
     int height = mode_height(id);
     int adjust = resolution_adjust_for_width(width);
+    int changed = 0;
 
     if (width <= 0 || height <= 0 || adjust < 0) {
         log_msg("Resolution settings mirror skipped: mode=%d width=%d height=%d adjust=%d",
                 id, width, height, adjust);
         return;
     }
-    write_setting_int("secure", "user_preferred_screen_index", adjust);
-    write_setting_int("secure", "oplus_customize_screen_resolution_adjust", adjust);
-    write_setting_int("global", "user_preferred_resolution_width", width);
-    write_setting_int("global", "user_preferred_resolution_height", height);
-    log_msg("Resolution settings synchronized: mode=%d geometry=%dx%d adjust=%d",
-            id, width, height, adjust);
+    /* ColorOS re-applies the display configuration (and reflows the density)
+     * whenever one of these keys changes value.  A plain refresh-rate switch
+     * keeps the same geometry, so writing the identical values again makes the
+     * UI flash its DPI.  Only publish real changes. */
+    changed += write_setting_int_if_changed("secure", "user_preferred_screen_index", adjust);
+    changed += write_setting_int_if_changed("secure",
+                                            "oplus_customize_screen_resolution_adjust",
+                                            adjust);
+    changed += write_setting_int_if_changed("global", "user_preferred_resolution_width",
+                                            width);
+    changed += write_setting_int_if_changed("global", "user_preferred_resolution_height",
+                                            height);
+    log_msg("Resolution settings synchronized: mode=%d geometry=%dx%d adjust=%d changed=%d",
+            id, width, height, adjust, changed);
 }
 
 static const char *rmx5200_oti_base_path(const char *base_path) {
