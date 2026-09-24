@@ -796,6 +796,20 @@ static void analyse_ko(const char *ko_path, const struct strmap *contract,
 
 		if (!ko_version_get(&view, index, &version))
 			continue;
+		/*
+		 * patch renames a version entry this kernel cannot resolve to a
+		 * name that no symbol can match, which makes the kernel treat the
+		 * import as unversioned.  That marker has to be recognised here,
+		 * otherwise a module the guard has already adapted reports itself
+		 * as unresolved and can never settle back to PASS.
+		 */
+		if (version.name[0] == '#') {
+			result->neutralised++;
+			log_line("ENTRY symbol=%s ko=0x%08x device=- "
+				 "action=already-neutralised", version.name,
+				 version.crc);
+			continue;
+		}
 		if (strmap_lookup(contract, version.name, NULL)) {
 			uint32_t expected = 0;
 

@@ -272,6 +272,7 @@ jobs:
             tests/check_install_tool_permissions.sh \
             tests/check_volume_key_parser.sh \
             tests/check_ko_abi_guard.sh \
+            tests/check_ko_abi_guard_roundtrip.sh \
             tests/check_module_update_preservation.sh; do
             sh -n "$script"
           done
@@ -302,6 +303,8 @@ jobs:
           sh tests/check_package_kernel_compat.sh
           sh tests/check_screen_on_reapply.sh
           sh tests/check_ko_abi_guard.sh
+          KO_ABI_GUARD_BIN="$PWD/build/bin/ko_abi_guard" \
+            sh tests/check_ko_abi_guard_roundtrip.sh
 
       - name: Configure Hook signing
         id: hook_signing
