@@ -2,6 +2,8 @@ package com.murongchaopin.displayhook;
 
 import android.util.SparseArray;
 
+import java.io.BufferedReader;
+import java.io.FileReader;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.List;
@@ -18,12 +20,16 @@ final class FrameworkResolutionVoteHooks {
     private static final int FHD_HEIGHT = 2352;
     private static final int QHD_WIDTH = 1440;
     private static final int QHD_HEIGHT = 3136;
+    private static final String TARGET_FILE =
+            "/data/adb/modules/murongchaopin/config/mode.txt";
 
     private static String lastRewrite = "";
     private static String lastAdjusted = "";
     private static volatile Geometry preferredGeometry = Geometry.INVALID;
     private static final ThreadLocal<Geometry> CALCULATION_GEOMETRY =
             new ThreadLocal<>();
+    private static volatile TargetMode cachedTarget = TargetMode.INVALID;
+    private static volatile long targetReadAt;
 
     private FrameworkResolutionVoteHooks() {
     }
@@ -41,10 +47,10 @@ final class FrameworkResolutionVoteHooks {
             Class<?> summaryClass = Class.forName(VOTE_SUMMARY, false, loader);
             int appSizePriority = staticInt(voteClass,
                     "PRIORITY_APP_REQUEST_SIZE");
-            int userSizePriority = staticInt(voteClass,
-                    "PRIORITY_USER_SETTING_DISPLAY_PREFERRED_SIZE");
+            int userSizePriority = optionalUserSizePriority(voteClass);
 
             int installed = 0;
+            int votesInstalled = 0;
             for (Method method : storageClass.getDeclaredMethods()) {
                 if (!"getVotes".equals(method.getName())
                         || method.getParameterCount() != 1
@@ -63,10 +69,11 @@ final class FrameworkResolutionVoteHooks {
                         return original;
                     }
                     alignAppSizeVote(module, (SparseArray<?>) original,
-                            appSizePriority, userSizePriority);
+                            appSizePriority, userSizePriority, selectedTarget());
                     return original;
                 });
                 installed++;
+                votesInstalled++;
             }
             for (Method method : summaryClass.getDeclaredMethods()) {
                 if (!"adjustSize".equals(method.getName())
@@ -95,9 +102,8 @@ final class FrameworkResolutionVoteHooks {
                 });
                 installed++;
             }
-            if (installed != 3) {
-                throw new NoSuchMethodException("resolution hooks expected=3 actual="
-                        + installed);
+            if (votesInstalled == 0) {
+                throw new NoSuchMethodException("VotesStorage.getVotes hook unavailable");
             }
             module.info("Framework resolution hooks installed=" + installed
                     + " model=" + model
@@ -114,25 +120,35 @@ final class FrameworkResolutionVoteHooks {
     private static void alignAppSizeVote(DisplaySettingsHook module,
                                          SparseArray<?> votes,
                                          int appPriority,
-                                         int userPriority) {
+                                         int userPriority,
+                                         TargetMode target) {
         Object appVote = votes.get(appPriority);
-        Object userVote = votes.get(userPriority);
         Geometry app = geometry(appVote);
+        Object userVote = userPriority >= 0 ? votes.get(userPriority) : null;
         Geometry user = geometry(userVote);
-        preferredGeometry = user.validRmx5200() ? user : Geometry.INVALID;
+        Geometry selected = target.isValid() ? target.geometry()
+                : user.validRmx5200() ? user : Geometry.INVALID;
+        preferredGeometry = selected;
         CALCULATION_GEOMETRY.set(preferredGeometry);
-        if (!app.validRmx5200() || !user.validRmx5200()
-                || app.equals(user)) {
+        if (appVote == null || !app.validRmx5200() || !selected.validRmx5200()
+                || app.equals(selected)) {
             return;
         }
 
-        ((SparseArray) votes).put(appPriority, userVote);
-        String rewrite = app + "->" + user;
-        synchronized (FrameworkResolutionVoteHooks.class) {
-            if (!rewrite.equals(lastRewrite)) {
-                lastRewrite = rewrite;
-                module.info("Framework resolution app-size vote aligned " + rewrite);
+        try {
+            Reflect.setField(appVote, "mWidth", selected.width);
+            Reflect.setField(appVote, "mHeight", selected.height);
+            Reflect.setField(appVote, "mMinWidth", selected.width);
+            Reflect.setField(appVote, "mMinHeight", selected.height);
+            String rewrite = app + "->" + selected;
+            synchronized (FrameworkResolutionVoteHooks.class) {
+                if (!rewrite.equals(lastRewrite)) {
+                    lastRewrite = rewrite;
+                    module.info("Framework resolution app-size vote aligned " + rewrite);
+                }
             }
+        } catch (ReflectiveOperationException error) {
+            module.error("Framework resolution app-size vote update failed", error);
         }
     }
 
@@ -194,6 +210,76 @@ final class FrameworkResolutionVoteHooks {
         return field.getInt(null);
     }
 
+    static int optionalUserSizePriority(Class<?> voteClass) {
+        String[] candidates = {
+                "PRIORITY_USER_SETTING_DISPLAY_PREFERRED_SIZE",
+                "PRIORITY_USER_SETTING_DISPLAY_SIZE",
+                "PRIORITY_USER_SETTING_DISPLAY_RESOLUTION",
+                "PRIORITY_USER_SETTING_RESOLUTION"
+        };
+        for (String candidate : candidates) {
+            int value = optionalStaticInt(voteClass, candidate);
+            if (value >= 0) {
+                return value;
+            }
+        }
+        return -1;
+    }
+
+    private static int optionalStaticInt(Class<?> owner, String name) {
+        try {
+            return staticInt(owner, name);
+        } catch (ReflectiveOperationException ignored) {
+            return -1;
+        }
+    }
+
+    static int[] selectedDisplayTarget() {
+        TargetMode target = selectedTarget();
+        return target.isValid()
+                ? new int[]{target.width, target.height, target.fps}
+                : null;
+    }
+
+    private static TargetMode selectedTarget() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        TargetMode cached = cachedTarget;
+        if (now - targetReadAt < 1000L) {
+            return cached;
+        }
+        TargetMode parsed = TargetMode.INVALID;
+        try (BufferedReader reader = new BufferedReader(new FileReader(TARGET_FILE))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String value = line.trim();
+                if (value.isEmpty() || value.startsWith("#")) {
+                    continue;
+                }
+                String[] parts = value.split("\\s+");
+                String geometry = parts[0];
+                String rate = parts.length > 1 ? parts[1] : "";
+                if (!geometry.contains("x") && parts.length > 2) {
+                    geometry = parts[1];
+                    rate = parts[2];
+                }
+                int separator = geometry.indexOf('x');
+                if (separator <= 0 || rate.isEmpty()) {
+                    break;
+                }
+                parsed = new TargetMode(
+                        Integer.parseInt(geometry.substring(0, separator)),
+                        Integer.parseInt(geometry.substring(separator + 1)),
+                        (int) Math.round(Double.parseDouble(rate)));
+                break;
+            }
+        } catch (Throwable ignored) {
+            // A missing config must leave framework policy unmodified.
+        }
+        cachedTarget = parsed;
+        targetReadAt = now;
+        return parsed;
+    }
+
     private static String systemProperty(String key, String fallback) {
         try {
             Class<?> properties = Class.forName("android.os.SystemProperties");
@@ -239,6 +325,29 @@ final class FrameworkResolutionVoteHooks {
         @Override
         public String toString() {
             return width + "x" + height;
+        }
+    }
+
+    private static final class TargetMode {
+        static final TargetMode INVALID = new TargetMode(-1, -1, -1);
+
+        final int width;
+        final int height;
+        final int fps;
+
+        TargetMode(int width, int height, int fps) {
+            this.width = width;
+            this.height = height;
+            this.fps = fps;
+        }
+
+        boolean isValid() {
+            return fps >= 30 && fps <= 1000
+                    && new Geometry(width, height).validRmx5200();
+        }
+
+        Geometry geometry() {
+            return isValid() ? new Geometry(width, height) : Geometry.INVALID;
         }
     }
 }

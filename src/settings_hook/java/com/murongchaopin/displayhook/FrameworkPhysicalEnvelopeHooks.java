@@ -3,17 +3,15 @@ package com.murongchaopin.displayhook;
 import android.util.SparseArray;
 import android.view.Display;
 
-import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
-/** Pins explicit 120Hz requests without replacing native 60/90Hz LTPS modes. */
+/** Keeps Framework's selected resolution group aligned without forcing a rate. */
 final class FrameworkPhysicalEnvelopeHooks {
     private static final String DIRECTOR =
             "com.android.server.display.mode.DisplayModeDirector";
     private static final String DESIRED_SPECS = DIRECTOR + "$DesiredDisplayModeSpecs";
     private static final String VOTE = "com.android.server.display.mode.Vote";
     private static final int DEFAULT_DISPLAY = 0;
-    private static final float ENVELOPE_RATE_HZ = 120.0f;
     private static final float RATE_EPSILON_HZ = 0.01f;
 
     private static volatile Method screenStateReader;
@@ -37,8 +35,8 @@ final class FrameworkPhysicalEnvelopeHooks {
             Class<?> owner = Class.forName(DIRECTOR, false, loader);
             Class<?> specsClass = Class.forName(DESIRED_SPECS, false, loader);
             Class<?> voteClass = Class.forName(VOTE, false, loader);
-            int userSizePriority = staticInt(voteClass,
-                    "PRIORITY_USER_SETTING_DISPLAY_PREFERRED_SIZE");
+            int userSizePriority = FrameworkResolutionVoteHooks
+                    .optionalUserSizePriority(voteClass);
             int installed = 0;
             for (Method method : owner.getDeclaredMethods()) {
                 if (!"getDesiredDisplayModeSpecs".equals(method.getName())
@@ -64,7 +62,8 @@ final class FrameworkPhysicalEnvelopeHooks {
                         + installed);
             }
             module.info("Framework physical envelope hooks installed=" + installed
-                    + " model=" + model + " rate=" + ENVELOPE_RATE_HZ);
+                    + " model=" + model + " configuredModeSource=mode.txt"
+                    + " userSizePriority=" + userSizePriority);
             return installed;
         } catch (Throwable error) {
             module.error("Framework physical envelope hook unavailable", error);
@@ -82,39 +81,30 @@ final class FrameworkPhysicalEnvelopeHooks {
             Display.Mode[] modes = appSupportedModes(director, displayId);
             int originalBaseId = numberField(specs, "baseModeId").intValue();
             Display.Mode base = findMode(modes, originalBaseId);
-            if (base == null
-                    || Math.abs(base.getRefreshRate() - ENVELOPE_RATE_HZ)
-                    > RATE_EPSILON_HZ) {
+            int[] selected = FrameworkResolutionVoteHooks.selectedDisplayTarget();
+            if (selected == null || selected.length != 3) {
                 return;
             }
 
-            Geometry preferred = preferredGeometry(director, displayId,
-                    userSizePriority);
+            Geometry preferred = new Geometry(selected[0], selected[1]);
             if (!preferred.validRmx5200()) {
-                preferred = new Geometry(base.getPhysicalWidth(),
-                        base.getPhysicalHeight());
+                preferred = preferredGeometry(director, displayId,
+                        userSizePriority);
             }
-            Display.Mode envelope = findMode(modes, preferred,
-                    ENVELOPE_RATE_HZ);
-            if (envelope == null) {
+            Display.Mode target = base == null ? null
+                    : findMode(modes, preferred, base.getRefreshRate());
+            if (base == null || target == null) {
                 return;
             }
 
-            float primaryRenderMax = rangeValue(specs, "primary", "render", "max");
-            float appRenderMax = rangeValue(specs, "appRequest", "render", "max");
-            float envelopeRate = envelope.getRefreshRate();
-            if (primaryRenderMax > envelopeRate + RATE_EPSILON_HZ
-                    || appRenderMax > envelopeRate + RATE_EPSILON_HZ) {
+            if (originalBaseId == target.getModeId()) {
                 return;
             }
 
-            Reflect.setField(specs, "baseModeId", envelope.getModeId());
-            setPhysicalRange(specs, "primary", envelopeRate);
-            setPhysicalRange(specs, "appRequest", envelopeRate);
+            Reflect.setField(specs, "baseModeId", target.getModeId());
 
-            String adjustment = originalBaseId + "->" + envelope.getModeId()
-                    + " " + preferred + " physical=" + envelopeRate
-                    + " render=" + primaryRenderMax + "/" + appRenderMax;
+            String adjustment = originalBaseId + "->" + target.getModeId()
+                    + " " + preferred + " rate=" + base.getRefreshRate();
             logAdjustment(module, adjustment);
         } catch (Throwable error) {
             module.error("Framework physical envelope normalization failed", error);
@@ -143,6 +133,9 @@ final class FrameworkPhysicalEnvelopeHooks {
     private static Geometry preferredGeometry(Object director, int displayId,
                                               int userSizePriority)
             throws ReflectiveOperationException {
+        if (userSizePriority < 0) {
+            return Geometry.INVALID;
+        }
         Object storage = Reflect.getField(director, "mVotesStorage");
         Object value = Reflect.call(storage, "getVotes", displayId);
         if (!(value instanceof SparseArray<?>)) {
@@ -221,23 +214,6 @@ final class FrameworkPhysicalEnvelopeHooks {
         return (Number) value;
     }
 
-    private static float rangeValue(Object specs, String rangesName,
-                                    String rangeName, String valueName)
-            throws ReflectiveOperationException {
-        Object ranges = Reflect.getField(specs, rangesName);
-        Object range = Reflect.getField(ranges, rangeName);
-        return numberField(range, valueName).floatValue();
-    }
-
-    private static void setPhysicalRange(Object specs, String rangesName,
-                                         float refreshRate)
-            throws ReflectiveOperationException {
-        Object ranges = Reflect.getField(specs, rangesName);
-        Object physical = Reflect.getField(ranges, "physical");
-        Reflect.setField(physical, "min", refreshRate);
-        Reflect.setField(physical, "max", refreshRate);
-    }
-
     private static boolean isScreenOn() {
         try {
             Method reader = screenStateReader;
@@ -247,13 +223,6 @@ final class FrameworkPhysicalEnvelopeHooks {
         } catch (Throwable ignored) {
             return false;
         }
-    }
-
-    private static int staticInt(Class<?> owner, String name)
-            throws ReflectiveOperationException {
-        Field field = owner.getDeclaredField(name);
-        field.setAccessible(true);
-        return field.getInt(null);
     }
 
     private static String systemProperty(String key, String fallback) {

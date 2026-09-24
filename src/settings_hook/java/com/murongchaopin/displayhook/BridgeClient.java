@@ -162,6 +162,16 @@ final class BridgeClient {
         return request("SET " + packageName + " " + fps).startsWith("OK ");
     }
 
+    /** Persist an app override with the exact geometry visible to Settings. */
+    static boolean setAppMode(String packageName, int width, int height, int fps) {
+        if (!validPackage(packageName) || !validDisplaySize(width, height)
+                || fps < 30 || fps > 1000) {
+            return false;
+        }
+        return request("SETAPP " + packageName + " " + width + " " + height + " " + fps,
+                MODE_TIMEOUT_MS).startsWith("OK ");
+    }
+
     static boolean isAvailable() {
         return request("PING").startsWith("OK API ");
     }
@@ -476,5 +486,9 @@ final class BridgeClient {
 
     private static boolean validDisplayWidth(int width) {
         return width >= 480 && width <= 10000;
+    }
+
+    private static boolean validDisplaySize(int width, int height) {
+        return validDisplayWidth(width) && height >= 480 && height <= 20000;
     }
 }
