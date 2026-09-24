@@ -269,7 +269,7 @@ static int adfr_lock_test_bypassed(const char *base_path);
 static int adfr_lock_requested(const char *base_path);
 static int set_surfaceflinger_oti_pause(const char *base_path, int paused);
 static int oti_pause_required(const char *base_path);
-static void reassert_oti_pause_if_required(const char *base_path);
+static int reassert_oti_pause_if_required(const char *base_path);
 static void sync_oti_pause_policy(const char *base_path, int force);
 #ifndef MURONG_FREE_BUILD
 static void set_rmx5200_ltpo_oti_owner(const char *base_path, int owned);
@@ -1136,7 +1136,13 @@ static int set_surface_flinger_mode(int mode_id) {
     rc = system(command);
     log_msg("SurfaceFlinger physical mode requested: mode=%d width=%d rc=%d",
             mode_id, get_mode_width(mode_id), rc);
-    return rc == 0;
+    if (rc != 0) return 0;
+    if (!reassert_oti_pause_if_required(NULL)) {
+        log_msg("SurfaceFlinger mode request could not keep OTI paused: mode=%d",
+                mode_id);
+        return 0;
+    }
+    return 1;
 }
 
 /* Extension identity comes from the shared backend manifest and from WebUI's
@@ -1169,8 +1175,9 @@ static int commit_refresh_step(int mode_id) {
         if (!set_surface_flinger_mode(active_id)) return 0;
         usleep(50000);
     }
-    if (!set_surface_flinger_mode(mode_id) ||
-        !wait_for_active_mode(mode_id, 1500)) {
+    if (!set_surface_flinger_mode(mode_id)) return 0;
+    if (!wait_for_active_mode(mode_id, 1500)) {
+        reassert_oti_pause_if_required(NULL);
         log_msg("Refresh ladder step failed: mode=%d fps=%d", mode_id,
                 mode_fps(mode_id));
         active_id = get_current_system_mode();
@@ -1184,6 +1191,11 @@ static int commit_refresh_step(int mode_id) {
             log_msg("Refresh ladder stray mode ignored: observed=%d/%dHz "
                     "target=%d/%dHz policy_kept=1",
                     active_id, mode_fps(active_id), mode_id, mode_fps(mode_id));
+        return 0;
+    }
+    if (!reassert_oti_pause_if_required(NULL)) {
+        log_msg("Refresh ladder step could not keep OTI paused: mode=%d fps=%d",
+                mode_id, mode_fps(mode_id));
         return 0;
     }
     /* Give the panel one vblank interval beyond verification before issuing an
@@ -1342,19 +1354,7 @@ static int apply_refresh_ladder(int target_id) {
     if (active_id == target_id) return 1;
 
     if (target_fps > mode_fps(active_id)) {
-        /* ColourOS' tier table resolves the stock 144 Hz rung to whatever mode
-         * sits in that slot of the current resolution group, and the vendor OTI
-         * vote re-asserts that mapping right after the transaction, so a stock
-         * rung above 120 never survives: the panel parks in the other resolution
-         * group until the next retry.  An overclock target therefore goes
-         * straight to the requested mode; commit_refresh_step still verifies the
-         * result and fails closed if the panel refuses the timing. */
-        if (is_overclock_mode(target_id) && mode_fps(active_id) >= 120) {
-            log_msg("Refresh ladder up direct for overclock target: %d/%dHz -> "
-                    "%d/%dHz", active_id, mode_fps(active_id), target_id,
-                    target_fps);
-            return commit_refresh_step(target_id);
-        }
+
         while (mode_fps(active_id) < target_fps) {
             int next_id = next_refresh_ladder_step(active_id, target_id);
             if (next_id >= 0 && !is_overclock_mode(next_id)) {
@@ -2645,17 +2645,36 @@ static void set_rmx5200_ltpo_oti_owner(const char *base_path, int owned) {
 }
 #endif
 
+static int surfaceflinger_transaction_response_ok(const char *response) {
+    return response && strstr(response, "Parcel(") != NULL &&
+            strstr(response, "Parcel(Error:") == NULL;
+}
+
 static int issue_surfaceflinger_oti_pause(int paused) {
-    const char *command = paused
-        ? "service call SurfaceFlinger 22015 i32 1 i32 1 >/dev/null 2>&1"
-        : "service call SurfaceFlinger 22015 i32 1 i32 0 >/dev/null 2>&1";
+    char command[128];
+    char response[512] = "";
+    char discard[128];
+    FILE *pipe;
     int rc;
 
     if (strcmp(device_model, "RMX5200") != 0) return 1;
-    rc = system(command);
-    if (rc != 0) {
-        log_msg("RMX5200 OTI pause transaction failed: paused=%d rc=%d",
-                paused, rc);
+    snprintf(command, sizeof(command),
+             "service call SurfaceFlinger 22015 i32 1 i32 %d 2>&1", paused);
+    pipe = popen(command, "r");
+    if (!pipe) {
+        log_msg("RMX5200 OTI pause transaction could not start: paused=%d error=%s",
+                paused, strerror(errno));
+        return 0;
+    }
+    if (!fgets(response, sizeof(response), pipe)) response[0] = '\0';
+    while (fgets(discard, sizeof(discard), pipe)) {
+    }
+    rc = pclose(pipe);
+    if (rc == -1 || !WIFEXITED(rc) || WEXITSTATUS(rc) != 0 ||
+            !surfaceflinger_transaction_response_ok(response)) {
+        log_msg("RMX5200 OTI pause transaction failed: paused=%d status=%d "
+                "response=%s", paused, rc,
+                response[0] ? response : "<empty>");
         return 0;
     }
     return 1;
@@ -2716,9 +2735,9 @@ static int keepalive_surfaceflinger_oti_pause(const char *base_path) {
  * the durable ADFR lock keeps the framework floor high, yet the OTI director
  * still casts its own 60Hz vote about 1.5s after touch-up because it lives in
  * SurfaceFlinger, outside the vendor lock. */
-static void reassert_oti_pause_if_required(const char *base_path) {
-    if (!oti_pause_required(base_path)) return;
-    keepalive_surfaceflinger_oti_pause(base_path);
+static int reassert_oti_pause_if_required(const char *base_path) {
+    if (!oti_pause_required(base_path)) return 1;
+    return keepalive_surfaceflinger_oti_pause(base_path);
 }
 
 static void sync_oti_pause_policy(const char *base_path, int force) {
@@ -4212,6 +4231,19 @@ static void apply_startup_default_mode(int target_id) {
         return;
     }
 #endif
+    /* SurfaceFlinger keeps reporting the requested extension mode across a
+     * cold boot and across a daemon restart even when the panel never left its
+     * stock fallback timing. smooth_switch() then compares that stale report
+     * with the target, decides there is nothing left to do, and the whole UI
+     * stays paced at the fallback rate while the selection reads the overclock
+     * tier (RMX5200 measured 144.2 fps of real panel cadence while mode 7 /
+     * 165Hz was selected). Seed the native anchor so the ordinary ladder
+     * re-programs the physical timing before the main loop starts. */
+    if (is_overclock_mode(target_id) && get_current_system_mode() == target_id) {
+        log_msg("Startup replay seeds native anchor for extension target: "
+                "target=%d/%dHz", target_id, mode_fps(target_id));
+        force_reapply = 1;
+    }
     smooth_switch(target_id);
 }
 
