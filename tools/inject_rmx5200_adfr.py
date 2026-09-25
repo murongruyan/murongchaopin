@@ -52,21 +52,30 @@ def find_node(lines, d, name, must_have=None):
     return None, None
 
 def minfps_block(indent, base_fps, targets, page, val_regs, tail):
-    """val_regs: dict family->reg byte string"""
+    """AE084-native ADFR min-fps commands.
+
+    The AD296/AC180 register page (FF 5A A5 2D) is NOT AE084's: writing it
+    corrupts the panel.  AE084 selects its timing through its own command
+    family, so each min-fps slot writes the panel's own `a9 01 00 2f` selector.
+    Indices 0..3 (the native 144/120/90/60 rates) send only a harmless page
+    reset; indices 4 and 5 carry the below-60Hz probe values and are reached
+    only when the caller explicitly asks for 10Hz or 1Hz.
+    """
+    PAGE_RESET = "[39 00 00 00 00 00 06 f0 55 aa 52 00 00]"
     out = []
-    fams = [("bigdc", val_regs["bigdc"]), ("hpwm", val_regs["hpwm"]), ("", val_regs["adfr"])]
-    # command-state batch
+    fams = [("bigdc", None), ("hpwm", None), ("", None)]
     for fam, _ in fams:
         fname = f"{fam}-adfr" if fam else "adfr"
         for i in range(6):
             out.append(f"{indent}qcom,mdss-dsi-{fname}-min-fps-{i}-command-state = \"dsi_hs_mode\";")
-    # command batch
-    for fam, reg in fams:
+    for fam, _ in fams:
         fname = f"{fam}-adfr" if fam else "adfr"
-        for i, tfps in enumerate(targets):
-            val = base_fps // tfps - 1
-            cmd = f"<0x39000040 {page} 0x3{reg}{val:02x} {tail}>"
-            out.append(f"{indent}qcom,mdss-dsi-{fname}-min-fps-{i}-command = {cmd};")
+        for i in range(6):
+            if i < 4:
+                out.append(f"{indent}qcom,mdss-dsi-{fname}-min-fps-{i}-command = {PAGE_RESET};")
+            else:
+                out.append(f"{indent}qcom,mdss-dsi-{fname}-min-fps-{i}-command = "
+                           f"[39 00 00 40 00 00 07 a9 01 00 2f 00 00 {i:02x}];")
     tbl = " ".join(f"0x{v:x}" for v in targets)
     out.append(f"{indent}oplus,adfr-min-fps-mapping-table = <{tbl}>;")
     return out
