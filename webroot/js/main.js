@@ -2729,7 +2729,7 @@ function applyVideoMotionConfig(result) {
     const rates = Array.from(new Set(displayModes
         .filter(mode => mode.width === currentResolutionWidth)
         .map(mode => mode.fps)))
-        .filter(rate => Number.isInteger(rate) && rate >= 30)
+        .filter(rate => Number.isInteger(rate) && rate >= 60)
         .sort((left, right) => left - right);
     const select = document.getElementById('video-motion-target');
     if (select) {
@@ -3236,7 +3236,7 @@ function videoRateOptions(current = 0) {
     const rates = Array.from(new Set(displayModes
         .filter(mode => mode.width === currentResolutionWidth)
         .map(mode => Number(mode.fps))))
-        .filter(rate => Number.isInteger(rate) && rate >= 30 && rate <= 1000);
+        .filter(rate => Number.isInteger(rate) && rate >= 60 && rate <= 1000);
     if (Number.isInteger(Number(current)) && Number(current) >= 30 && !rates.includes(Number(current))) {
         rates.push(Number(current));
     }
@@ -4434,6 +4434,9 @@ async function loadDisplayModes() {
                 if (!fpsMatch) return;
                 const rawFps = parseFloat(fpsMatch[1]);
                 const fps = Math.round(rawFps);
+                // 60Hz is the lowest node the UI offers; the LTPO floor modes
+                // (1/10/30) stay inside the LTPO feature.
+                if (fps < 60) return;
                 if (!modeMap.has(id)) {
                     modeMap.set(id, { id, width, height, fps, rawFps });
                 }
