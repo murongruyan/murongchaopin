@@ -2529,6 +2529,19 @@ static void sync_android_resolution_settings(int id) {
                                             width);
     changed += write_setting_int_if_changed("global", "user_preferred_resolution_height",
                                             height);
+    /* A width change on its own leaves the previous resolution's DPI active,
+     * so the UI renders at the wrong scale. That is most visible for the
+     * per-application resolutions, where the geometry moves without any of the
+     * Settings-side density handling. The ladder lives in the module's shell
+     * helper so the daemon keeps no DPI state of its own. */
+    if (daemon_base_path && *daemon_base_path) {
+        char command[PATH_MAX + 160];
+        if (snprintf(command, sizeof(command),
+                     "sh %s/scripts/geometry_density.sh apply %d >/dev/null 2>&1",
+                     daemon_base_path, width) < (int)sizeof(command)) {
+            system(command);
+        }
+    }
     log_msg("Resolution settings synchronized: mode=%d geometry=%dx%d adjust=%d changed=%d",
             id, width, height, adjust, changed);
 }

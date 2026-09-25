@@ -38,6 +38,7 @@ $exactExcludes = @(
     "bin/pjd110_adfr_lock.ko",
     "scripts/adfr_lock.sh",
     "scripts/generic_adfr_policy.sh",
+    "scripts/geometry_density.sh",
     "config/rmx5200_adfr_profile.txt",
     "config/rmx5200_adfr_commands.dtsi",
     # premium_memc
