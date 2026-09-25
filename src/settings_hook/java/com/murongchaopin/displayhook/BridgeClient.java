@@ -389,8 +389,23 @@ final class BridgeClient {
      */
     static LtpoRoute ltpoRoute() {
         long now = SystemClock.elapsedRealtime();
+        // The daemon also mirrors the route into a system property. Reading it
+        // never blocks and does not depend on its main loop being free to serve
+        // the socket, which is what made the bridge answer look "not routing"
+        // while the daemon had already published a target.
+        String mirrored = systemProperty("murong.ltpo.route", "");
         LtpoRoute cached = ltpoRouteCache;
 
+        if (!mirrored.isEmpty()) {
+            LtpoRoute property = LtpoRoute.parse("LTPO " + mirrored);
+
+            if (property != LtpoRoute.INACTIVE || mirrored.startsWith("0 ")) {
+                ltpoRouteCache = property;
+                ltpoRouteCachedAt = now;
+                ltpoRouteLastGoodAt = now;
+                return property.isRouting() ? property : null;
+            }
+        }
         if (cached != null) {
             long ttl = cached.isRouting() ? LTPO_TTL_MS : LTPO_FAIL_TTL_MS;
 
@@ -564,6 +579,19 @@ final class BridgeClient {
             return response == null ? "" : response;
         } catch (Exception ignored) {
             return "";
+        }
+    }
+
+    private static String systemProperty(String key, String fallback) {
+        try {
+            Class<?> properties = Class.forName("android.os.SystemProperties");
+            java.lang.reflect.Method get = properties.getDeclaredMethod(
+                    "get", String.class, String.class);
+            get.setAccessible(true);
+            Object value = get.invoke(null, key, fallback);
+            return value instanceof String ? (String) value : fallback;
+        } catch (Throwable ignored) {
+            return fallback;
         }
     }
 
