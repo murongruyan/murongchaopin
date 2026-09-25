@@ -1,0 +1,6 @@
+# Checked-in kernel modules that still need their own prepared kernel tree
+# before they can be rebuilt and fingerprinted.  Keep this list short: an entry
+# means we cannot prove the binary matches the source it claims to come from.
+plk110_drm_modes.ko
+plq110_drm_modes.ko
+pjd110_drm_modes.ko

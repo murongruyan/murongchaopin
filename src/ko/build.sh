@@ -29,6 +29,16 @@ fi
 
 mkdir -p "$OUT_DIR"
 
+write_fingerprint()
+{
+	module=$1
+	shift
+	{
+		for input in "$@"; do
+			printf '%s  %s\n' "$(sha256sum "$SCRIPT_DIR/$input" | cut -d' ' -f1)" "$input"
+		done
+	} > "$OUT_DIR/$module.ko.src.sha256"
+}
 build_one() {
 	module=$1
 	source=$2
@@ -38,6 +48,7 @@ build_one() {
 	PATH="$LLVM_TOOLS:$PATH" make -C "$KERNEL_TREE" O="$KERNEL_OUT" M="$tmp" \
 		ARCH=arm64 LLVM=1 LLVM_IAS=1 KBUILD_MODPOST_WARN="${KBUILD_MODPOST_WARN:-1}" modules
 	install -m 0600 "$tmp/$module.ko" "$OUT_DIR/$module.ko"
+	write_fingerprint "$module" "$source"
 	rm -rf "$tmp"
 }
 
@@ -52,6 +63,7 @@ build_with_shared_source() {
 	PATH="$LLVM_TOOLS:$PATH" make -C "$KERNEL_TREE" O="$KERNEL_OUT" M="$tmp" \
 		ARCH=arm64 LLVM=1 LLVM_IAS=1 KBUILD_MODPOST_WARN="${KBUILD_MODPOST_WARN:-1}" modules
 	install -m 0600 "$tmp/$module.ko" "$OUT_DIR/$module.ko"
+	write_fingerprint "$module" "$source"
 	rm -rf "$tmp"
 }
 
