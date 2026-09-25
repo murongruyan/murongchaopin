@@ -74,7 +74,7 @@ def minfps_block(indent, base_fps, targets, page, val_regs, tail):
 PANEL_PROPS = [
     "qcom,mdss-dsi-qsync-min-refresh-rate = <0x1e>;",
     "qcom,qsync-enable;",
-    "oplus,adfr-test-te-gpio = <0xffffffff 0x55 0x0>;",
+    "oplus,adfr-test-te-gpio = <0xffffffff 0x56 0x0>;",
     "oplus,adfr-config = <0xe51>;",
 ]
 
@@ -129,5 +129,6 @@ if __name__ == "__main__":
     with open(dst, 'w', encoding='utf-8', newline='\n') as f:
         f.write(out)
     print(f"{src} -> {dst}  inserted: {ins}")
+
 
 
