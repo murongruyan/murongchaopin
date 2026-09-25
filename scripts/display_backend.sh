@@ -314,6 +314,12 @@ apply_drm_at_boot() {
     }
     [ "$ko_abi_plan" = adapted ] && \
         log_line "drm-load abi-adapted reason=$ko_abi_reason"
+    # Pure-test switch: never inject a display kernel module while this
+    # marker exists, so panel-register experiments run on a clean array.
+    if [ -f /data/adb/modules/murongchaopin/runtime/skip_kernel_modules ]; then
+        log_line "pure-test: skip drm insmod"
+        return 0
+    fi
     if [ "$KO_PROFILE" = pjd110 ]; then
         insmod "$KO_ABI_RESOLVED" probe_only=0 drop_stock_low=1 \
             mode_specs="$DRM_MODE_SPECS" >/dev/null 2>&1

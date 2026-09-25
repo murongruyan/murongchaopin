@@ -106,11 +106,25 @@ fi
 # block boot before the vendor consumer has initialized.
 
 [ -f "$DISPLAY_HELPER" ] || exit 0
+
+# Pure-test switch.  When this marker exists the boot still runs the whole
+# userspace path (mode publication, rate manifest, QSync idle properties) but
+# injects no display kernel module at all.  It exists so panel-register
+# experiments can be measured without the overclock / LTPO / ADFR-lock KOs
+# patching the live mode array underneath them.
+SKIP_KERNEL_MODULES=0
+if [ -f "$MODDIR/runtime/skip_kernel_modules" ]; then
+    SKIP_KERNEL_MODULES=1
+    printf '%s pure-test: display kernel-module injection skipped\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" >> "$MODDIR/daemon.log" 2>/dev/null
+fi
 # Preserve the original two-stage ownership: the free DRM backend publishes
 # the overclock modes first, then the paid LTPO provider appends 30/10/1Hz to
 # that live mode array.  The LTPO helper no longer treats the DRM module as an
 # error; loading it after DRM is the supported RMX5200 composition.
-if [ "$BOOT_GUARD" = "1" ]; then
+if [ "$SKIP_KERNEL_MODULES" = "1" ]; then
+    :
+elif [ "$BOOT_GUARD" = "1" ]; then
     printf '%s boot-guard: skipped display kernel-module injection\n' \
         "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" >> "$MODDIR/daemon.log" 2>/dev/null
 else
@@ -132,7 +146,7 @@ if [ -f "$PREMIUM_POST_FS" ]; then
     . "$GATE_HELPER" 2>/dev/null
     gate_normalize_premium_scripts >/dev/null 2>&1 || true
     REMOVE_PREMIUM=$(gate_json_field "$GATE_STATE_FILE" remove_premium)
-    if [ "$REMOVE_PREMIUM" != "1" ]; then
+    if [ "$REMOVE_PREMIUM" != "1" ] && [ "$SKIP_KERNEL_MODULES" != "1" ]; then
         sh "$PREMIUM_POST_FS" >/dev/null 2>&1 || true
     fi
 fi
