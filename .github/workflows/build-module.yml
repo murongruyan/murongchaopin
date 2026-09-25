@@ -272,7 +272,7 @@ jobs:
             tests/check_install_tool_permissions.sh \
             tests/check_volume_key_parser.sh \
             tests/check_ko_abi_guard.sh \
-            tests/check_daemon_fingerprint.sh \
+            tests/check_binary_fingerprint.sh \
             tests/check_ko_abi_guard_roundtrip.sh \
             tests/check_module_update_preservation.sh; do
             sh -n "$script"
@@ -282,6 +282,7 @@ jobs:
           sh tests/check_pjd110_drm_ko.sh
           sh tests/check_pjd110_ko_support_dtbo.sh
           sh tests/check_hmbird_backend.sh
+          sh tests/check_hmbird_governor_skip.sh
           sh tests/check_hmbird_dtbo_only.sh
           sh tests/check_low_refresh_preservation.sh
           sh tests/check_rmx5200_adfr_dry_run.sh
@@ -304,7 +305,7 @@ jobs:
           sh tests/check_package_kernel_compat.sh
           sh tests/check_screen_on_reapply.sh
           sh tests/check_ko_abi_guard.sh
-          sh tests/check_daemon_fingerprint.sh
+          sh tests/check_binary_fingerprint.sh
           sh tests/check_ko_build_fingerprint.sh
           KO_ABI_GUARD_BIN="$PWD/build/bin/ko_abi_guard" \
             sh tests/check_ko_abi_guard_roundtrip.sh

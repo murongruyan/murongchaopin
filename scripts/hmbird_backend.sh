@@ -34,7 +34,35 @@ write_status() {
     printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" "$1" >> "$LOG_FILE"
 }
 
+# ColorOS 17 builds the hmbird governor into the kernel, so the DTBO node is
+# already covered and rewriting the partition is both unnecessary and -- on the
+# C17 DTBO, which no longer carries the oplus_sim_detect insertion anchor --
+# impossible.  Detect the governor before touching the partition.
+# The paths are overridable so the test suite can feed a fixture instead of
+# depending on the host kernel.
+HMBIRD_GOVERNOR_FILES=${HMBIRD_GOVERNOR_FILES:-"/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors /sys/devices/system/cpu/cpufreq/policy0/scaling_available_governors"}
+HMBIRD_VENDOR_NODE=${HMBIRD_VENDOR_NODE:-/proc/oplus_hmbird}
+
+hmbird_governor_present() {
+    HMBIRD_GOV_FILE=
+    for HMBIRD_GOV_FILE in $HMBIRD_GOVERNOR_FILES; do
+        [ -r "$HMBIRD_GOV_FILE" ] || continue
+        if grep -qw hmbird "$HMBIRD_GOV_FILE" 2>/dev/null; then
+            return 0
+        fi
+    done
+    # Fall back to the vendor node: some builds expose it without listing the
+    # governor on policy0.
+    [ -r "$HMBIRD_VENDOR_NODE" ] && return 0
+    return 1
+}
+
 prepare_hmbird_dtbo() {
+    if hmbird_governor_present; then
+        write_status skipped:governor_present
+        printf 'HMBIRD governor already provided by the kernel; DTBO left untouched.\n'
+        return 0
+    fi
     HMBIRD_PARTITION="$2"
     [ -n "$HMBIRD_PARTITION" ] || {
         HMBIRD_SLOT=$(getprop ro.boot.slot_suffix 2>/dev/null)
@@ -139,13 +167,14 @@ apply_hmbird() {
 
 case "$1" in
     apply) apply_hmbird ;;
+    governor-present) hmbird_governor_present ;;
     prepare-dtbo) prepare_hmbird_dtbo "$@" ;;
     status)
         printf 'feature=free_hmbird\n'
         [ -f "$STATUS_FILE" ] && printf 'status=%s\n' "$(sed -n '1p' "$STATUS_FILE")" || printf 'status=unknown\n'
         ;;
     *)
-        echo "Usage: $0 {prepare-dtbo [partition]|status}" >&2
+        echo "Usage: $0 {prepare-dtbo [partition]|governor-present|status}" >&2
         exit 64
         ;;
 esac

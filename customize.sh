@@ -518,11 +518,16 @@ ui_print "正在刷入修改后的 DTBO..."
   fi
 else
   ui_print "已选择 DRM-KO：高刷 timing 仅由 KO 注入"
-  ui_print "正在生成不含显示改动的兼容 DTBO（PJD110 含解容）..."
-  if sh "$MODPATH/scripts/hmbird_backend.sh" prepare-dtbo "$DTBO_PARTITION"; then
-    ui_print "KO 配套 DTBO 写入成功，原厂显示 timing 保持不变"
+  if sh "$MODPATH/scripts/hmbird_backend.sh" governor-present; then
+    ui_print "系统内核已自带 hmbird 调速器（ColorOS 17 起），无需修改 DTBO"
+    ui_print "保持原厂 DTBO 不变，只安装软件组件"
   else
-    abort "KO 配套 DTBO 生成或写入失败"
+    ui_print "正在生成不含显示改动的兼容 DTBO（PJD110 含解容）..."
+    if sh "$MODPATH/scripts/hmbird_backend.sh" prepare-dtbo "$DTBO_PARTITION"; then
+      ui_print "KO 配套 DTBO 写入成功，原厂显示 timing 保持不变"
+    else
+      abort "KO 配套 DTBO 生成或写入失败"
+    fi
   fi
 fi
     fi
