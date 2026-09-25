@@ -180,7 +180,16 @@ for daemon_name in rate_daemon rate_daemon_premium; do
         fi
     done
 done
-if [ "$daemon_running" -eq 0 ]; then
+# Pure-test switch: keep the rate daemon out of the picture as well.  Its
+# OTI / rise policy rewrites the framework refresh-rate window, which would
+# mask any panel-side experiment running under the same marker.
+SKIP_DAEMON=0
+if [ -f "$MODDIR/runtime/skip_kernel_modules" ]; then
+    SKIP_DAEMON=1
+    printf '%s pure-test: rate daemon not started\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" >> "$MODDIR/daemon.log" 2>/dev/null
+fi
+if [ "$daemon_running" -eq 0 ] && [ "$SKIP_DAEMON" -eq 0 ]; then
     chmod +x "$DAEMON_TO_START" 2>/dev/null
     # nohup only ignores SIGHUP; service-stage shells can still terminate
     # their inherited process group during package/app cleanup. Start the
