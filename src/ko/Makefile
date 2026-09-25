@@ -1,6 +1,8 @@
 obj-m += rmx5200_drm_modes.o
 rmx5200_drm_modes-y := rmx5200_display_modes.o
 
+obj-m += rmx5200_vrr_range.o
+
 obj-m += rmx5200_adfr_lock.o
 
 obj-m += plk110_drm_modes.o

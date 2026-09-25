@@ -151,6 +151,9 @@ case "${1:-all}" in
 	rmx5200)
 		build_one rmx5200_drm_modes rmx5200_display_modes.c
 		;;
+	rmx5200-vrr-range)
+		build_one rmx5200_vrr_range rmx5200_vrr_range.c
+		;;
 	rmx5200-probe)
 		build_one rmx5200_stock_probe rmx5200_display_modes.c
 		;;
