@@ -136,7 +136,6 @@ if [ -f "$PREMIUM_POST_FS" ]; then
         sh "$PREMIUM_POST_FS" >/dev/null 2>&1 || true
     fi
 fi
-exit 0
 
 # ColourOS 17 gates its QSync/idle refresh-rate path behind these vendor
 # properties; both ship unset, so surfaceflinger never even attempts the idle
@@ -145,3 +144,4 @@ exit 0
 # the injected low tier.
 setprop vendor.display.enable_qsync_idle 1
 setprop vendor.display.enable_allow_idle_fallback 1
+exit 0
