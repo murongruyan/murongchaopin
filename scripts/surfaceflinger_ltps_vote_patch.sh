@@ -139,6 +139,34 @@ verify_table_patched()
         [ "$(hex_at "$file" "$SITE_AP_SCALE_OFFSET")" = "$TABLE_AP_SCALE_PATCHED_HEX" ]
 }
 
+# Every verification has to ask which contract applies: the legacy 152-byte
+# block and the ColorOS 17 site table describe completely different bytes, so a
+# caller that hard-codes verify_patched rejects a correct newer patch -- which is
+# exactly how the ColorOS 17 vote filter first failed validation.
+verify_source_contract()
+{
+    file=$1
+    shift
+    select_build_sites "$file"
+    if [ "$BUILD_CONTRACT" = table ]; then
+        verify_table_original "$file"
+    else
+        verify_original "$file" "$@"
+    fi
+}
+
+verify_patched_contract()
+{
+    file=$1
+    shift
+    select_build_sites "$file"
+    if [ "$BUILD_CONTRACT" = table ]; then
+        verify_table_patched "$file"
+    else
+        verify_patched "$file" "$@"
+    fi
+}
+
 patch_site_table()
 {
     source=$1
@@ -348,7 +376,7 @@ prepare_runtime_patch()
         return 0
     fi
 
-    if verify_patched "$SOURCE_FILE"; then
+    if verify_patched_contract "$SOURCE_FILE"; then
         if remount_for_domain_transition; then
             write_state active:already_mounted
             return 0
@@ -380,7 +408,7 @@ prepare_runtime_patch()
         write_state error:context_mismatch
         return 1
     fi
-    verify_patched "$PATCHED_FILE" || {
+    verify_patched_contract "$PATCHED_FILE" || {
         write_state error:prepared_validation
         return 1
     }
@@ -417,7 +445,7 @@ apply_runtime_patch()
         return 0
     fi
 
-    if verify_patched "$SOURCE_FILE"; then
+    if verify_patched_contract "$SOURCE_FILE"; then
         if remount_for_domain_transition; then
             write_state active:already_mounted
             return 0
@@ -427,7 +455,7 @@ apply_runtime_patch()
     fi
 
     prepare_runtime_patch || return 1
-    verify_original "$SOURCE_FILE" || {
+    verify_source_contract "$SOURCE_FILE" || {
         write_state rejected:pre_mount_source_changed
         return 1
     }
@@ -446,7 +474,7 @@ apply_runtime_patch()
         write_state error:bind_mount_nosuid
         return 1
     fi
-    if ! verify_patched "$SOURCE_FILE"; then
+    if ! verify_patched_contract "$SOURCE_FILE"; then
         umount "$SOURCE_FILE" >/dev/null 2>&1 || true
         rm -f "$BOOT_PENDING_FILE" 2>/dev/null || true
         write_state error:mounted_validation
@@ -468,7 +496,7 @@ mark_boot_success()
     [ -n "$boot_id" ] && [ "$pending_boot" = "$boot_id" ] || return 0
     [ "$(getprop sys.boot_completed 2>/dev/null)" = 1 ] || return 1
     pidof surfaceflinger >/dev/null 2>&1 || return 1
-    verify_patched "$SOURCE_FILE" || return 1
+    verify_patched_contract "$SOURCE_FILE" || return 1
     rm -f "$BOOT_PENDING_FILE" 2>/dev/null || return 1
     write_state active:boot_verified
 }
@@ -482,7 +510,7 @@ clear_boot_guard()
 restore_runtime_patch()
 {
     rm -f "$BOOT_PENDING_FILE" "$BOOT_BLOCK_FILE" 2>/dev/null || true
-    if ! verify_patched "$SOURCE_FILE" &&
+    if ! verify_patched_contract "$SOURCE_FILE" &&
        ! verify_legacy_patched "$SOURCE_FILE" &&
        ! verify_filter_only_patched "$SOURCE_FILE"; then
         write_state restored:not_mounted
@@ -494,7 +522,7 @@ restore_runtime_patch()
             return 1
         }
     fi
-    verify_original "$SOURCE_FILE" || {
+    verify_source_contract "$SOURCE_FILE" || {
         write_state error:restore_validation
         return 1
     }
