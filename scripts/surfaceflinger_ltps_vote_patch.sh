@@ -62,10 +62,17 @@ AP_SCALE_PATCHED_HEX=18000014
 #
 # Forcing the branch keeps the requested mode and never consults the table.
 BUILD_SITE_TABLE="\
-4b9a0ca743aabe6cada245f5e9b789cdd5a3d345c5bf37168b353d7f38b88e03:3152928:addbfb97:3651804:41020054"
+4b9a0ca743aabe6cada245f5e9b789cdd5a3d345c5bf37168b353d7f38b88e03:3152928:addbfb97:3651804:41020054:4388892:81020054"
 
 ANIMATION_PATCHED_HEX=1f2003d5
 TABLE_AP_SCALE_PATCHED_HEX=12000014
+# ColourOS 17's setIdleModeExternal refuses to apply the idle tier unless the
+# current config type is 1, and every injected timing reports type 0, so the
+# framework's own 1Hz idle request was silently dropped. Allow the type-0 config
+# through by neutralising that guard.
+TYPE_GUARD_OFFSET=4388892
+TYPE_GUARD_ORIGINAL_HEX=81020054
+TYPE_GUARD_PATCHED_HEX=1f2003d5
 BUILD_CONTRACT=legacy
 
 hash_file()
@@ -106,6 +113,10 @@ load_site_entry()
         SITE_AP_SCALE_OFFSET=${entry_rest%%:*}
         entry_rest=${entry_rest#*:}
         SITE_AP_SCALE_ORIGINAL_HEX=${entry_rest%%:*}
+        entry_rest=${entry_rest#*:}
+        SITE_TYPE_GUARD_OFFSET=${entry_rest%%:*}
+        SITE_TYPE_GUARD_ORIGINAL_HEX=${SITE_TYPE_GUARD_OFFSET##*:}
+        SITE_TYPE_GUARD_ORIGINAL_HEX=${entry_rest#*:}
         return 0
     done
     return 1
@@ -195,7 +206,8 @@ verify_table_original()
     file=$1
     [ -r "$file" ] &&
         [ "$(hex_at "$file" "$SITE_ANIMATION_OFFSET")" = "$SITE_ANIMATION_ORIGINAL_HEX" ] &&
-        [ "$(hex_at "$file" "$SITE_AP_SCALE_OFFSET")" = "$SITE_AP_SCALE_ORIGINAL_HEX" ]
+        [ "$(hex_at "$file" "$SITE_AP_SCALE_OFFSET")" = "$SITE_AP_SCALE_ORIGINAL_HEX" ] &&
+        [ "$(hex_at "$file" "$SITE_TYPE_GUARD_OFFSET")" = "$SITE_TYPE_GUARD_ORIGINAL_HEX" ]
 }
 
 verify_table_patched()
@@ -203,7 +215,8 @@ verify_table_patched()
     file=$1
     [ -r "$file" ] &&
         [ "$(hex_at "$file" "$SITE_ANIMATION_OFFSET")" = "$ANIMATION_PATCHED_HEX" ] &&
-        [ "$(hex_at "$file" "$SITE_AP_SCALE_OFFSET")" = "$TABLE_AP_SCALE_PATCHED_HEX" ]
+        [ "$(hex_at "$file" "$SITE_AP_SCALE_OFFSET")" = "$TABLE_AP_SCALE_PATCHED_HEX" ] &&
+        [ "$(hex_at "$file" "$SITE_TYPE_GUARD_OFFSET")" = "$TYPE_GUARD_PATCHED_HEX" ]
 }
 
 # Every verification has to ask which contract applies: the legacy 152-byte
@@ -247,6 +260,7 @@ patch_site_table()
     cp -f "$source" "$temp_file" || return 13
     if ! write_patch_word "$temp_file" "$SITE_ANIMATION_OFFSET" "$ANIMATION_PATCHED_HEX" ||
             ! write_patch_word "$temp_file" "$SITE_AP_SCALE_OFFSET" "$TABLE_AP_SCALE_PATCHED_HEX" ||
+            ! write_patch_word "$temp_file" "$SITE_TYPE_GUARD_OFFSET" "$TYPE_GUARD_PATCHED_HEX" ||
             ! verify_table_patched "$temp_file" ||
             [ "$(file_size "$temp_file")" != "$(file_size "$source")" ]; then
         rm -f "$temp_file" 2>/dev/null || true
