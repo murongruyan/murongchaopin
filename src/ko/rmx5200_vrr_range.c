@@ -38,9 +38,14 @@
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/types.h>
+#include <linux/workqueue.h>
 #include <drm/drm_connector.h>
+#include <drm/drm_property.h>
 
 extern void *get_main_display(void);
+/* Exported by the DRM core; msm_drm never attaches these itself. */
+extern int drm_connector_attach_vrr_capable_property(struct drm_connector *connector);
+extern void drm_connector_set_vrr_capable_property(struct drm_connector *connector, bool capable);
 
 #define VRR_DSI_DISPLAY_CONNECTOR_OFFSET 0x10U
 #define VRR_CONNECTOR_MONITOR_RANGE_OFFSET 0x172U
@@ -61,6 +66,10 @@ MODULE_PARM_DESC(max_vfreq, "maximum vertical refresh rate (Hz)");
 static unsigned int applied;
 module_param(applied, uint, 0444);
 MODULE_PARM_DESC(applied, "number of times the range was written");
+
+static unsigned int vrr_capable_set;
+module_param(vrr_capable_set, uint, 0444);
+MODULE_PARM_DESC(vrr_capable_set, "times the vrr_capable property was attached/set");
 
 static unsigned int observed;
 module_param(observed, uint, 0444);
@@ -89,11 +98,33 @@ static void vrr_apply(struct drm_connector *connector, const char *when)
 
 	*(u16 *)((char *)connector + VRR_CONNECTOR_MONITOR_RANGE_OFFSET) = (u16)min_vfreq;
 	*(u16 *)((char *)connector + VRR_CONNECTOR_MONITOR_RANGE_OFFSET + 2) = (u16)max_vfreq;
+
 	applied++;
 
 	pr_info(VRR_TAG " %s: %s min_vfreq=%u max_vfreq=%u (was %u/%u) write#%u\n",
 		when, connector->name ? connector->name : "?", min_vfreq, max_vfreq,
 		lo, hi, applied);
+}
+
+/*
+ * drm_connector_attach_vrr_capable_property() allocates a property and takes
+ * DRM locks, so it must never run from a kretprobe handler: that context has
+ * preemption disabled and is reached through a debug exception, which is why
+ * an earlier revision produced drm_mode_object_add warnings.  Only the two
+ * plain u16 stores are safe there; everything else is deferred to a work item.
+ */
+static struct work_struct vrr_capable_work;
+
+static void vrr_capable_work_fn(struct work_struct *work)
+{
+	if (!main_connector)
+		return;
+	if (drm_connector_attach_vrr_capable_property(main_connector) != 0)
+		return;
+	drm_connector_set_vrr_capable_property(main_connector, true);
+	vrr_capable_set++;
+	pr_info(VRR_TAG ": vrr_capable attached+set in process context (#%u)\n",
+		vrr_capable_set);
 }
 
 static int __kprobes vrr_fill_entry(struct kretprobe_instance *ri,
@@ -138,6 +169,11 @@ static int __init rmx5200_vrr_range_init(void)
 	}
 	if (main_connector)
 		vrr_apply(main_connector, "init");
+
+	if (apply && main_connector) {
+		INIT_WORK(&vrr_capable_work, vrr_capable_work_fn);
+		schedule_work(&vrr_capable_work);
+	}
 
 	rc = register_kretprobe(&vrr_fill_probe);
 	if (rc) {
