@@ -77,9 +77,9 @@ ko_abi_prepare()
     return 0
 }
 
-# Sets KO_ABI_RESOLVED to the module file that may be insmod-ed.
-# Falls back to the shipped file when the guard cannot describe this kernel,
-# which preserves the pre-guard behaviour instead of refusing to load.
+# Sets KO_ABI_RESOLVED to the module file that may be insmod-ed.  A module whose
+# contract cannot be built is refused (plan=unverified); only a verified or
+# adapted copy is ever handed to insmod.
 ko_abi_resolve()
 {
     ko_abi_src=$1
@@ -92,8 +92,14 @@ ko_abi_resolve()
         return 1
     }
     ko_abi_prepare || {
+        # Fail closed.  Loading a module the guard could not describe is how the
+        # RMX5200 DRM module ended up in the kernel's version check with a CO17
+        # contract it does not carry ("disagrees about version of symbol
+        # module_layout"), and a module that resolves by name but not by CRC is
+        # exactly what this guard exists to stop.
         ko_abi_plan=unverified
-        return 0
+        KO_ABI_RESOLVED=
+        return 1
     }
     ko_abi_out=$("$KO_ABI_BIN" check \
         --contract "$KO_ABI_CONTRACT" \

@@ -31,6 +31,13 @@ if [ -z "$guard" ] || [ ! -x "$guard" ]; then
     exit 0
 fi
 
+# The shipped guard is aarch64; on an x86 build host it cannot be executed.  A
+# smoke run keeps that case a skip instead of a failure.
+if ! "$guard" 2>&1 | grep -q 'Usage:'; then
+    echo "ko abi guard round-trip checks skipped ($guard does not run on this host)"
+    exit 0
+fi
+
 module=
 for candidate in \
     "$ROOT_DIR/bin/rmx5200_drm_modes.ko" \

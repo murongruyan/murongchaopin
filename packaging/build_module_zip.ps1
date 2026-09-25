@@ -91,6 +91,19 @@ Get-ChildItem $staging -Recurse -File | ForEach-Object {
     if (Test-Excluded $rel) { Remove-Item $_.FullName -Force }
 }
 
+# The symbol contract guard is a build product, not a checked-in one, so the
+# module ZIP has to be refused when it is missing: without it every kernel
+# module in the package reaches insmod with a contract the running kernel
+# rejects, which is exactly how the ColorOS 17 DRM module failed to load.
+foreach ($requiredGuardFile in @(
+    "bin/ko_abi_guard"
+)) {
+    $guardPath = Join-Path $staging $requiredGuardFile
+    if (-not (Test-Path -LiteralPath $guardPath -PathType Leaf)) {
+        throw "PUBLIC MODULE ASSERTION FAILED - missing kernel symbol contract guard: $requiredGuardFile"
+    }
+}
+
 foreach ($requiredHookFile in @(
     "bin/display_settings_hook.apk",
     "bin/display_settings_hook.apk.idsig"

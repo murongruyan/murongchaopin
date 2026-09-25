@@ -1,8 +1,8 @@
 #!/bin/sh
 # Offline tests for scripts/ko_abi_guard.sh: the guard must insmod the shipped
 # module when the symbol contract matches, insmod an adapted copy when only the
-# recorded CRCs drifted, refuse a module whose symbols are gone, and fall back
-# to the previous behaviour when the guard cannot describe this kernel.
+# recorded CRCs drifted, refuse a module whose symbols are gone, and refuse one
+# the guard cannot describe at all.
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
@@ -127,11 +127,18 @@ fi
 grep -q "fake_module skipped:abi_rejected:FAIL_MISSING_SYMBOL" "$KO_ABI_STATE_DIR/status.txt" ||
     fail "missing rejected status"
 
-# 4) No guard binary: keep the previous behaviour instead of blocking the load.
+# 4) No guard binary: refuse the load instead of insmod-ing something nobody
+#    verified.  The kernel version check rejects such a module anyway, and a
+#    module that matches by name but not by CRC is the case this guard exists to
+#    stop.
 KO_ABI_BIN="$WORK_DIR/bin/does-not-exist"
 : > "$WORK_DIR/insmod.txt"
-ko_abi_insmod "$WORK_DIR/fake.ko" fake_module >/dev/null 2>&1 || fail "unverified fallback failed"
-[ "$KO_ABI_RESOLVED" = "$WORK_DIR/fake.ko" ] || fail "fallback did not use the shipped module"
+if ko_abi_insmod "$WORK_DIR/fake.ko" fake_module >/dev/null 2>&1; then
+    fail "unverified module was loaded without a guard"
+fi
+[ ! -s "$WORK_DIR/insmod.txt" ] || fail "unverified module reached insmod"
+grep -q "fake_module skipped:unverified" "$KO_ABI_STATE_DIR/status.txt" ||
+    fail "missing unverified refusal status"
 
 # 5) insmod failure is reported with the plan that was used.
 KO_ABI_BIN="$WORK_DIR/bin/ko_abi_guard"
