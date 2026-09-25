@@ -146,3 +146,30 @@ CRC:   python work/device_crc_map.py     (从设备 /vendor_dlkm 模块读 __ver
 "屏幕空闲"判定 -> 0x386a14 -> ... -> 0x386cd8 -> setIdleModeExternal
             -> 0x42f86c 把 idle 转给 composer HAL（AStatus / AIDL, code 0x5c000000）
 ```
+
+## 2026-09-26 更正：**不要**发布 persist.oplus.display.vrr.adfr
+
+上一节把 `persist.oplus.display.vrr.adfr` 设为 2 —— **这是错的，已回退。**
+
+设置后实测：
+
+```
+props: persist.oplus.display.vrr.adfr = 2
+结果 : 空闲 60 秒仍停在 120Hz，不再降档          ← 回归！
+```
+
+回退后：
+
+```
+props: (空)
+结果 : t=2s/4s/6s/8s 全部 vsyncRate=60.00     ← 原厂 LTPS 空闲降档恢复 ✅
+```
+
+**机理**：该属性是"面板 ADFR 能力等级"，置 2 后 SurfaceFlinger 会去等一个
+**AE084 永远给不出**的 ADFR idle tier，于是连原本"空闲 ~1.5s 降到 60Hz"这条
+普通路径也一并停摆了 —— 屏幕卡在 120Hz。
+
+**结论**：只有在内核 + 面板 + HAL **整条 ADFR 链路真的端到端可用**之后，
+才可以发布这个能力等级。否则它会**破坏本来正常的原厂 LTPS 降档行为**。
+
+`post-fs-data.sh` 已撤回该 setprop，并在原位留下说明注释防止以后再犯。

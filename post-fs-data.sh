@@ -180,20 +180,13 @@ fi
 setprop vendor.display.enable_qsync_idle 1
 setprop vendor.display.enable_allow_idle_fallback 1
 
-# SurfaceFlinger reads the panel's ADFR capability level out of this property
-# when it constructs the refresh-rate selector singleton, and only drives the
-# idle tier when the level is 2:
-#
-#     +0x30 <- persist.oplus.display.vrr.adfr                    (default 0)
-#     +0x34 <- persist.oplus.display.vrr.adfr.enable.idle.hint   (default 1)
-#     +0x38 <- persist.oplus.display.vrr.adfr.muti.display.support (default 0)
-#
-# The realme build ships these unset, so the selector looked like it had no
-# ADFR support and the idle path was skipped at the entry.  We publish ADFR for
-# AE084 in the DTBO (adfr_config 0xe51), so the capability level must be
-# published too or SurfaceFlinger still refuses to enter the idle tier.
-if [ "$(getprop persist.oplus.display.vrr.adfr)" != "2" ]; then
-    setprop persist.oplus.display.vrr.adfr 2
-fi
-setprop persist.oplus.display.vrr.adfr.enable.idle.hint 1
+
+# NOTE: do NOT publish persist.oplus.display.vrr.adfr here.
+# SurfaceFlinger's refresh-rate selector reads it as the panel's ADFR
+# capability level (must be 2 to enter the ADFR idle tier).  Measured on
+# RMX5200: setting it to 2 makes SurfaceFlinger wait for an ADFR idle tier that
+# AE084 never delivers and the ordinary "drop to 60Hz after ~1.5s idle" stops
+# working (stuck at 120Hz).  With the property unset the stock LTPS idle drop
+# behaves normally.  Only publish it once the whole ADFR path (kernel + panel +
+# HAL) genuinely works end to end.
 exit 0
