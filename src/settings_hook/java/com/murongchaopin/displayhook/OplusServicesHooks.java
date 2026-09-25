@@ -30,6 +30,7 @@ final class OplusServicesHooks {
         int modeResolver = FrameworkModeResolverHooks.install(module, loader);
         int resolutionVotes = FrameworkResolutionVoteHooks.install(module, loader);
         int ltpsMode = OplusLtpsModeHooks.install(module, loader);
+        int actuatorProbe = FrameworkModeActuatorProbe.install(module, loader);
         int physicalEnvelope = FrameworkPhysicalEnvelopeHooks.install(module, loader);
         int animationVotes = hookObjectAnimationVotes(module, loader);
         int vrrTier = OplusVrrTierHooks.install(module, loader);
@@ -96,6 +97,7 @@ final class OplusServicesHooks {
                     return interceptedSuccess(methodReturnType(chain));
                 });
         module.info("Oplus services hooks installed modeResolver=" + modeResolver
+                + " actuatorProbe=" + actuatorProbe
                 + " resolutionVotes=" + resolutionVotes
                 + " ltpsMode=" + ltpsMode
                 + " physicalEnvelope=" + physicalEnvelope

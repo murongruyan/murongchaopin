@@ -25,6 +25,9 @@ final class OplusVrrTierHooks {
     private static final String TARGET_FILE =
             "/data/adb/modules/murongchaopin/config/mode.txt";
     private static final float RATE_EPSILON_HZ = 0.01f;
+    /** The rate the vendor LTPS algorithm asks for when the screen is idle. */
+    private static final float LTPS_IDLE_RATE_HZ = 60.0f;
+    private static volatile String lastRouteDecision = "";
 
     private OplusVrrTierHooks() {
     }
@@ -440,15 +443,37 @@ final class OplusVrrTierHooks {
                 }
                 method.setAccessible(true);
                 module.intercept(method, "oplus.vrr.mode-id", chain -> {
+                    int modeType = ((Number) chain.getArg(0)).intValue();
+                    float rate = ((Number) chain.getArg(1)).floatValue();
+                    int width = ((Number) chain.getArg(2)).intValue();
+                    int height = ((Number) chain.getArg(3)).intValue();
+                    // Pure custom LTPO: the vendor LTPS algorithm decides 60Hz
+                    // when the screen is idle. That decision is the route hook --
+                    // resolve the *same* request against the injected low tier so
+                    // the system itself selects 1Hz, instead of a manual mode set.
+                    BridgeClient.LtpoRoute route = BridgeClient.ltpoRoute();
+                    if (route != null
+                            && Math.abs(rate - LTPS_IDLE_RATE_HZ) <= RATE_EPSILON_HZ) {
+                        Integer routed = exactModeId(chain.getThisObject(),
+                                route.targetFps, width, height);
+                        if (routed != null) {
+                            String decision = "route request=" + rate
+                                    + " target=" + route.targetFps
+                                    + " mode=" + routed;
+                            synchronized (OplusVrrTierHooks.class) {
+                                if (!decision.equals(lastRouteDecision)) {
+                                    lastRouteDecision = decision;
+                                    module.info("OPlus VRR tier routed " + decision);
+                                }
+                            }
+                            return routed;
+                        }
+                    }
                     Object result = chain.proceed();
                     if (result instanceof Number
                             && ((Number) result).intValue() >= 0) {
                         return result;
                     }
-                    int modeType = ((Number) chain.getArg(0)).intValue();
-                    float rate = ((Number) chain.getArg(1)).floatValue();
-                    int width = ((Number) chain.getArg(2)).intValue();
-                    int height = ((Number) chain.getArg(3)).intValue();
                     Integer resolved = resolveModeId(chain.getThisObject(),
                             rate, width, height);
                     if (resolved != null) {
@@ -468,6 +493,39 @@ final class OplusVrrTierHooks {
             module.error("OPlus VRR tier hook unavailable", error);
         }
         return installed;
+    }
+
+/** Exact geometry + rate match; used by the LTPO route so a miss cannot
+     * silently fall back to the user's ceiling tier. */
+    private static Integer exactModeId(Object configs, float rate, int width,
+                                       int height) {
+        try {
+            Object value = Reflect.getField(configs, "mSupportedModes");
+            if (!(value instanceof SparseArray<?>)) {
+                return null;
+            }
+            SparseArray<?> modes = (SparseArray<?>) value;
+            Integer selected = null;
+            for (int index = 0; index < modes.size(); index++) {
+                int modeId = modes.keyAt(index);
+                Object displayMode = displayMode(modes.valueAt(index));
+                if (displayMode == null) {
+                    continue;
+                }
+                if (intField(displayMode, "width") != width
+                        || intField(displayMode, "height") != height
+                        || Math.abs(refreshRate(displayMode) - rate)
+                            > RATE_EPSILON_HZ) {
+                    continue;
+                }
+                if (selected == null || modeId < selected) {
+                    selected = modeId;
+                }
+            }
+            return selected;
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     /** Returns a mode id for the request, or null when nothing matches. */
