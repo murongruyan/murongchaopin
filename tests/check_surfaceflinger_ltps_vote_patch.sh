@@ -105,9 +105,28 @@ else
     echo 'FAIL: adfr_off policy was rejected' >&2
     exit 1
 fi
+# 纯自制 LTPO（未打开"禁用日常 LTPO"）在 ColorOS 17 上同样走这层过滤：
+# 静止投票由框架 hook 定向到注入的最低档，必须先挡住厂商 AP-scale 顶档。
+if sh "$HELPER" test-patch "$MODEL" custom_ltpo "$SOURCE" \
+        "$TMPDIR_TEST/custom_ltpo_plain_16.bin" 2>/dev/null; then
+    echo 'FAIL: pure custom_ltpo was accepted without a ColorOS 17 platform' >&2
+    exit 1
+fi
+if ANDROID_RELEASE_MAJOR_OVERRIDE=17 sh "$HELPER" test-patch "$MODEL" \
+        custom_ltpo "$SOURCE" "$TMPDIR_TEST/custom_ltpo_plain_17.bin"; then
+    cmp -s "$TMPDIR_TEST/stock_ltps_reference.bin" \
+        "$TMPDIR_TEST/custom_ltpo_plain_17.bin" || {
+        echo 'FAIL: pure custom_ltpo patch bytes differ from stock_ltps' >&2
+        exit 1
+    }
+else
+    echo 'FAIL: pure custom_ltpo on ColorOS 17 was rejected' >&2
+    exit 1
+fi
+
 for wrong_policy in custom_ltpo stock_ltpo_typo; do
-    if sh "$HELPER" test-patch "$MODEL" "$wrong_policy" "$SOURCE" \
-            "$TMPDIR_TEST/$wrong_policy.bin"; then
+    if ANDROID_RELEASE_MAJOR_OVERRIDE=16 sh "$HELPER" test-patch "$MODEL" \
+            "$wrong_policy" "$SOURCE" "$TMPDIR_TEST/$wrong_policy.bin"; then
         echo "FAIL: wrong policy was accepted: $wrong_policy" >&2
         exit 1
     fi

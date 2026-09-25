@@ -17,6 +17,17 @@
 # is skipped instead of being force-loaded.
 
 KO_ABI_MOD_DIR=${KO_ABI_MOD_DIR:-${MOD_DIR:-${MODDIR:-}}}
+# The paid payload is installed *inside* the free module (…/premium) and every
+# loader under it points KO_ABI_MOD_DIR at that payload directory.  The guard
+# binary, the per-boot contract and the adapted copies are staged by the host
+# module, so a payload that does not ship its own copy must borrow the host's
+# instead of reporting "guard binary missing" and insmod-ing the unadapted
+# module, which the kernel rejects with a symbol CRC drift.
+KO_ABI_HOST_DIR=${KO_ABI_MOD_DIR%/premium}
+if [ "$KO_ABI_HOST_DIR" != "$KO_ABI_MOD_DIR" ] &&
+        [ -x "$KO_ABI_HOST_DIR/bin/ko_abi_guard" ]; then
+    KO_ABI_MOD_DIR=$KO_ABI_HOST_DIR
+fi
 KO_ABI_BIN=${KO_ABI_BIN:-$KO_ABI_MOD_DIR/bin/ko_abi_guard}
 KO_ABI_STATE_DIR=${KO_ABI_STATE_DIR:-$KO_ABI_MOD_DIR/runtime/ko_abi}
 KO_ABI_LOG_FILE=${KO_ABI_LOG_FILE:-$KO_ABI_MOD_DIR/daemon.log}

@@ -278,6 +278,21 @@ read_policy()
         tr -d '[:space:]'
 }
 
+# ColorOS 17 起纯自制 LTPO 改走"框架 hook 路由"：守护进程不再设置 SurfaceFlinger
+# 模式，静止时由框架 hook 把原厂 60Hz 静止投票定向到注入的最低档（1Hz）。这条
+# 路径仍然需要本补丁先把厂商 AP-scale 顶档（165/170）挡住，否则 hook 选中的节点
+# 会被同一层改写掉。ColorOS 16 仍是守护进程直接设模式的阶梯方案，行为不变。
+# 测试可以用 ANDROID_RELEASE_MAJOR_OVERRIDE 指定平台版本。
+android_release_major()
+{
+    if [ -n "$ANDROID_RELEASE_MAJOR_OVERRIDE" ]; then
+        printf '%s\n' "$ANDROID_RELEASE_MAJOR_OVERRIDE"
+        return 0
+    fi
+    getprop ro.build.version.release 2>/dev/null |
+        sed -n 's/^\([0-9][0-9]*\).*/\1/p' | head -n 1
+}
+
 # 原厂 LTPS 子方案（"禁用日常 LTPO"开启，策略保留 custom_ltpo）同样依赖
 # 本补丁放行 60Hz 投票；纯自制 LTPO（标志关闭）仍不应用，OTI 由控制器暂停。
 DAILY_IDLE_FILE="$MODDIR/config/rmx5200_ltpo_daily_idle.txt"
@@ -301,6 +316,10 @@ ltps_vote_wanted()
         daily_idle=$(sed -n '1{s/\r$//;p;q;}' "$DAILY_IDLE_FILE" 2>/dev/null |
             tr -d '[:space:]')
         [ "$daily_idle" = on ] && return 0
+        # 纯自制 LTPO：ColorOS 17 起同样依赖本补丁放行/定向静止投票。
+        release_major=$(android_release_major)
+        [ -n "$release_major" ] && [ "$release_major" -ge 17 ] 2>/dev/null &&
+            return 0
     fi
     return 1
 }

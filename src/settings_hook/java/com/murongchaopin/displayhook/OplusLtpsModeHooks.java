@@ -90,8 +90,36 @@ final class OplusLtpsModeHooks {
             if (!(modesValue instanceof Display.Mode[])) {
                 return original;
             }
-            Display.Mode selected = findExactMode((Display.Mode[]) modesValue,
-                    width, height, LTPS_RATE_HZ);
+            Display.Mode[] modes = (Display.Mode[]) modesValue;
+            // Pure custom LTPO: the daemon publishes the node the panel should
+            // rest on (the injected lowest tier while it is idle). The stock
+            // 60Hz LTPS request is the idle marker, so redirect its final mode
+            // id instead of letting the daemon set SurfaceFlinger modes.
+            BridgeClient.LtpoRoute route = BridgeClient.ltpoRoute();
+            if (route != null) {
+                Display.Mode routed = findExactMode(modes, width, height,
+                        route.targetFps);
+
+                if (routed != null) {
+                    int routeOriginalId = original instanceof Number
+                            ? ((Number) original).intValue() : -1;
+                    String routeDecision = "target=" + route.targetFps
+                            + " request=" + requested + " original="
+                            + routeOriginalId + " selected=" + routed.getModeId();
+
+                    synchronized (OplusLtpsModeHooks.class) {
+                        if (!routeDecision.equals(lastDecision)) {
+                            lastDecision = routeDecision;
+                            module.info("QHD LTPS mode routed " + routeDecision);
+                        }
+                    }
+                    return routed.getModeId();
+                }
+                module.info("QHD LTPS route has no exact mode target="
+                        + route.targetFps + " request=" + requested);
+            }
+            Display.Mode selected = findExactMode(modes, width, height,
+                    LTPS_RATE_HZ);
             if (selected == null) {
                 module.info("QHD LTPS request has no exact mode request=" + requested);
                 return original;

@@ -35,6 +35,10 @@ final class BridgeClient {
     private static final long RATES_TTL_MS = 15000L;
     private static final long PING_TTL_MS = 10000L;
     private static final long STATE_TTL_MS = 1200L;
+    private static final long LTPO_TTL_MS = 250L;
+    private static final long LTPO_FAIL_TTL_MS = 2000L;
+    private static final int LTPO_TIMEOUT_MS = 200;
+    private static final long LTPO_HOLD_MS = 3000L;
     private static final ExecutorService IO = Executors.newCachedThreadPool(runnable -> {
         Thread thread = new Thread(runnable, "MurongDisplayHookIo");
         thread.setDaemon(true);
@@ -43,6 +47,9 @@ final class BridgeClient {
     private static final Object RATES_LOCK = new Object();
     private static final ConcurrentHashMap<String, CachedValue> READ_CACHE =
             new ConcurrentHashMap<>();
+    private static volatile LtpoRoute ltpoRouteCache;
+    private static volatile long ltpoRouteCachedAt;
+    private static volatile long ltpoRouteLastGoodAt;
     private static volatile List<Integer> hwcRatesCache;
     private static volatile long hwcRatesCachedAt;
     private static volatile boolean ratesLoading;
@@ -371,6 +378,96 @@ final class BridgeClient {
 
     static String request(String command) {
         return request(command, TIMEOUT_MS);
+    }
+
+    /**
+     * LTPS/LTPO route target published by the root daemon for the pure
+     * "custom LTPO" policy. The daemon owns the activity decision; the hook
+     * only needs this value to place the final mode id on the injected
+     * low-rate node. Returns null when the module is not routing, so callers
+     * keep their stock behaviour.
+     */
+    static LtpoRoute ltpoRoute() {
+        long now = SystemClock.elapsedRealtime();
+        LtpoRoute cached = ltpoRouteCache;
+
+        if (cached != null) {
+            long ttl = cached.isRouting() ? LTPO_TTL_MS : LTPO_FAIL_TTL_MS;
+
+            if (now - ltpoRouteCachedAt < ttl) {
+                return cached.isRouting() ? cached : null;
+            }
+        }
+        String response;
+        // A missing daemon must never add its timeout to a framework mode
+        // resolution, so keep the round trip short and remember the failure.
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            Future<String> future = IO.submit(
+                    () -> requestSocket("GETLTPO", LTPO_TIMEOUT_MS));
+            try {
+                response = future.get(LTPO_TIMEOUT_MS + 60L, TimeUnit.MILLISECONDS);
+            } catch (Exception timeout) {
+                future.cancel(true);
+                response = "";
+            }
+        } else {
+            response = requestSocket("GETLTPO", LTPO_TIMEOUT_MS);
+        }
+        LtpoRoute parsed = LtpoRoute.parse(response);
+        if (response == null || response.isEmpty()) {
+            // Transport hiccup: the daemon handles the bridge in the same loop
+            // that shells out to dumpsys, so a query can time out. Keeping the
+            // last published route for a short hold window stops that from
+            // flipping the panel back to the stock 60Hz pin.
+            if (cached != null && now - ltpoRouteLastGoodAt < LTPO_HOLD_MS) {
+                ltpoRouteCache = cached;
+                ltpoRouteCachedAt = now;
+                return cached.isRouting() ? cached : null;
+            }
+            ltpoRouteCache = parsed;
+            ltpoRouteCachedAt = now;
+            return null;
+        }
+        ltpoRouteCache = parsed;
+        ltpoRouteCachedAt = now;
+        ltpoRouteLastGoodAt = now;
+        return parsed.isRouting() ? parsed : null;
+    }
+
+    static final class LtpoRoute {
+        static final LtpoRoute INACTIVE = new LtpoRoute(false, 0, false);
+
+        final boolean routing;
+        final int targetFps;
+        final boolean active;
+
+        LtpoRoute(boolean routing, int targetFps, boolean active) {
+            this.routing = routing;
+            this.targetFps = targetFps;
+            this.active = active;
+        }
+
+        boolean isRouting() {
+            return routing && targetFps > 0 && targetFps <= 240;
+        }
+
+        static LtpoRoute parse(String response) {
+            if (response == null) {
+                return INACTIVE;
+            }
+            String[] fields = response.trim().split("\\s+");
+
+            if (fields.length < 4 || !"LTPO".equals(fields[0])) {
+                return INACTIVE;
+            }
+            try {
+                return new LtpoRoute(Integer.parseInt(fields[1]) != 0,
+                        Integer.parseInt(fields[2]),
+                        Integer.parseInt(fields[3]) != 0);
+            } catch (NumberFormatException ignored) {
+                return INACTIVE;
+            }
+        }
     }
 
     private static String request(String command, int timeoutMs) {
