@@ -79,6 +79,21 @@ echo Compiling dts_tool...
     -o bin\dts_tool
 if errorlevel 1 goto build_failed
 
+:fingerprint_daemon
+:: Record which source the checked-in free daemon came from.  Without this the
+:: repository can ship a daemon that is older than src\rate_daemon.c -- which is
+:: exactly what happened when the SurfaceFlinger OTI durability work landed.
+set "DAEMON_SRC_SHA="
+for /f "skip=1 tokens=* delims=" %%H in ('certutil -hashfile src\rate_daemon.c SHA256') do (
+    if not defined DAEMON_SRC_SHA set "DAEMON_SRC_SHA=%%H"
+)
+if not defined DAEMON_SRC_SHA (
+    echo Warning: could not fingerprint the daemon source
+) else (
+    set "DAEMON_SRC_SHA=%DAEMON_SRC_SHA: =%"
+    > bin\rate_daemon.src.sha256 echo %DAEMON_SRC_SHA%  rate_daemon.c
+)
+
 echo Build successful! Output: bin\rate_daemon, packaging\paid-payload\bin\rate_daemon_premium, bin\dts_tool
 exit /b 0
 
