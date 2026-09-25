@@ -35,6 +35,28 @@ AP_SCALE_AUDIT_OFFSET=5229872
 AP_SCALE_ORIGINAL_HEX=01030054
 AP_SCALE_PATCHED_HEX=18000014
 
+# ColorOS 17 moved both companion sites, and the 152-byte block above only ever
+# described the ColorOS 16 build.  This table carries the builds whose vote
+# filter lives in the two surgical sites instead:
+#
+#   * the "<prefix>-animation" insert inside the vote-record writer.  The
+#     "-animation" literal sits 0x88 bytes before it on ColorOS 17 and 0x90
+#     bytes before the ColorOS 16 call this module already NOPs, so it is the
+#     same site on both builds;
+#   * the AP-scale table jump inside updateBestFrameRate, the one that resolves
+#     a correct 144Hz request into 1080x2352@123 and drags the panel into the
+#     FHD group.
+#
+# Each entry is <sha256>:<animation offset>:<animation original hex>:
+# <ap-scale offset>:<ap-scale original hex>.  An unknown build keeps the legacy
+# contract and therefore still fails closed on the context check.
+BUILD_SITE_TABLE="\
+4b9a0ca743aabe6cada245f5e9b789cdd5a3d345c5bf37168b353d7f38b88e03:3152928:addbfb97:3653020:80040054"
+
+ANIMATION_PATCHED_HEX=1f2003d5
+TABLE_AP_SCALE_PATCHED_HEX=24000014
+BUILD_CONTRACT=legacy
+
 hash_file()
 {
     sha256sum "$1" 2>/dev/null | awk 'NR == 1 { print tolower($1) }'
@@ -54,6 +76,92 @@ hex_range()
 hex_at()
 {
     hex_range "$1" "$2" 4
+}
+
+# Unknown builds keep the legacy contract, which then fails closed on the
+# context check instead of patching an address nobody verified.
+select_build_sites()
+{
+    file=$1
+    BUILD_CONTRACT=legacy
+    build_sha=$(hash_file "$file")
+    [ -n "$build_sha" ] || return 0
+    for entry in $BUILD_SITE_TABLE; do
+        entry_sha=${entry%%:*}
+        [ "$entry_sha" = "$build_sha" ] || continue
+        entry_rest=${entry#*:}
+        SITE_ANIMATION_OFFSET=${entry_rest%%:*}
+        entry_rest=${entry_rest#*:}
+        SITE_ANIMATION_ORIGINAL_HEX=${entry_rest%%:*}
+        entry_rest=${entry_rest#*:}
+        SITE_AP_SCALE_OFFSET=${entry_rest%%:*}
+        SITE_AP_SCALE_ORIGINAL_HEX=${entry_rest#*:}
+        BUILD_CONTRACT=table
+        return 0
+    done
+    return 0
+}
+
+# Contract words arrive as little-endian hex, so this writer stays data driven.
+write_patch_word()
+{
+    file=$1
+    offset=$2
+    hex=$3
+    case "$hex" in
+        ''|*[!0-9a-fA-F]*) return 1 ;;
+    esac
+    [ $(( ${#hex} % 2 )) -eq 0 ] || return 1
+    escapes=''
+    rest=$hex
+    while [ -n "$rest" ]; do
+        pair=${rest%"${rest#??}"}
+        rest=${rest#??}
+        escapes=$escapes$(printf '\\%03o' "$(( 0x$pair ))")
+    done
+    printf '%b' "$escapes" |
+        dd of="$file" bs=1 seek="$offset" conv=notrunc >/dev/null 2>&1
+}
+
+verify_table_original()
+{
+    file=$1
+    [ -r "$file" ] &&
+        [ "$(hex_at "$file" "$SITE_ANIMATION_OFFSET")" = "$SITE_ANIMATION_ORIGINAL_HEX" ] &&
+        [ "$(hex_at "$file" "$SITE_AP_SCALE_OFFSET")" = "$SITE_AP_SCALE_ORIGINAL_HEX" ]
+}
+
+verify_table_patched()
+{
+    file=$1
+    [ -r "$file" ] &&
+        [ "$(hex_at "$file" "$SITE_ANIMATION_OFFSET")" = "$ANIMATION_PATCHED_HEX" ] &&
+        [ "$(hex_at "$file" "$SITE_AP_SCALE_OFFSET")" = "$TABLE_AP_SCALE_PATCHED_HEX" ]
+}
+
+patch_site_table()
+{
+    source=$1
+    output=$2
+    verify_table_original "$source" || return 12
+    output_dir=${output%/*}
+    [ "$output_dir" != "$output" ] || output_dir=.
+    mkdir -p "$output_dir" || return 13
+    temp_file="$output.tmp.$$"
+    rm -f "$temp_file" 2>/dev/null || true
+    cp -f "$source" "$temp_file" || return 13
+    if ! write_patch_word "$temp_file" "$SITE_ANIMATION_OFFSET" "$ANIMATION_PATCHED_HEX" ||
+            ! write_patch_word "$temp_file" "$SITE_AP_SCALE_OFFSET" "$TABLE_AP_SCALE_PATCHED_HEX" ||
+            ! verify_table_patched "$temp_file" ||
+            [ "$(file_size "$temp_file")" != "$(file_size "$source")" ]; then
+        rm -f "$temp_file" 2>/dev/null || true
+        return 14
+    fi
+    mv -f "$temp_file" "$output" || {
+        rm -f "$temp_file" 2>/dev/null || true
+        return 15
+    }
+    return 0
 }
 
 log_line()
@@ -162,6 +270,11 @@ patch_semantic_file()
 
     [ "$model" = "$EXPECTED_MODEL" ] || return 10
     ltps_vote_wanted "$policy" || return 11
+    select_build_sites "$source"
+    if [ "$BUILD_CONTRACT" = table ]; then
+        patch_site_table "$source" "$output"
+        return $?
+    fi
     verify_original "$source" "$offset" || return 12
 
     output_dir=${output%/*}
@@ -426,6 +539,16 @@ case "$1" in
     test-patch)
         [ "$#" -eq 5 ] || exit 2
         patch_semantic_file "$2" "$3" "$4" "$5"
+        ;;
+    test-sites)
+        [ "$#" -eq 9 ] || exit 2
+        SITE_ANIMATION_OFFSET=$2
+        SITE_ANIMATION_ORIGINAL_HEX=$3
+        ANIMATION_PATCHED_HEX=$4
+        SITE_AP_SCALE_OFFSET=$5
+        SITE_AP_SCALE_ORIGINAL_HEX=$6
+        TABLE_AP_SCALE_PATCHED_HEX=$7
+        patch_site_table "$8" "$9"
         ;;
     *)
         printf 'usage: %s prepare|apply|mark-boot-success|clear-boot-guard|restore|status\n' "$0" >&2
