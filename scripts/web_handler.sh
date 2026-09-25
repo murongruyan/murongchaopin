@@ -2830,7 +2830,14 @@ case "$1" in
         # The daemon owns the display transaction and synchronizes Settings
         # only after the physical mode is stable. An eager sync-global here
         # races ColorOS, Framework and SurfaceFlinger during resolution changes.
-        ensure_resolution_density "${NEW_SPEC%%x*}" >/dev/null 2>&1
+        # A refresh-rate-only switch must not touch the density: writing any
+        # density key makes ColorOS rebuild the display configuration, which
+        # reloads every activity (the "web switch reloads all apps" report).
+        # Only a real geometry change may align the density.
+        SOURCE_WIDTH=$(active_display_width)
+        if [ -n "$SOURCE_WIDTH" ] && [ "$SOURCE_WIDTH" != "${NEW_SPEC%%x*}" ]; then
+            ensure_resolution_density "${NEW_SPEC%%x*}" >/dev/null 2>&1
+        fi
         echo "Success: Global mode set to $NEW_MODE"
         ;;
 
@@ -2845,60 +2852,66 @@ case "$1" in
         }
         TARGET_WIDTH=${NEW_SPEC%%x*}
         case "$TARGET_WIDTH" in
-            ''|*[!0-9]*) echo "Error: Invalid target resolution"; exit 1 ;;
+            \'\'|*[!0-9]*) echo "Error: Invalid target resolution"; exit 1 ;;
         esac
         SOURCE_WIDTH=$(active_display_width)
         if [ "$TARGET_WIDTH" = "$SOURCE_WIDTH" ]; then
             echo "Error: Target resolution is already active"
             exit 1
         fi
-
-        # Hand the geometry to the daemon exactly like a refresh-rate switch.
-        # The old ADOPTRES path asked ColorOS to switch, and ColorOS restored
-        # its own stored resolution a few seconds later - the panel bounced
-        # back while the density had already been written for the new width.
-        TMP_FILE="${CONFIG_FILE}.tmp"
-        {
-            printf '%s\n' "$NEW_SPEC"
-            canonicalize_app_configs "$NEW_SPEC"
-        } > "$TMP_FILE" || {
-            rm -f "$TMP_FILE"
-            echo "Error: Failed to normalize mode configuration"
+        coloros_density_for_width "$TARGET_WIDTH" || {
+            echo "Error: No density ladder for ${TARGET_WIDTH}px"
             exit 1
         }
-        mv "$TMP_FILE" "$CONFIG_FILE"
-        chmod 666 "$CONFIG_FILE"
+
+        # Drive the vendor transition instead of performing our own:
+        # system_server (ResolutionSwitch) watches these keys, runs its own
+        # animation, swaps the HWC mode and applies the matching density as one
+        # transaction - exactly what the Settings resolution page does. Arming
+        # the daemon here would preempt that animation and leave two raw
+        # relayouts on screen, which is what "web switch flashes, every app
+        # reloads" was.
+        setprop persist.sys.display.user_density "$TARGET_DENSITY"
+        setprop persist.sys.display.screen_resolution "$RESOLUTION_ADJUST"
+        settings put secure oplus_customize_screen_resolution_adjust \
+            "$RESOLUTION_ADJUST" >/dev/null 2>&1
+        settings put secure user_preferred_screen_index "$RESOLUTION_ADJUST" \
+            >/dev/null 2>&1
+        sleep 0.1
+        wm density "$TARGET_DENSITY" >/dev/null 2>&1
 
         if ! wait_for_active_width "$TARGET_WIDTH" 80; then
-            echo "Error: Resolution transaction failed (active=$(active_display_width))"
-            exit 1
+            # ColorOS did not follow the property change; fall back to the
+            # daemon transaction that never depends on the vendor stack.
+            TMP_FILE="${CONFIG_FILE}.tmp"
+            {
+                printf '%s\n' "$NEW_SPEC"
+                canonicalize_app_configs "$NEW_SPEC"
+            } > "$TMP_FILE" || {
+                rm -f "$TMP_FILE"
+                echo "Error: Failed to normalize mode configuration"
+                exit 1
+            }
+            mv "$TMP_FILE" "$CONFIG_FILE"
+            chmod 666 "$CONFIG_FILE"
+            wait_for_active_width "$TARGET_WIDTH" 80 || {
+                echo "Error: Resolution transaction failed (active=$(active_display_width))"
+                exit 1
+            }
         fi
 
-        # Publish the matching density and ColorOS resolution keys only after
-        # the new geometry is really on screen, then hold the result: a late
-        # vendor restore must not leave the panel at one width and the UI at
-        # the other width's DPI.
-        coloros_density_for_width "$TARGET_WIDTH" &&
-            publish_resolution_keys "$TARGET_WIDTH"
-        HOLD_INDEX=0
-        while [ "$HOLD_INDEX" -lt 20 ]; do
-            [ "$(active_display_width)" = "$TARGET_WIDTH" ] || break
-            sleep 0.1
-            HOLD_INDEX=$((HOLD_INDEX + 1))
-        done
+        # One late check: a vendor restore must not leave the panel on one
+        # width and the density on the other.
+        sleep 1
         if [ "$(active_display_width)" != "$TARGET_WIDTH" ]; then
-            printf '%s\n' "$NEW_SPEC" > "$TMP_FILE" 2>/dev/null
-            if [ -s "$TMP_FILE" ]; then
-                mv "$TMP_FILE" "$CONFIG_FILE"
+            printf '%s\n' "$NEW_SPEC" > "${CONFIG_FILE}.tmp" 2>/dev/null
+            if [ -s "${CONFIG_FILE}.tmp" ]; then
+                mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
                 chmod 666 "$CONFIG_FILE"
             fi
             wait_for_active_width "$TARGET_WIDTH" 60 >/dev/null 2>&1
-            ensure_resolution_density "$TARGET_WIDTH" >/dev/null 2>&1
         fi
-        if [ "$(active_display_width)" != "$TARGET_WIDTH" ]; then
-            echo "Error: Resolution reverted to $(active_display_width)"
-            exit 1
-        fi
+        ensure_resolution_density "$TARGET_WIDTH" >/dev/null 2>&1
         echo "Success: Resolution mode set to $NEW_MODE"
         ;;
 
