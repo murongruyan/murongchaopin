@@ -280,6 +280,53 @@ final class FrameworkModeResolverHooks {
             int selected = extendedGroupMatch != Integer.MAX_VALUE
                     ? extendedGroupMatch
                     : groupMatch != Integer.MAX_VALUE ? groupMatch : fallback;
+            boolean relaxed = false;
+            if (selected == Integer.MAX_VALUE) {
+                /* An injected low tier is cloned from the native 60Hz timing, so
+                 * the vendor often keeps vsyncRate=60 while peakRefreshRate
+                 * carries the injected rate. The strict matcher then finds
+                 * nothing, the request falls through to the vendor's stale
+                 * answer and the panel stays on 60. Retry on the peak rate. */
+                int relaxedMatch = Integer.MAX_VALUE;
+                for (int index = 0; index < Array.getLength(sfModes); index++) {
+                    Object mode = Array.get(sfModes, index);
+                    if (intField(mode, "width") != target.getPhysicalWidth()
+                            || intField(mode, "height") != target.getPhysicalHeight()
+                            || Math.abs(floatField(mode, "peakRefreshRate")
+                                - target.getRefreshRate()) > RATE_EPSILON_HZ) {
+                        continue;
+                    }
+                    int id = intField(mode, "id");
+                    if (id >= 0 && id < relaxedMatch) {
+                        relaxedMatch = id;
+                    }
+                }
+                if (relaxedMatch != Integer.MAX_VALUE) {
+                    selected = relaxedMatch;
+                    relaxed = true;
+                }
+            }
+            boolean lowRate = target.getRefreshRate() <= 5.0f;
+            if (lowRate) {
+                StringBuilder detail = new StringBuilder();
+                for (int index = 0; index < Array.getLength(sfModes); index++) {
+                    Object mode = Array.get(sfModes, index);
+                    if (intField(mode, "width") != target.getPhysicalWidth()
+                            || intField(mode, "height") != target.getPhysicalHeight()) {
+                        continue;
+                    }
+                    detail.append(detail.length() > 0 ? ',' : ' ')
+                            .append(intField(mode, "id")).append("/g")
+                            .append(intField(mode, "group")).append('@')
+                            .append(floatField(mode, "peakRefreshRate"))
+                            .append('/').append(floatField(mode, "vsyncRate"));
+                }
+                module.info("Framework SF low-rate mapping framework=" + frameworkModeId
+                        + " target=" + describe(target) + " requestedGroup="
+                        + requestedGroup + " sf=[" + detail.toString().trim() + "]"
+                        + " selected=" + (selected == Integer.MAX_VALUE ? -1 : selected)
+                        + " relaxed=" + relaxed);
+            }
             if (selected == Integer.MAX_VALUE) {
                 return null;
             }
