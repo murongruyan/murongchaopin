@@ -4,7 +4,9 @@ import android.util.SparseArray;
 import android.view.Display;
 
 import java.lang.reflect.Array;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 
 /** Resolves integer refresh requests against Qualcomm's fractional mode values. */
 final class FrameworkModeResolverHooks {
@@ -108,6 +110,61 @@ final class FrameworkModeResolverHooks {
      * 1Hz. Nothing is forced while the vendor asks for a higher rate, so the
      * touch/animation rise keeps its stock behaviour.
      */
+/** Field dump of a RefreshRateRanges-like object, for the LTPO audit. */
+    private static String describeRanges(Object ranges) {
+        if (ranges == null) {
+            return "null";
+        }
+        StringBuilder builder = new StringBuilder();
+        for (Field field : ranges.getClass().getDeclaredFields()) {
+            if (Modifier.isStatic(field.getModifiers())) {
+                continue;
+            }
+            try {
+                field.setAccessible(true);
+                Object value = field.get(ranges);
+                if (builder.length() > 0) {
+                    builder.append(' ');
+                }
+                builder.append(field.getName()).append('=');
+                if (value instanceof float[]) {
+                    float[] array = (float[]) value;
+                    builder.append('[');
+                    for (int i = 0; i < Math.min(array.length, 8); i++) {
+                        if (i > 0) builder.append(',');
+                        builder.append(array[i]);
+                    }
+                    builder.append(']');
+                } else if (value instanceof int[]) {
+                    int[] array = (int[]) value;
+                    builder.append('[');
+                    for (int i = 0; i < Math.min(array.length, 8); i++) {
+                        if (i > 0) builder.append(',');
+                        builder.append(array[i]);
+                    }
+                    builder.append(']');
+                } else if (value == null || value instanceof Number
+                        || value instanceof Boolean || value instanceof CharSequence) {
+                    builder.append(value);
+                } else {
+                    builder.append(value.getClass().getSimpleName());
+                }
+            } catch (Throwable ignored) {
+                // field not readable: skip it
+            }
+        }
+        return builder.toString();
+    }
+
+    private static boolean booleanField(Object owner, String name) {
+        try {
+            Object value = Reflect.getField(owner, name);
+            return value instanceof Boolean && (Boolean) value;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     private static void applyLtpoRoute(DisplaySettingsHook module, Object device,
                                        Object specs) {
         try {
@@ -128,7 +185,11 @@ final class FrameworkModeResolverHooks {
             }
             String trace = "route=" + (route == null ? "none" : route.targetFps)
                     + " base=" + baseId + "@" + baseRate
-                    + " routed=" + routedId;
+                    + " routed=" + routedId
+                    + " group=" + booleanField(specs, "allowGroupSwitching")
+                    + " vrr=" + intField(specs, "vrrPolicy")
+                    + " primary=[" + describeRanges(Reflect.getField(specs, "primary")) + "]"
+                    + " app=[" + describeRanges(Reflect.getField(specs, "appRequest")) + "]";
             synchronized (FrameworkModeResolverHooks.class) {
                 if (!trace.equals(lastRouteTrace)) {
                     lastRouteTrace = trace;
