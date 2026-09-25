@@ -15,8 +15,12 @@ final class FrameworkModeResolverHooks {
     private static final float RATE_EPSILON_HZ = 0.01f;
     /** The rate the stock LTPS algorithm asks for while the screen is idle. */
     private static final float LTPS_IDLE_RATE_HZ = 60.0f;
+    /** Idle timer SF applies the low tier after. */
+    private static final int IDLE_CONFIG_TIMEOUT_MS = 1000;
     private static volatile String lastRouteDecision = "";
     private static volatile String lastRouteTrace = "";
+    private static volatile boolean idleConfigProbed = false;
+    private static volatile String idleConfigApplied = null;
 
     private FrameworkModeResolverHooks() {
     }
@@ -147,13 +151,41 @@ final class FrameworkModeResolverHooks {
                         || value instanceof Boolean || value instanceof CharSequence) {
                     builder.append(value);
                 } else {
-                    builder.append(value.getClass().getSimpleName());
+                    builder.append(describeRangeFields(value));
                 }
             } catch (Throwable ignored) {
                 // field not readable: skip it
             }
         }
         return builder.toString();
+    }
+
+    /** One more level: RefreshRateRange keeps its bounds in inner objects. */
+    private static String describeRangeFields(Object range) {
+        StringBuilder builder = new StringBuilder();
+        builder.append(range.getClass().getSimpleName()).append('{');
+        for (Field field : range.getClass().getDeclaredFields()) {
+            if (Modifier.isStatic(field.getModifiers())) {
+                continue;
+            }
+            try {
+                field.setAccessible(true);
+                Object value = field.get(range);
+                if (builder.charAt(builder.length() - 1) != '{') {
+                    builder.append(' ');
+                }
+                builder.append(field.getName()).append('=');
+                if (value == null || value instanceof Number
+                        || value instanceof Boolean || value instanceof CharSequence) {
+                    builder.append(value);
+                } else {
+                    builder.append(value.getClass().getSimpleName());
+                }
+            } catch (Throwable ignored) {
+                // field not readable: skip it
+            }
+        }
+        return builder.append('}').toString();
     }
 
     private static boolean booleanField(Object owner, String name) {
@@ -165,6 +197,49 @@ final class FrameworkModeResolverHooks {
         }
     }
 
+/** One-shot dump of the "idle screen refresh rate" channel SF exposes. */
+    private static void probeIdleConfig(DisplaySettingsHook module, Object device,
+                                        Object specs) {
+        if (idleConfigProbed) {
+            return;
+        }
+        idleConfigProbed = true;
+        try {
+            java.lang.reflect.Field holder = specs.getClass()
+                    .getDeclaredField("mIdleScreenRefreshRateConfig");
+
+            holder.setAccessible(true);
+            Object current = holder.get(specs);
+            Class<?> type = holder.getType();
+            if (type == Object.class && current != null) {
+                type = current.getClass();
+            }
+            StringBuilder builder = new StringBuilder();
+            builder.append("type=").append(type.getName());
+            builder.append(" current=").append(current);
+            builder.append(" fields=[");
+            for (java.lang.reflect.Field field : type.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) {
+                    continue;
+                }
+                builder.append(field.getName()).append(':')
+                        .append(field.getType().getSimpleName()).append(' ');
+            }
+            builder.append("] ctors=[");
+            for (java.lang.reflect.Constructor<?> ctor : type.getDeclaredConstructors()) {
+                builder.append('(');
+                for (Class<?> param : ctor.getParameterTypes()) {
+                    builder.append(param.getSimpleName()).append(',');
+                }
+                builder.append(") ");
+            }
+            builder.append(']');
+            module.info("IDLECFG " + builder);
+        } catch (Throwable error) {
+            module.error("IDLECFG probe failed", error);
+        }
+    }
+
     private static void applyLtpoRoute(DisplaySettingsHook module, Object device,
                                        Object specs) {
         try {
@@ -173,6 +248,7 @@ final class FrameworkModeResolverHooks {
             }
             BridgeClient.LtpoRoute route = BridgeClient.ltpoRoute();
             int baseId = intField(specs, "baseModeId");
+            probeIdleConfig(module, device, specs);
             Display.Mode base = frameworkMode(device, baseId);
             float baseRate = base == null ? -1.0f : base.getRefreshRate();
             Integer routedId = null;
@@ -196,6 +272,9 @@ final class FrameworkModeResolverHooks {
                     module.info("LTPO route trace " + trace);
                 }
             }
+            if (routedId == null && !applyIdleScreenConfig(module, specs, route)) {
+                return;
+            }
             if (routedId == null) {
                 return;
             }
@@ -214,6 +293,55 @@ final class FrameworkModeResolverHooks {
             }
         } catch (Throwable error) {
             module.error("LTPO route specs failed", error);
+        }
+    }
+
+/**
+     * Pure custom LTPO. SurfaceFlinger has its own "idle screen refresh rate"
+     * channel (SurfaceControl.IdleScreenRefreshRateConfig) which the stock
+     * framework leaves null, so the vendor falls back to its 60Hz touch-idle
+     * tier. Publish the idle configuration while the route asks for the low
+     * tier and let SF's own idle machinery pick the rate.
+     */
+    private static boolean applyIdleScreenConfig(DisplaySettingsHook module,
+                                                 Object specs,
+                                                 BridgeClient.LtpoRoute route) {
+        try {
+            if (route == null || !route.isRouting() || route.targetFps > 10) {
+                return false;
+            }
+            java.lang.reflect.Field holder = specs.getClass()
+                    .getDeclaredField("mIdleScreenRefreshRateConfig");
+
+            holder.setAccessible(true);
+            Object current = holder.get(specs);
+            String state = current == null ? "null" : current.toString();
+
+            // Every specs rebuild starts from null, so re-apply instead of
+            // treating "already seen null" as "already configured": otherwise
+            // the panel drops back to the vendor 60Hz tier after ~30s.
+            if (current != null) {
+                if (!"seen".equals(idleConfigApplied)) {
+                    idleConfigApplied = "seen";
+                    module.info("LTPO idle screen config already=" + current
+                            + " target=" + route.targetFps);
+                }
+                return true;
+            }
+            Class<?> type = holder.getType();
+            Object instance = type.getDeclaredConstructor(int.class)
+                    .newInstance(IDLE_CONFIG_TIMEOUT_MS);
+
+            holder.set(specs, instance);
+            if (!"set".equals(idleConfigApplied)) {
+                idleConfigApplied = "set";
+                module.info("LTPO idle screen config applied timeout="
+                        + IDLE_CONFIG_TIMEOUT_MS + " target=" + route.targetFps);
+            }
+            return true;
+        } catch (Throwable error) {
+            module.error("LTPO idle screen config failed", error);
+            return false;
         }
     }
 

@@ -393,6 +393,13 @@ final class BridgeClient {
         // never blocks and does not depend on its main loop being free to serve
         // the socket, which is what made the bridge answer look "not routing"
         // while the daemon had already published a target.
+        // Exactly one owner acts on the refresh rate. The daemon keeps
+        // ownership by default (it enacts the node itself); it hands the route
+        // over only when asked, so the framework path can never fight it.
+        if (!"framework".equals(systemProperty(
+                "murong.ltpo.route.owner", "daemon"))) {
+            return null;
+        }
         String mirrored = systemProperty("murong.ltpo.route", "");
         LtpoRoute cached = ltpoRouteCache;
 
