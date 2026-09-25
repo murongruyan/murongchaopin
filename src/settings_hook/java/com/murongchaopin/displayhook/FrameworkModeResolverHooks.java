@@ -11,6 +11,10 @@ final class FrameworkModeResolverHooks {
     private static final String LOCAL_DISPLAY_DEVICE =
             "com.android.server.display.LocalDisplayAdapter$LocalDisplayDevice";
     private static final float RATE_EPSILON_HZ = 0.01f;
+    /** The rate the stock LTPS algorithm asks for while the screen is idle. */
+    private static final float LTPS_IDLE_RATE_HZ = 60.0f;
+    private static volatile String lastRouteDecision = "";
+    private static volatile String lastRouteTrace = "";
 
     private FrameworkModeResolverHooks() {
     }
@@ -83,6 +87,7 @@ final class FrameworkModeResolverHooks {
                     module.intercept(method, "framework.mode.group-switch", chain -> {
                         enableCrossResolutionGroupSwitch(module, chain.getThisObject(),
                                 chain.getArg(0));
+                        applyLtpoRoute(module, chain.getThisObject(), chain.getArg(0));
                         return chain.proceed();
                     });
                     installed++;
@@ -94,6 +99,102 @@ final class FrameworkModeResolverHooks {
         module.info("Framework mode resolver hooks installed=" + installed
                 + " model=" + model + " epsilon=" + RATE_EPSILON_HZ);
         return installed;
+    }
+
+/**
+     * Pure custom LTPO. The framework's own idle request is the stock 60Hz LTPS
+     * tier; when the daemon publishes the node the panel should rest on, resolve
+     * that same request against the injected low tier so the *system* selects
+     * 1Hz. Nothing is forced while the vendor asks for a higher rate, so the
+     * touch/animation rise keeps its stock behaviour.
+     */
+    private static void applyLtpoRoute(DisplaySettingsHook module, Object device,
+                                       Object specs) {
+        try {
+            if (specs == null) {
+                return;
+            }
+            BridgeClient.LtpoRoute route = BridgeClient.ltpoRoute();
+            int baseId = intField(specs, "baseModeId");
+            Display.Mode base = frameworkMode(device, baseId);
+            float baseRate = base == null ? -1.0f : base.getRefreshRate();
+            Integer routedId = null;
+            if (route != null && base != null
+                    && Math.abs(baseRate - LTPS_IDLE_RATE_HZ)
+                        <= RATE_EPSILON_HZ) {
+                routedId = frameworkModeIdForRate(device,
+                        base.getPhysicalWidth(), base.getPhysicalHeight(),
+                        route.targetFps);
+            }
+            String trace = "route=" + (route == null ? "none" : route.targetFps)
+                    + " base=" + baseId + "@" + baseRate
+                    + " routed=" + routedId;
+            synchronized (FrameworkModeResolverHooks.class) {
+                if (!trace.equals(lastRouteTrace)) {
+                    lastRouteTrace = trace;
+                    module.info("LTPO route trace " + trace);
+                }
+            }
+            if (routedId == null) {
+                return;
+            }
+            if (routedId == null || routedId == baseId) {
+                return;
+            }
+            Reflect.setField(specs, "baseModeId", routedId);
+            String decision = "base=" + baseId + " -> " + routedId
+                    + " (" + base.getPhysicalWidth() + "x"
+                    + base.getPhysicalHeight() + "@" + route.targetFps + ")";
+            synchronized (FrameworkModeResolverHooks.class) {
+                if (!decision.equals(lastRouteDecision)) {
+                    lastRouteDecision = decision;
+                    module.info("LTPO route specs " + decision);
+                }
+            }
+        } catch (Throwable error) {
+            module.error("LTPO route specs failed", error);
+        }
+    }
+
+    /** Framework mode id whose geometry and rate match, or null. */
+    private static Integer frameworkModeIdForRate(Object device, int width,
+                                                  int height, float refreshRate) {
+        try {
+            return frameworkModeIdForRateLocked(device, width, height, refreshRate);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static Integer frameworkModeIdForRateLocked(Object device, int width,
+                                                        int height,
+                                                        float refreshRate)
+            throws ReflectiveOperationException {
+        Object value = Reflect.getField(device, "mSupportedModes");
+        if (!(value instanceof SparseArray<?>)) {
+            return null;
+        }
+        SparseArray<?> records = (SparseArray<?>) value;
+        Integer selected = null;
+        for (int index = 0; index < records.size(); index++) {
+            Object record = records.valueAt(index);
+            Object modeValue = Reflect.getField(record, "mMode");
+            if (!(modeValue instanceof Display.Mode)) {
+                continue;
+            }
+            Display.Mode mode = (Display.Mode) modeValue;
+            if (mode.getPhysicalWidth() != width
+                    || mode.getPhysicalHeight() != height
+                    || Math.abs(mode.getRefreshRate() - refreshRate)
+                        > RATE_EPSILON_HZ) {
+                continue;
+            }
+            int modeId = mode.getModeId();
+            if (selected == null || modeId < selected) {
+                selected = modeId;
+            }
+        }
+        return selected;
     }
 
     private static Display.Mode resolveMode(DisplaySettingsHook module, Object device,

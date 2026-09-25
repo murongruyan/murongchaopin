@@ -30,7 +30,9 @@ final class OplusServicesHooks {
         int modeResolver = FrameworkModeResolverHooks.install(module, loader);
         int resolutionVotes = FrameworkResolutionVoteHooks.install(module, loader);
         int ltpsMode = OplusLtpsModeHooks.install(module, loader);
-        int actuatorProbe = FrameworkModeActuatorProbe.install(module, loader);
+        // MODEACTUATOR probe disabled: it hooks setDesiredDisplayModeSpecsLocked
+        // on the same method as the LTPO route and shadows it.
+        int actuatorProbe = 0;
         int physicalEnvelope = FrameworkPhysicalEnvelopeHooks.install(module, loader);
         int animationVotes = hookObjectAnimationVotes(module, loader);
         int vrrTier = OplusVrrTierHooks.install(module, loader);
