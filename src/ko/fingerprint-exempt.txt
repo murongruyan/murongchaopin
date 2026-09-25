@@ -1,6 +1,7 @@
-# Checked-in kernel modules that still need their own prepared kernel tree
-# before they can be rebuilt and fingerprinted.  Keep this list short: an entry
-# means we cannot prove the binary matches the source it claims to come from.
-plk110_drm_modes.ko
-plq110_drm_modes.ko
-pjd110_drm_modes.ko
+# Checked-in kernel modules that cannot be fingerprinted yet.
+#
+# Empty: all four public DRM modules are now built by
+# scripts/build_free_kernel_kos.sh, which writes a <module>.ko.src.sha256 next
+# to each one.  Add an entry here only with the reason the module cannot be
+# rebuilt -- and expect the entry to be temporary, because an unproven binary is
+# exactly the failure this file exists to surface.

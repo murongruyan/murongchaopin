@@ -142,6 +142,8 @@ build_pjd110() {
 		KBUILD_MODPOST_WARN=1 modules
 	install -m 0600 "$pjd_tmp/pjd110_drm_modes.ko" \
 		"$OUT_DIR/pjd110_drm_modes.ko"
+	write_fingerprint pjd110_drm_modes pjd110_display_modes.c \
+		plk110_display_modes.c
 	rm -rf "$pjd_tmp" "$pjd_provider_tmp"
 }
 
