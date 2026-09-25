@@ -137,3 +137,11 @@ if [ -f "$PREMIUM_POST_FS" ]; then
     fi
 fi
 exit 0
+
+# ColourOS 17 gates its QSync/idle refresh-rate path behind these vendor
+# properties; both ship unset, so surfaceflinger never even attempts the idle
+# tier the module injects (setIdleModeExternal is never called). Enable them
+# before surfaceflinger starts so the framework's own idle request can land on
+# the injected low tier.
+setprop vendor.display.enable_qsync_idle 1
+setprop vendor.display.enable_allow_idle_fallback 1
