@@ -91,7 +91,7 @@
 #define RMX5200_LTPO_INTERMEDIATE_HIGH_DWELL_MS 80
 #define RMX5200_LTPO_RISE_REFINE_TIMEOUT_MS 500
 #define RMX5200_LTPO_RISE_STEP_TIMEOUT_MS 4500
-#define RMX5200_VIDEO_SURFACE_PROBE_INTERVAL_MS 500
+#define RMX5200_VIDEO_SURFACE_PROBE_INTERVAL_MS 2500
 #define RMX5200_VIDEO_SURFACE_EXIT_GRACE_MS 1800
 #define RMX5200_VIDEO_SURFACE_MIN_REFRESH 60
 #define DISPLAY_HOOK_TOKEN \
@@ -812,7 +812,29 @@ void load_config(const char* base_path) {
 }
 
 // 获取当前系统模式ID
+/* Querying SurfaceFlinger is expensive and holds its lock while the dump runs.
+ * The one-second policy loop and the mode-verification loops used to spawn it
+ * once per poll, which showed up as a periodic hitch (and as a burst of dumps
+ * during every mode transaction). Share one result for 400ms instead, which is
+ * still close to the ~300ms a mode transaction needs to settle. */
+#define SYSTEM_MODE_CACHE_MS 400
+
+static int get_current_system_mode_uncached(void);
+
 int get_current_system_mode() {
+    static int cached_mode = -2;
+    static long long cached_mode_ms = 0;
+    long long now_ms = monotonic_ms();
+
+    if (cached_mode != -2 && now_ms - cached_mode_ms < SYSTEM_MODE_CACHE_MS) {
+        return cached_mode;
+    }
+    cached_mode = get_current_system_mode_uncached();
+    cached_mode_ms = now_ms;
+    return cached_mode;
+}
+
+static int get_current_system_mode_uncached() {
     /*
      * Qualcomm Android 16 reports the live HWC mode as
      *   activeMode={id=5, hwcId=5, ...}
@@ -881,7 +903,31 @@ static int get_current_applied_mode(void) {
 
 // 获取屏幕状态
 // 返回: 1=ON(亮屏), 0=OFF/DOZE(息屏/待机), -1=未知(解析失败)
+/* Screen state changes at human speed; the panel dump is not worth running
+ * more than once every two seconds. Failures are retried quickly. */
+#define SCREEN_STATE_CACHE_MS 2000
+#define SCREEN_STATE_FAIL_CACHE_MS 200
+
+static int get_screen_state_uncached(void);
+
 int get_screen_state() {
+    static int cached_state = -2;
+    static long long cached_state_ms = 0;
+    long long now_ms = monotonic_ms();
+
+    if (cached_state != -2) {
+        long long ttl = cached_state < 0 ? SCREEN_STATE_FAIL_CACHE_MS
+                                         : SCREEN_STATE_CACHE_MS;
+        if (now_ms - cached_state_ms < ttl) {
+            return cached_state;
+        }
+    }
+    cached_state = get_screen_state_uncached();
+    cached_state_ms = now_ms;
+    return cached_state;
+}
+
+static int get_screen_state_uncached() {
     FILE *fp = popen("timeout 4 dumpsys display 2>/dev/null", "r");
     if (!fp) return -1;
 
@@ -1033,7 +1079,7 @@ static int wait_for_active_width(int target_width, int timeout_ms) {
                     (int)(monotonic_ms() - started_ms));
             return 1;
         }
-        usleep(25000);
+        usleep(100000);
     } while (monotonic_ms() <= deadline_ms);
 
     log_msg("Active display width verification timed out: target=%d timeout=%dms",
@@ -1117,7 +1163,7 @@ static int wait_for_active_mode(int target_id, int timeout_ms) {
         } else {
             consecutive_matches = 0;
         }
-        usleep(rmx5200_ltpo_ordered_rise_active ? 25000 : 50000);
+        usleep(rmx5200_ltpo_ordered_rise_active ? 100000 : 150000);
     } while (monotonic_ms() <= deadline_ms);
 
     log_msg("Active display mode verification timed out: target=%d active=%d "
@@ -2131,7 +2177,34 @@ void smooth_switch(int target_id) {
 }
 
 // 获取前台应用 (使用用户提供的优化逻辑)
+/* The window dump is the heaviest query on the per-second policy path and it
+ * blocks WindowManager while it runs. Cache the answer for two seconds: app
+ * switching and the per-application rates stay responsive, but the system no
+ * longer takes a lock hit every second. */
+#define FOREGROUND_APP_CACHE_MS 2000
+
+static void get_foreground_app_uncached(char *buffer, int size);
+
 void get_foreground_app(char *buffer, int size) {
+    static char cached_pkg[MAX_PKG_LEN] = "";
+    static long long cached_pkg_ms = 0;
+    long long now_ms;
+
+    if (buffer == NULL || size <= 0) return;
+
+    now_ms = monotonic_ms();
+    if (cached_pkg[0] != '\0' && now_ms - cached_pkg_ms < FOREGROUND_APP_CACHE_MS) {
+        strncpy(buffer, cached_pkg, size);
+        buffer[size - 1] = '\0';
+        return;
+    }
+    get_foreground_app_uncached(buffer, size);
+    strncpy(cached_pkg, buffer, sizeof(cached_pkg) - 1);
+    cached_pkg[sizeof(cached_pkg) - 1] = '\0';
+    cached_pkg_ms = now_ms;
+}
+
+static void get_foreground_app_uncached(char *buffer, int size) {
     // 优先尝试 dumpsys window | grep mCurrentFocus
     FILE* fp = popen("timeout 4 dumpsys window | grep mCurrentFocus", "r");
     if (!fp) {
