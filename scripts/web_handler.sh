@@ -262,6 +262,94 @@ coloros_density_for_resolution() {
         [ "$TARGET_DENSITY" -le 2000 ] 2>/dev/null
 }
 
+# The user's display-size slot scales with the resolution: FHD uses the fdh
+# ladder, QHD the qdh ladder.  Every geometry change must leave the density at
+# the value of the resolution that is actually active, otherwise the UI keeps
+# the other resolution's DPI (the reported "web switched the rate and the DPI
+# jumped" drift).
+coloros_density_for_width() {
+    DENSITY_TARGET_WIDTH="$1"
+    case "$DENSITY_TARGET_WIDTH" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    DENSITY_WIDTH_MIN=$(display_widths | head -n 1)
+    DENSITY_WIDTH_MAX=$(display_widths | tail -n 1)
+    case "$DENSITY_WIDTH_MIN:$DENSITY_WIDTH_MAX" in
+        *[!0-9:]*|:|*:|*::*) return 1 ;;
+    esac
+    if [ "$DENSITY_TARGET_WIDTH" = "$DENSITY_WIDTH_MAX" ]; then
+        coloros_density_for_resolution 3 || return 1
+    elif [ "$DENSITY_TARGET_WIDTH" = "$DENSITY_WIDTH_MIN" ] &&
+            [ "$DENSITY_WIDTH_MIN" != "$DENSITY_WIDTH_MAX" ]; then
+        coloros_density_for_resolution 2 || return 1
+    else
+        return 1
+    fi
+    return 0
+}
+
+publish_resolution_keys() {
+    PUBLISH_WIDTH="$1"
+    coloros_density_for_width "$PUBLISH_WIDTH" || return 0
+    [ -n "$TARGET_DENSITY" ] || return 0
+    setprop persist.sys.display.user_density "$TARGET_DENSITY" >/dev/null 2>&1
+    setprop persist.sys.display.screen_resolution "$RESOLUTION_ADJUST" >/dev/null 2>&1
+    settings put secure oplus_customize_screen_resolution_adjust \
+        "$RESOLUTION_ADJUST" >/dev/null 2>&1
+    settings put secure user_preferred_screen_index "$RESOLUTION_ADJUST" \
+        >/dev/null 2>&1
+    wm density "$TARGET_DENSITY" >/dev/null 2>&1
+    return 0
+}
+
+ensure_resolution_density() {
+    ENSURE_DENSITY_WIDTH="$1"
+    coloros_density_for_width "$ENSURE_DENSITY_WIDTH" || return 0
+    [ -n "$TARGET_DENSITY" ] || return 0
+    ENSURE_FORCED=$(settings get secure display_density_forced 2>/dev/null |
+        tr -d '[:space:]')
+    ENSURE_PROP=$(getprop persist.sys.display.user_density 2>/dev/null |
+        tr -d '[:space:]')
+    ENSURE_PROP_RESOLUTION=$(getprop persist.sys.display.screen_resolution 2>/dev/null |
+        tr -d '[:space:]')
+    ENSURE_SECURE_ADJUST=$(settings get secure oplus_customize_screen_resolution_adjust 2>/dev/null |
+        tr -d '[:space:]')
+    if [ "$ENSURE_FORCED" = "$TARGET_DENSITY" ] &&
+            [ "$ENSURE_PROP" = "$TARGET_DENSITY" ] &&
+            [ "$ENSURE_PROP_RESOLUTION" = "$RESOLUTION_ADJUST" ] &&
+            [ "$ENSURE_SECURE_ADJUST" = "$RESOLUTION_ADJUST" ]; then
+        return 0
+    fi
+    # Only touch the keys that disagree: every write makes ColorOS re-apply
+    # its display configuration, which is visible as a DPI flash.
+    [ "$ENSURE_PROP" = "$TARGET_DENSITY" ] ||
+        setprop persist.sys.display.user_density "$TARGET_DENSITY" >/dev/null 2>&1
+    [ "$ENSURE_PROP_RESOLUTION" = "$RESOLUTION_ADJUST" ] ||
+        setprop persist.sys.display.screen_resolution "$RESOLUTION_ADJUST" >/dev/null 2>&1
+    [ "$ENSURE_SECURE_ADJUST" = "$RESOLUTION_ADJUST" ] || {
+        settings put secure oplus_customize_screen_resolution_adjust \
+            "$RESOLUTION_ADJUST" >/dev/null 2>&1
+        settings put secure user_preferred_screen_index "$RESOLUTION_ADJUST" \
+            >/dev/null 2>&1
+    }
+    [ "$ENSURE_FORCED" = "$TARGET_DENSITY" ] ||
+        wm density "$TARGET_DENSITY" >/dev/null 2>&1
+    echo "Info: density aligned to $TARGET_DENSITY for ${ENSURE_DENSITY_WIDTH}px"
+    return 0
+}
+
+wait_for_active_width() {
+    WAIT_WIDTH_TARGET="$1"
+    WAIT_WIDTH_TRIES="${2:-80}"
+    WAIT_WIDTH_INDEX=0
+    while [ "$WAIT_WIDTH_INDEX" -lt "$WAIT_WIDTH_TRIES" ]; do
+        [ "$(active_display_width)" = "$WAIT_WIDTH_TARGET" ] && return 0
+        sleep 0.1
+        WAIT_WIDTH_INDEX=$((WAIT_WIDTH_INDEX + 1))
+    done
+    return 1
+}
+
 begin_coloros_resolution_change() {
     TARGET_MODE_ID="$1"
     TARGET_SPEC="$2"
@@ -2742,6 +2830,7 @@ case "$1" in
         # The daemon owns the display transaction and synchronizes Settings
         # only after the physical mode is stable. An eager sync-global here
         # races ColorOS, Framework and SurfaceFlinger during resolution changes.
+        ensure_resolution_density "${NEW_SPEC%%x*}" >/dev/null 2>&1
         echo "Success: Global mode set to $NEW_MODE"
         ;;
 
@@ -2754,14 +2843,60 @@ case "$1" in
             echo "Error: Unknown display mode $NEW_MODE"
             exit 1
         }
-        begin_coloros_resolution_change "$NEW_MODE" "$NEW_SPEC"
-        RESOLUTION_RESULT=$?
-        if [ "$RESOLUTION_RESULT" -eq 2 ]; then
+        TARGET_WIDTH=${NEW_SPEC%%x*}
+        case "$TARGET_WIDTH" in
+            ''|*[!0-9]*) echo "Error: Invalid target resolution"; exit 1 ;;
+        esac
+        SOURCE_WIDTH=$(active_display_width)
+        if [ "$TARGET_WIDTH" = "$SOURCE_WIDTH" ]; then
             echo "Error: Target resolution is already active"
             exit 1
         fi
-        if [ "$RESOLUTION_RESULT" -ne 0 ]; then
-            echo "Error: ColorOS resolution transaction failed"
+
+        # Hand the geometry to the daemon exactly like a refresh-rate switch.
+        # The old ADOPTRES path asked ColorOS to switch, and ColorOS restored
+        # its own stored resolution a few seconds later - the panel bounced
+        # back while the density had already been written for the new width.
+        TMP_FILE="${CONFIG_FILE}.tmp"
+        {
+            printf '%s\n' "$NEW_SPEC"
+            canonicalize_app_configs "$NEW_SPEC"
+        } > "$TMP_FILE" || {
+            rm -f "$TMP_FILE"
+            echo "Error: Failed to normalize mode configuration"
+            exit 1
+        }
+        mv "$TMP_FILE" "$CONFIG_FILE"
+        chmod 666 "$CONFIG_FILE"
+
+        if ! wait_for_active_width "$TARGET_WIDTH" 80; then
+            echo "Error: Resolution transaction failed (active=$(active_display_width))"
+            exit 1
+        fi
+
+        # Publish the matching density and ColorOS resolution keys only after
+        # the new geometry is really on screen, then hold the result: a late
+        # vendor restore must not leave the panel at one width and the UI at
+        # the other width's DPI.
+        coloros_density_for_width "$TARGET_WIDTH" &&
+            publish_resolution_keys "$TARGET_WIDTH"
+        HOLD_INDEX=0
+        while [ "$HOLD_INDEX" -lt 20 ]; do
+            [ "$(active_display_width)" = "$TARGET_WIDTH" ] || break
+            sleep 0.1
+            HOLD_INDEX=$((HOLD_INDEX + 1))
+        done
+        if [ "$(active_display_width)" != "$TARGET_WIDTH" ]; then
+            printf '%s\n' "$NEW_SPEC" > "$TMP_FILE" 2>/dev/null
+            if [ -s "$TMP_FILE" ]; then
+                mv "$TMP_FILE" "$CONFIG_FILE"
+                chmod 666 "$CONFIG_FILE"
+            fi
+            wait_for_active_width "$TARGET_WIDTH" 60 >/dev/null 2>&1
+            ensure_resolution_density "$TARGET_WIDTH" >/dev/null 2>&1
+        fi
+        if [ "$(active_display_width)" != "$TARGET_WIDTH" ]; then
+            echo "Error: Resolution reverted to $(active_display_width)"
             exit 1
         fi
         echo "Success: Resolution mode set to $NEW_MODE"
