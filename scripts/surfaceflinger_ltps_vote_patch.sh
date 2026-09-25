@@ -50,11 +50,22 @@ AP_SCALE_PATCHED_HEX=18000014
 # Each entry is <sha256>:<animation offset>:<animation original hex>:
 # <ap-scale offset>:<ap-scale original hex>.  An unknown build keeps the legacy
 # contract and therefore still fails closed on the context check.
+# The AP-scale site is the one the ColorOS 16 patch has always used: the
+# feature-flag branch that guards the whole "rewrite the selected modePtr from
+# the stale pairing table" block.  Disassembly of both builds shows the same
+# shape --
+#
+#   C16 0x4fcd20: ldr x8,[x19,#0x40]; ldr x8,[x8,#0x1e10]; ldrb w8,[x8,#0x15a]
+#                 cmp w8,#1; b.ne 0x4fcd90        (orig 01030054 -> 18000014)
+#   C17 0x37b8cc: ldr x8,[x19,#0x40]; ldr x8,[x8,#0x2da0]; ldrb w8,[x8,#0x162]
+#                 cmp w8,#1; b.ne 0x37b924        (orig 41020054 -> 12000014)
+#
+# Forcing the branch keeps the requested mode and never consults the table.
 BUILD_SITE_TABLE="\
-4b9a0ca743aabe6cada245f5e9b789cdd5a3d345c5bf37168b353d7f38b88e03:3152928:addbfb97:3653020:80040054"
+4b9a0ca743aabe6cada245f5e9b789cdd5a3d345c5bf37168b353d7f38b88e03:3152928:addbfb97:3651804:41020054"
 
 ANIMATION_PATCHED_HEX=1f2003d5
-TABLE_AP_SCALE_PATCHED_HEX=24000014
+TABLE_AP_SCALE_PATCHED_HEX=12000014
 BUILD_CONTRACT=legacy
 
 hash_file()
@@ -80,25 +91,81 @@ hex_at()
 
 # Unknown builds keep the legacy contract, which then fails closed on the
 # context check instead of patching an address nobody verified.
-select_build_sites()
+load_site_entry()
 {
-    file=$1
-    BUILD_CONTRACT=legacy
-    build_sha=$(hash_file "$file")
-    [ -n "$build_sha" ] || return 0
+    entry_wanted=$1
+    [ -n "$entry_wanted" ] || return 1
     for entry in $BUILD_SITE_TABLE; do
         entry_sha=${entry%%:*}
-        [ "$entry_sha" = "$build_sha" ] || continue
+        [ "$entry_sha" = "$entry_wanted" ] || continue
         entry_rest=${entry#*:}
         SITE_ANIMATION_OFFSET=${entry_rest%%:*}
         entry_rest=${entry_rest#*:}
         SITE_ANIMATION_ORIGINAL_HEX=${entry_rest%%:*}
         entry_rest=${entry_rest#*:}
         SITE_AP_SCALE_OFFSET=${entry_rest%%:*}
-        SITE_AP_SCALE_ORIGINAL_HEX=${entry_rest#*:}
-        BUILD_CONTRACT=table
+        entry_rest=${entry_rest#*:}
+        SITE_AP_SCALE_ORIGINAL_HEX=${entry_rest%%:*}
         return 0
     done
+    return 1
+}
+
+# Unknown builds keep the legacy contract, which then fails closed on the
+# context check instead of patching an address nobody verified.
+select_build_sites()
+{
+    file=$1
+    BUILD_CONTRACT=legacy
+    build_sha=$(hash_file "$file")
+    if [ -n "$build_sha" ] && load_site_entry "$build_sha"; then
+        BUILD_CONTRACT=table
+        record_contract "$build_sha"
+        return 0
+    fi
+    # A ColorOS 16 source still matches the legacy contract, so check that
+    # before trusting the recorded contract: otherwise a different or
+    # downgraded build would be mistaken for one of ours.
+    if verify_original "$file" 2>/dev/null; then
+        BUILD_CONTRACT=legacy
+        return 0
+    fi
+    # The patched copy's own hash is not in the table, so verification of an
+    # already generated patch has to fall back to the contract recorded when it
+    # was built -- including the site offsets, which the record keeps alongside
+    # the source hash it belongs to.  Key it on our own two paths so a
+    # synthetic or foreign file never inherits it.
+    case "$file" in
+        "$SOURCE_FILE"|"$PATCHED_FILE") ;;
+        *) BUILD_CONTRACT=legacy; return 0 ;;
+    esac
+    if [ -r "$STATE_DIR/contract" ] && [ -r "$STATE_DIR/contract-source" ]; then
+        recorded=$(sed -n '1p' "$STATE_DIR/contract" 2>/dev/null | tr -d '[:space:]')
+        recorded_sha=$(sed -n '1p' "$STATE_DIR/contract-source" 2>/dev/null | tr -d '[:space:]')
+        case "$recorded" in
+            table)
+                if load_site_entry "$recorded_sha"; then
+                    BUILD_CONTRACT=table
+                    return 0
+                fi
+                ;;
+            legacy)
+                BUILD_CONTRACT=legacy
+                return 0
+                ;;
+        esac
+    fi
+    BUILD_CONTRACT=legacy
+    return 0
+}
+
+record_contract()
+{
+    record_sha=$1
+    mkdir -p "$STATE_DIR" 2>/dev/null
+    printf '%s\n' "$BUILD_CONTRACT" > "$STATE_DIR/contract" 2>/dev/null
+    [ -n "$record_sha" ] &&
+        printf '%s\n' "$record_sha" > "$STATE_DIR/contract-source" 2>/dev/null
     return 0
 }
 
@@ -299,6 +366,7 @@ patch_semantic_file()
     [ "$model" = "$EXPECTED_MODEL" ] || return 10
     ltps_vote_wanted "$policy" || return 11
     select_build_sites "$source"
+    record_contract "$(hash_file "$source")"
     if [ "$BUILD_CONTRACT" = table ]; then
         patch_site_table "$source" "$output"
         return $?
@@ -496,9 +564,18 @@ mark_boot_success()
     [ -n "$boot_id" ] && [ "$pending_boot" = "$boot_id" ] || return 0
     [ "$(getprop sys.boot_completed 2>/dev/null)" = 1 ] || return 1
     pidof surfaceflinger >/dev/null 2>&1 || return 1
-    verify_patched_contract "$SOURCE_FILE" || return 1
+    # This marker is the boot-loop guard: it asks whether the boot completed,
+    # not whether the patch is live.  Gating it on the patch left the marker set
+    # whenever a boot failed to mount, and the next boot then refused to try --
+    # one failure disabled the filter permanently.  Record the patch outcome
+    # separately instead.
+    if verify_patched_contract "$SOURCE_FILE"; then
+        write_state active:boot_verified
+    else
+        write_state active:boot_unverified
+    fi
     rm -f "$BOOT_PENDING_FILE" 2>/dev/null || return 1
-    write_state active:boot_verified
+    return 0
 }
 
 clear_boot_guard()

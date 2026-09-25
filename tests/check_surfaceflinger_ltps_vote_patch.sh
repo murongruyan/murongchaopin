@@ -164,7 +164,7 @@ SITES_SOURCE="$TMPDIR_TEST/sites-source.bin"
 SITES_OUTPUT="$TMPDIR_TEST/sites-output.bin"
 SITES_SIZE=7000000
 ANIMATION_OFFSET=3152928
-AP_SCALE_PTR_OFFSET=3653020
+AP_SCALE_PTR_OFFSET=3651804
 dd if=/dev/zero of="$SITES_SOURCE" bs=1 count=0 seek="$SITES_SIZE" >/dev/null 2>&1
 write_bytes "$SITES_SOURCE" "$ANIMATION_OFFSET" '\0255\0333\0373\0227'
 write_bytes "$SITES_SOURCE" "$AP_SCALE_PTR_OFFSET" '\0200\0004\0000\0124'
@@ -188,7 +188,7 @@ fi
     exit 1
 }
 
-grep -q '^4b9a0ca743aabe6cada245f5e9b789cdd5a3d345c5bf37168b353d7f38b88e03:3152928:addbfb97:3653020:80040054' "$HELPER"
+grep -q '^4b9a0ca743aabe6cada245f5e9b789cdd5a3d345c5bf37168b353d7f38b88e03:3152928:addbfb97:3651804:41020054' "$HELPER"
 
 # Optional: feed a real installed SurfaceFlinger through the selector when one
 # is supplied, so the table is proven to be keyed to that exact build.
@@ -196,7 +196,10 @@ if [ -n "${MURONG_RMX5200_SF:-}" ] && [ -r "$MURONG_RMX5200_SF" ]; then
     sh "$HELPER" test-patch "$MODEL" "$POLICY" "$MURONG_RMX5200_SF" \
         "$TMPDIR_TEST/real-sf.bin"
     [ "$(od -An -tx1 -j "$ANIMATION_OFFSET" -N 4 "$TMPDIR_TEST/real-sf.bin" | tr -d '[:space:]')" = 1f2003d5 ]
-    [ "$(od -An -tx1 -j "$AP_SCALE_PTR_OFFSET" -N 4 "$TMPDIR_TEST/real-sf.bin" | tr -d '[:space:]')" = 24000014 ]
+    # The AP-scale site is the feature-flag branch that guards the whole
+    # "rewrite the selected modePtr" block, so it becomes a plain branch over
+    # the same distance.
+    [ "$(od -An -tx1 -j "$AP_SCALE_PTR_OFFSET" -N 4 "$TMPDIR_TEST/real-sf.bin" | tr -d '[:space:]')" = 12000014 ]
     [ "$(wc -c < "$TMPDIR_TEST/real-sf.bin" | tr -d '[:space:]')" = \
         "$(wc -c < "$MURONG_RMX5200_SF" | tr -d '[:space:]')" ]
 fi
