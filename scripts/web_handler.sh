@@ -2877,10 +2877,13 @@ case "$1" in
             "$RESOLUTION_ADJUST" >/dev/null 2>&1
         settings put secure user_preferred_screen_index "$RESOLUTION_ADJUST" \
             >/dev/null 2>&1
-        sleep 0.1
-        wm density "$TARGET_DENSITY" >/dev/null 2>&1
-
-        if ! wait_for_active_width "$TARGET_WIDTH" 80; then
+        # The density is deliberately NOT written yet: while the panel is still
+        # on the old width a density change shows a wrong-DPI frame (the
+        # "web switch rescales everything" report). Apply it after the geometry
+        # has really moved. The vendor stack only completes its own transition
+        # when the Settings UI drives it, so wait briefly and then hand the
+        # geometry to the daemon instead of blocking the user for ~10s.
+        if ! wait_for_active_width "$TARGET_WIDTH" 15; then
             # ColorOS did not follow the property change; fall back to the
             # daemon transaction that never depends on the vendor stack.
             TMP_FILE="${CONFIG_FILE}.tmp"
@@ -2900,9 +2903,13 @@ case "$1" in
             }
         fi
 
+        # The panel is on the target width now: publish the matching density
+        # immediately so the old-DPI frame lasts as little as possible.
+        ensure_resolution_density "$TARGET_WIDTH" >/dev/null 2>&1
+
         # One late check: a vendor restore must not leave the panel on one
         # width and the density on the other.
-        sleep 1
+        sleep 0.3
         if [ "$(active_display_width)" != "$TARGET_WIDTH" ]; then
             printf '%s\n' "$NEW_SPEC" > "${CONFIG_FILE}.tmp" 2>/dev/null
             if [ -s "${CONFIG_FILE}.tmp" ]; then
@@ -2910,8 +2917,8 @@ case "$1" in
                 chmod 666 "$CONFIG_FILE"
             fi
             wait_for_active_width "$TARGET_WIDTH" 60 >/dev/null 2>&1
+            ensure_resolution_density "$TARGET_WIDTH" >/dev/null 2>&1
         fi
-        ensure_resolution_density "$TARGET_WIDTH" >/dev/null 2>&1
         echo "Success: Resolution mode set to $NEW_MODE"
         ;;
 
