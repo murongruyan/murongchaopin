@@ -31,6 +31,19 @@ download_tree() {
   rm -rf "$unpack" "$work/$archive"
 }
 
+patch_host_libbpf() {
+  local tree="$1" file
+  file="$tree/tools/lib/bpf/libbpf.c"
+  [ -f "$file" ] || return 0
+  # C23 made the const-preserving strstr/strchr overloads visible, and the
+  # pinned trees compile their host-side resolve_btfids tool with -Werror, so
+  # two libbpf assignments become hard errors on a current glibc (Ubuntu 26.04)
+  # while passing on the older CI image.  resolve_btfids never runs for modules
+  # built without vmlinux, so casting the two results is enough.
+  sed -i 's|\bres = strstr(sym_name, "\.llvm\.");|res = (char *)strstr(sym_name, ".llvm.");|' "$file"
+  sed -i "s|\bnext_path = strchr(s, ':');|next_path = (char *)strchr(s, ':');|" "$file"
+}
+
 download_toolchain() {
   local url="$1" archive="$2" destination="$3"
   rm -rf "$destination"
@@ -51,11 +64,15 @@ ensure_module_protect_list() {
 }
 
 download_tree "${rmx_repo%.git}/archive/$rmx_commit.zip" rmx.zip "$work/rmx-tree"
+patch_host_libbpf "$work/rmx-tree"
 download_toolchain 'https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/clang-r536225.zip' clang19.zip "$work/clang19"
 download_toolchain 'https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/build-tools.zip' build-tools19.zip "$work/build-tools19"
 download_tree "${pjd_repo%.git}/archive/$pjd_commit.zip" pjd.zip "$work/pjd-tree"
+patch_host_libbpf "$work/pjd-tree"
 download_tree "${pjd_vendor_repo%.git}/archive/$pjd_vendor_commit.zip" pjd-vendor.zip "$work/pjd-vendor"
+patch_host_libbpf "$work/pjd-vendor"
 download_tree "${plq_repo%.git}/archive/$plq_commit.zip" plq.zip "$work/plq-tree"
+patch_host_libbpf "$work/plq-tree"
 download_toolchain 'https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang20-r547379/clang-r547379.zip' clang20.zip "$work/clang20"
 download_toolchain 'https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang20-r547379/build-tools.zip' build-tools20.zip "$work/build-tools20"
 
