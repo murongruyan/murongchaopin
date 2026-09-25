@@ -1,161 +1,164 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * rmx5200_vrr_range - expose the internal panel's VRR frequency range.
+ * rmx5200_vrr_range - publish the internal panel's VRR frequency range.
  *
- * Why this exists
- * ---------------
  * drm_debugfs.c's vrr_range_show() prints:
  *
  *     connector->display_info.monitor_range.min_vfreq
  *     connector->display_info.monitor_range.max_vfreq
  *
- * Those come from the EDID monitor-range descriptor.  An internal DSI panel has
- * no EDID, so both stay 0 and every consumer of the VRR range (the vendor HWC,
- * and therefore SurfaceFlinger's DisplayModeSpecs) sees "no VRR range".  The
- * result is that idleScreenRefreshRateConfig is never populated and the
- * framework never asks for the low tiers the panel already supports.
+ * Those are EDID-derived, so an internal DSI panel keeps them at 0 and every
+ * VRR consumer sees "no range" -> SurfaceFlinger leaves
+ * idleScreenRefreshRateConfig null and the framework never asks for the low
+ * tiers the panel already supports.
  *
- * Offsets were read from the device's own BTF (device_vmlinux.btf), not
- * guessed:
+ * Offsets (device BTF, not guessed):
+ *     drm_connector.display_info          @ 0x0d8
+ *     drm_display_info.monitor_range      @ 0x09a
+ *     drm_monitor_range_info.min_vfreq    @ 0x000  (u16, Hz)
+ *     drm_monitor_range_info.max_vfreq    @ 0x002  (u16, Hz)
+ *  => connector + 0x172 / connector + 0x174
  *
- *     struct drm_connector        display_info   @ 0x0d8
- *     struct drm_display_info     monitor_range  @ 0x09a   (size 4)
- *     struct drm_monitor_range_info min_vfreq     @ 0x00  (u16, Hz)
- *                                   max_vfreq     @ 0x02  (u16, Hz)
- *
- *     => connector + 0x172 = min_vfreq
- *        connector + 0x174 = max_vfreq
+ * Timing
+ * ------
+ * A one-shot write from module_init does not survive: the panel driver
+ * re-populates display_info while the connector is probed, which wiped the
+ * value written from post-fs-data.  So the range is (re)applied from a
+ * kretprobe on sde_connector_fill_modes() - i.e. after every probe / hotplug -
+ * and only when the field still reads zero, so we never fight the driver.
  *
  * Safety
  * ------
- * The module defaults to probe-only: it reads and reports, and writes nothing.
- * Writing requires an explicit apply=1 at insmod time.
+ * Defaults to probe-only.  Writing requires apply=1.
  */
 
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/kprobes.h>
 #include <linux/module.h>
-#include <linux/types.h>
 #include <linux/string.h>
-#include <linux/delay.h>
+#include <linux/types.h>
 #include <drm/drm_connector.h>
 
-/* Exported by the OnePlus/Realme msm_drm module. */
 extern void *get_main_display(void);
 
-/* offsetof(struct dsi_display, drm_conn) on this ABI, same constant the
- * rmx5200_drm_modes module already uses for the same object. */
 #define VRR_DSI_DISPLAY_CONNECTOR_OFFSET 0x10U
-
-/* connector -> display_info.monitor_range.{min,max}_vfreq (see header comment) */
 #define VRR_CONNECTOR_MONITOR_RANGE_OFFSET 0x172U
-
 #define VRR_TAG "rmx5200_vrr_range"
 
 static unsigned int apply;
 module_param(apply, uint, 0644);
-MODULE_PARM_DESC(apply, "0 = probe only (read + report, no writes); 1 = write the range");
+MODULE_PARM_DESC(apply, "0 = probe only; 1 = publish the range");
 
 static unsigned int min_vfreq = 1;
 module_param(min_vfreq, uint, 0644);
-MODULE_PARM_DESC(min_vfreq, "minimum vertical refresh rate in Hz to publish");
+MODULE_PARM_DESC(min_vfreq, "minimum vertical refresh rate (Hz)");
 
 static unsigned int max_vfreq = 144;
 module_param(max_vfreq, uint, 0644);
-MODULE_PARM_DESC(max_vfreq, "maximum vertical refresh rate in Hz to publish");
+MODULE_PARM_DESC(max_vfreq, "maximum vertical refresh rate (Hz)");
 
-static struct drm_connector *target_connector;
+static unsigned int applied;
+module_param(applied, uint, 0444);
+MODULE_PARM_DESC(applied, "number of times the range was written");
 
-static u16 vrr_read_u16(const void *base, unsigned int offset)
+static unsigned int observed;
+module_param(observed, uint, 0444);
+MODULE_PARM_DESC(observed, "number of connector fills observed");
+
+static struct drm_connector *main_connector;
+
+static u16 vrr_read_u16(const void *base, unsigned int off)
 {
-	return *(const u16 *)((const char *)base + offset);
+	return *(const u16 *)((const char *)base + off);
 }
 
-static void vrr_write_u16(void *base, unsigned int offset, u16 value)
+static void vrr_apply(struct drm_connector *connector, const char *when)
 {
-	*(u16 *)((char *)base + offset) = value;
+	u16 lo, hi;
+
+	if (!connector || !apply)
+		return;
+	if (connector->status != connector_status_connected)
+		return;
+
+	lo = vrr_read_u16(connector, VRR_CONNECTOR_MONITOR_RANGE_OFFSET);
+	hi = vrr_read_u16(connector, VRR_CONNECTOR_MONITOR_RANGE_OFFSET + 2);
+	if (lo == (u16)min_vfreq && hi == (u16)max_vfreq)
+		return;
+
+	*(u16 *)((char *)connector + VRR_CONNECTOR_MONITOR_RANGE_OFFSET) = (u16)min_vfreq;
+	*(u16 *)((char *)connector + VRR_CONNECTOR_MONITOR_RANGE_OFFSET + 2) = (u16)max_vfreq;
+	applied++;
+
+	pr_info(VRR_TAG " %s: %s min_vfreq=%u max_vfreq=%u (was %u/%u) write#%u\n",
+		when, connector->name ? connector->name : "?", min_vfreq, max_vfreq,
+		lo, hi, applied);
 }
 
-static struct drm_connector *vrr_resolve_connector(void)
+static int __kprobes vrr_fill_entry(struct kretprobe_instance *ri,
+				    struct pt_regs *regs)
 {
-	void *display;
-	void *connector;
+	void *connector = (void *)regs->regs[0];
 
-	display = get_main_display();
-	if (!display) {
-		pr_err(VRR_TAG ": get_main_display() returned NULL\n");
-		return NULL;
-	}
-
-	connector = *(void **)((char *)display + VRR_DSI_DISPLAY_CONNECTOR_OFFSET);
-	if (!connector) {
-		pr_err(VRR_TAG ": dsi_display+0x%x drm_conn is NULL\n",
-		       VRR_DSI_DISPLAY_CONNECTOR_OFFSET);
-		return NULL;
-	}
-
-	return connector;
+	observed++;
+	memcpy(ri->data, &connector, sizeof(connector));
+	return 0;
 }
 
-static void vrr_report(struct drm_connector *connector, const char *when)
+static int __kprobes vrr_fill_return(struct kretprobe_instance *ri,
+				     struct pt_regs *regs)
 {
-	u16 lo = vrr_read_u16(connector, VRR_CONNECTOR_MONITOR_RANGE_OFFSET + 0);
-	u16 hi = vrr_read_u16(connector, VRR_CONNECTOR_MONITOR_RANGE_OFFSET + 2);
+	struct drm_connector *connector = NULL;
 
-	pr_info(VRR_TAG " %s: connector=%s status=%d monitor_range min_vfreq=%u max_vfreq=%u\n",
-		when,
-		connector->name ? connector->name : "(unnamed)",
-		connector->status, lo, hi);
+	memcpy(&connector, ri->data, sizeof(connector));
+	vrr_apply(connector, "fill_modes");
+	return 0;
 }
+
+static struct kretprobe vrr_fill_probe = {
+	.kp.symbol_name = "sde_connector_fill_modes",
+	.entry_handler = vrr_fill_entry,
+	.handler = vrr_fill_return,
+	.data_size = sizeof(void *),
+	.maxactive = 8,
+};
 
 static int __init rmx5200_vrr_range_init(void)
 {
-	struct drm_connector *connector;
+	void *display;
+	int rc;
 
-	connector = vrr_resolve_connector();
-	if (!connector)
-		return -ENODEV;
+	pr_info(VRR_TAG ": apply=%u range=%u..%u\n", apply, min_vfreq, max_vfreq);
 
-	target_connector = connector;
-	vrr_report(connector, "probe");
+	display = get_main_display();
+	if (display) {
+		main_connector = *(void **)((char *)display +
+					    VRR_DSI_DISPLAY_CONNECTOR_OFFSET);
+	}
+	if (main_connector)
+		vrr_apply(main_connector, "init");
 
-	if (!apply) {
-		pr_info(VRR_TAG ": probe-only, no write (insmod apply=1 to publish the range)\n");
-		return 0;
+	rc = register_kretprobe(&vrr_fill_probe);
+	if (rc) {
+		pr_err(VRR_TAG ": register_kretprobe(%s) failed: %d\n",
+		       vrr_fill_probe.kp.symbol_name, rc);
+		return rc;
 	}
 
-	if (min_vfreq > max_vfreq || max_vfreq > 1000) {
-		pr_err(VRR_TAG ": refusing invalid range %u..%u\n", min_vfreq, max_vfreq);
-		return -EINVAL;
-	}
-
-	{
-		u16 before_lo = vrr_read_u16(connector, VRR_CONNECTOR_MONITOR_RANGE_OFFSET);
-		u16 before_hi = vrr_read_u16(connector, VRR_CONNECTOR_MONITOR_RANGE_OFFSET + 2);
-
-		vrr_write_u16(connector, VRR_CONNECTOR_MONITOR_RANGE_OFFSET,
-			      (u16)min_vfreq);
-		vrr_write_u16(connector, VRR_CONNECTOR_MONITOR_RANGE_OFFSET + 2,
-			      (u16)max_vfreq);
-
-		pr_info(VRR_TAG ": wrote %u..%u Hz (was %u..%u)\n",
-			min_vfreq, max_vfreq, before_lo, before_hi);
-	}
-
-	vrr_report(connector, "after-write");
+	pr_info(VRR_TAG ": kretprobe armed on %s\n", vrr_fill_probe.kp.symbol_name);
 	return 0;
 }
 
 static void __exit rmx5200_vrr_range_exit(void)
 {
-	if (target_connector)
-		vrr_report(target_connector, "unload");
-	pr_info(VRR_TAG ": unloaded\n");
+	unregister_kretprobe(&vrr_fill_probe);
+	pr_info(VRR_TAG ": unloaded (observed=%u applied=%u)\n", observed, applied);
 }
 
 module_init(rmx5200_vrr_range_init);
 module_exit(rmx5200_vrr_range_exit);
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Publish the internal DSI panel VRR range through drm_connector monitor_range");
-MODULE_VERSION("0.1");
+MODULE_DESCRIPTION("Publish the internal DSI panel VRR range via drm_connector monitor_range");
+MODULE_VERSION("0.2");
