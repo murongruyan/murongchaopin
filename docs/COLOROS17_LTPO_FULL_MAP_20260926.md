@@ -107,3 +107,42 @@ CRC:   python work/device_crc_map.py     (从设备 /vendor_dlkm 模块读 __ver
 - libsdmclient 哈希"过期是活缺陷"：错。模块根本不 patch 这个库（脚本/启动链 0 引用），只是文档陈旧。
 - `TYPE_GUARD_OFFSET` 一度算成 `0x42F5BC`：正确是 `0x42F81C`。
 - 在 kretprobe 处理函数里调 `drm_connector_attach_vrr_capable_property()`：非法上下文，已改 workqueue。
+
+## 2026-09-26 追加：真正的入口门是 persist.oplus.display.vrr.adfr
+
+`setIdleModeExternal` **是被调用的**（上一节"没有调用方"的结论据此更正）——
+调用点就在 SurfaceFlinger 内部，直接 `bl`，不经过字符串，所以按字符串穷举时漏了：
+
+```asm
+386cf4: bl   <取 config 单例>
+386cf8: ldr  w8, [config, #0x30]
+386d08: cmp  w8, #2                  ; ★ 必须 == 2
+386d0c: b.ne <跳过>
+386d14: ldr  w8, [config, #0x34]     ; enable.idle.hint，必须 != 0
+...
+386d3c: bl   0x42f62c                ; setIdleModeExternal(selector, w1, w2)
+```
+
+那个 `config` 单例（构造于 `0x42c40c`，getter `0x207508`）的字段全部来自系统属性：
+
+```
++0x30 <- persist.oplus.display.vrr.adfr                      默认 0   ★ 必须 == 2
++0x34 <- persist.oplus.display.vrr.adfr.enable.idle.hint     默认 1
++0x38 <- persist.oplus.display.vrr.adfr.muti.display.support 默认 0
+```
+
+**设备实测：三个属性全为空。** 这就是 idle 路径一直被跳过的直接原因 ——
+它是"面板 ADFR 能力等级"，AE084 原本 `adfr_config=0x0`，所以厂商从未置位。
+
+**已修**：`post-fs-data.sh` 现在发布 `persist.oplus.display.vrr.adfr=2`
+与 `enable.idle.hint=1`（`0x34` 非零是第二个必要条件）。
+
+**仍未触发**：置位后 60 秒静止仍无 `setIdleModeExternal` 日志。上游还有一道
+"屏幕是否空闲"的判定（`0x386a14` 会检查 `SurfaceFlinger+0xe0/+0xe8/+0xf0`
+三个子对象的空闲标志），需要真正的空闲状态或更长的静止时间。
+
+链条：
+```
+"屏幕空闲"判定 -> 0x386a14 -> ... -> 0x386cd8 -> setIdleModeExternal
+            -> 0x42f86c 把 idle 转给 composer HAL（AStatus / AIDL, code 0x5c000000）
+```
