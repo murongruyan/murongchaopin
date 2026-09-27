@@ -309,6 +309,13 @@ sync_global_to_settings() {
     width=$1
     height=$2
     fps=$3
+    # Publish the exact target geometry for the Settings hook.
+    # FrameworkResolutionVoteHooks runs inside system_server, which cannot
+    # traverse /data/adb (adb_data_file, 0700 root), so mode.txt is unreadable
+    # from there; these properties are the only channel that reaches it.
+    setprop sys.murong.display.width "$width" 2>/dev/null || true
+    setprop sys.murong.display.height "$height" 2>/dev/null || true
+    setprop sys.murong.display.fps "$fps" 2>/dev/null || true
     setting_mode=$(settings_mode_for_fps "$fps") || {
         write_status error:global_rate_unsupported
         return 1

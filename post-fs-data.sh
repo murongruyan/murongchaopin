@@ -189,4 +189,35 @@ setprop vendor.display.enable_allow_idle_fallback 1
 # working (stuck at 120Hz).  With the property unset the stock LTPS idle drop
 # behaves normally.  Only publish it once the whole ADFR path (kernel + panel +
 # HAL) genuinely works end to end.
+
+# ── publish the target display geometry for the Settings hook ───────────────
+# FrameworkResolutionVoteHooks runs inside system_server, which cannot traverse
+# /data/adb (adb_data_file, mode 0700 root); its FileReader on config/mode.txt
+# therefore always failed and the resolution-group alignment silently never
+# ran. Mirror the same geometry into system properties, which carry the
+# system_prop label and are readable from SystemServer.
+publish_target_props() {
+    mode_txt="$MODDIR/config/mode.txt"
+    [ -r "$mode_txt" ] || return 0
+    spec=$(sed -n '1{s/\r$//;p;q;}' "$mode_txt" 2>/dev/null)
+    case "$spec" in ''|\#*) return 0 ;; esac
+    geometry=${spec%% *}
+    rate=${spec#* }
+    [ "$geometry" = "$spec" ] && rate=
+    case "$geometry" in
+        [0-9]*x[0-9]*) ;;
+        *) return 0 ;;
+    esac
+    width=${geometry%%x*}
+    height=${geometry#*x}
+    case "$width$height" in ''|*[!0-9]*) return 0 ;; esac
+    fps=${rate%%.*}
+    case "$fps" in ''|*[!0-9]*) return 0 ;; esac
+    setprop sys.murong.display.width "$width" 2>/dev/null || true
+    setprop sys.murong.display.height "$height" 2>/dev/null || true
+    setprop sys.murong.display.fps "$fps" 2>/dev/null || true
+}
+
+publish_target_props
+
 exit 0
