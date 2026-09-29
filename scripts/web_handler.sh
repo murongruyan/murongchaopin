@@ -159,10 +159,7 @@ require_premium() {
 # standalone hash sidecar that is not part of the package contract.
 premium_payload_ready() {
     case "$1" in
-        custom_ltpo)
-            [ -r "$PREMIUM_PATH/bin/rmx5200_ltpo_modes.ko" ] &&
-                [ -x "$PREMIUM_PATH/scripts/rmx5200_ltpo_experiment.sh" ]
-            ;;
+        # 自制 LTPO 已下线（v2.9.37）：不再有任何对应载荷可校验。
         adfr_disable)
             [ -r "$PREMIUM_PATH/bin/rmx5200_adfr_lock.ko" ] &&
                 [ -x "$PREMIUM_PATH/scripts/adfr_lock.sh" ]
@@ -516,7 +513,7 @@ read_display_policy() {
     DISPLAY_POLICY=$(sed -n '1{s/\r$//;p;q;}' "$DISPLAY_POLICY_FILE" 2>/dev/null |
         tr -d '[:space:]')
     case "$DISPLAY_POLICY" in
-        stock_ltps|stock_ltpo|custom_ltpo|adfr_off) printf '%s\n' "$DISPLAY_POLICY" ;;
+        stock_ltps|stock_ltpo|adfr_off) printf '%s\n' "$DISPLAY_POLICY" ;;
         *)
             if [ "$(read_adfr_policy)" = on ]; then
                 printf 'stock_ltps\n'
@@ -530,7 +527,7 @@ read_display_policy() {
 write_display_policy() {
     NEW_DISPLAY_POLICY="$1"
     case "$NEW_DISPLAY_POLICY" in
-        stock_ltps|stock_ltpo|custom_ltpo|adfr_off) ;;
+        stock_ltps|stock_ltpo|adfr_off) ;;
         *) return 1 ;;
     esac
     DISPLAY_POLICY_TMP="$DISPLAY_POLICY_FILE.tmp.$$"
@@ -545,7 +542,7 @@ display_policy_for_model() {
     case "$POLICY_MODEL" in
         RMX5200)
             case "$POLICY_VALUE" in
-                custom_ltpo|adfr_off) printf '%s\n' "$POLICY_VALUE" ;;
+                adfr_off) printf '%s\n' "$POLICY_VALUE" ;;
                 *) printf 'stock_ltps\n' ;;
             esac
             ;;
@@ -1764,6 +1761,13 @@ install_latest_paid_package() {
 
 
 case "$1" in
+    # 自制 LTPO 已下线（见 v2.9.37 更新说明）：相关动作一律拒绝，避免旧版
+    # WebUI 或旧脚本继续写入被移除的策略与档位。
+    set_daily_idle_mode|get_ltpo_daily_idle|set_ltpo_daily_idle|get_ltpo_aod_duration|set_ltpo_aod_duration)
+        echo "Error: 自制 LTPO 已下线"
+        exit 1
+        ;;
+
     "check_base_update")
         check_base_update
         ;;
@@ -2358,7 +2362,7 @@ case "$1" in
     "set_display_policy")
         MODEL=$(getprop ro.product.vendor.model 2>/dev/null| sed 's/^CPH2747$/PLK110/')
         case "$MODEL:$2" in
-            RMX5200:stock_ltps|RMX5200:custom_ltpo)
+            RMX5200:stock_ltps)
                 TARGET_DISPLAY_POLICY="$2"; TARGET_ADFR_POLICY=on ;;
             RMX5200:adfr_off)
                 TARGET_DISPLAY_POLICY=adfr_off; TARGET_ADFR_POLICY=off ;;
@@ -2372,10 +2376,6 @@ case "$1" in
                 echo "Error: display policy is unsupported on $MODEL"; exit 1 ;;
         esac
         case "$TARGET_DISPLAY_POLICY" in
-            custom_ltpo)
-                require_premium custom_ltpo || exit 1
-                require_premium_payload custom_ltpo || exit 1
-                ;;
             adfr_off)
                 require_premium adfr_disable || exit 1
                 require_premium_payload adfr_disable || exit 1

@@ -4,9 +4,17 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>慕容显示增强</title>
-    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/style.css?v=2.9.24-web2">
 </head>
 <body>
+    <!-- Shown from the first paint until the staged bridge reads for the opening
+         screen have finished, so the page is never a half-populated shell that
+         silently fills in seconds later. Tapping it skips the wait. -->
+    <div id="boot-overlay" class="boot-overlay" role="status" aria-live="polite">
+        <div class="boot-spinner" aria-hidden="true"></div>
+        <div class="boot-text">正在加载模块数据…</div>
+        <div class="boot-hint">首次进入需要读取设备与授权状态</div>
+    </div>
     <div class="app">
         <main class="page-container">
 
@@ -55,30 +63,10 @@
                             <span class="card-title">刷新率策略</span>
                             <span id="policy-status" class="status-badge">读取中</span>
                         </div>
-                        <p class="text-hint">原厂 LTPS/LTPO 为免费能力；“自制 LTPO”“完美禁用 ADFR”为永久授权功能。</p>
+                        <p class="text-hint">原厂 LTPS/LTPO 为免费能力；“完美禁用 ADFR”为永久授权功能。</p>
                         <div class="seg" role="group" aria-label="刷新率策略">
                             <button id="btn-policy-stock" class="seg-btn" type="button">原厂 LTPS</button>
-                            <button id="btn-policy-custom" class="seg-btn seg-btn-paid" type="button"><span class="lock"></span>自制 LTPO</button>
                             <button id="btn-policy-adfr" class="seg-btn seg-btn-paid" type="button"><span class="lock"></span>完美禁用 ADFR</button>
-                        </div>
-                        <div id="ltpo-daily-idle-row" hidden>
-                            <div class="switch-control">
-                                <label for="ltpo-daily-idle">禁用日常 LTPO（息屏保持 1Hz）</label>
-                                <input id="ltpo-daily-idle" type="checkbox">
-                                <span class="switch-track" aria-hidden="true"><span></span></span>
-                            </div>
-                            <div id="ltpo-daily-idle-modes" class="seg seg-2" role="group" aria-label="亮屏降频方案" hidden>
-                                <button id="btn-daily-stock-ltpo" class="seg-btn" type="button">原厂 LTPS</button>
-                                <button id="btn-daily-adfr-off" class="seg-btn seg-btn-paid" type="button"><span class="lock"></span>完美禁用 ADFR</button>
-                            </div>
-                            <div id="ltpo-aod-duration-row" hidden>
-                                <div class="aod-duration-row">
-                                    <input id="ltpo-aod-duration" class="form-input" type="number" min="0" max="3600" step="10" value="120" inputmode="numeric" aria-label="息屏 AOD 时长（秒）">
-                                    <button id="ltpo-aod-duration-save" class="btn btn-sm btn-secondary" type="button">保存</button>
-                                </div>
-                                <p class="text-hint">全景息屏保持时长：0-3600 秒，0 = 跟随系统，默认 120 秒。</p>
-                            </div>
-                            <p class="text-hint">打开后息屏仍走 LTPO 降到 1Hz；亮屏由所选方案接管：原厂 LTPS（闲置降到 60Hz）或完美禁用 ADFR（锁定所选刷新率）。息屏 AOD 时长默认 120 秒，到时自动熄屏。</p>
                         </div>
                     </div>
                 </div>
@@ -468,6 +456,6 @@
     </div>
 
     <div class="app-footer">慕容显示增强 · WebUI 2.1</div>
-    <script src="js/main.js?v=2.9.23-web1"></script>
+    <script src="js/main.js?v=2.9.24-web2"></script>
 </body>
 </html>

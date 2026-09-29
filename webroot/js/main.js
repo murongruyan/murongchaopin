@@ -2230,7 +2230,7 @@ function renderPurchaseSheet(catalog) {
     const product = catalog.product;
     let selectedMethod = catalog.methods[0].code;
     const price = Number(product.price || 20).toFixed(2);
-    const description = String(product.description || '永久解锁自制 LTPO、完美禁用 ADFR 与视频动态插帧。');
+    const description = String(product.description || '永久解锁完美禁用 ADFR 与视频动态插帧。');
     body.innerHTML = `
         <div class="payment-price-row">
             <div class="payment-price"><small>¥</small>${esc(price)}</div>
@@ -2645,7 +2645,7 @@ function renderVideoAuthPanel() {
             <div class="auth-lock-hero">
                 ${ICON.lock(40)}
                 <h3>需要永久授权</h3>
-                <p class="text-hint">视频动态插帧、自制 LTPO 与完美禁用 ADFR 属于“显示增强永久授权”（20 元）。</p>
+                <p class="text-hint">视频动态插帧与完美禁用 ADFR 属于“显示增强永久授权”（20 元）。</p>
             </div>
             <div class="btn-row">
                 <button class="btn btn-primary" data-action="login">登录 / 注册</button>
@@ -3425,25 +3425,23 @@ async function loadSystemStatus() {
 function renderDisplayPolicy(policy, activePolicy = policy, busy = false, profile = displayPolicyProfile) {
     displayPolicyProfile = profile === 'vendor_ltpo' ? 'vendor_ltpo' : 'rmx5200';
     const isRmx5200 = displayPolicyProfile === 'rmx5200';
+    /* 自制 LTPO 已下线（原因见更新说明），不再作为可选策略。 */
     const policies = isRmx5200
-        ? ['stock_ltps', 'custom_ltpo', 'adfr_off']
+        ? ['stock_ltps', 'adfr_off']
         : ['stock_ltpo', 'adfr_off'];
     const defaultPolicy = isRmx5200 ? 'stock_ltps' : 'stock_ltpo';
     const selected = policies.includes(policy) ? policy : defaultPolicy;
     const labels = {
         stock_ltps: '原厂 LTPS',
         stock_ltpo: '原厂 LTPO',
-        custom_ltpo: '自制 LTPO',
         adfr_off: '完美禁用 ADFR'
     };
     const status = document.getElementById('policy-status');
     const stockButton = document.getElementById('btn-policy-stock');
-    const customButton = document.getElementById('btn-policy-custom');
     const seg = document.querySelector('#policy-card .seg');
 
     if (stockButton) stockButton.innerText = labels[defaultPolicy];
-    if (customButton) customButton.hidden = !isRmx5200;
-    if (seg) seg.className = `seg ${isRmx5200 ? 'seg-3' : 'seg-2'}`;
+    if (seg) seg.className = 'seg seg-2';
 
     if (status) {
         const pending = policies.includes(activePolicy) && activePolicy !== selected;
@@ -3458,24 +3456,14 @@ function renderDisplayPolicy(policy, activePolicy = policy, busy = false, profil
 
     const selectedButtonId = (selected === 'stock_ltpo' || selected === 'stock_ltps')
         ? 'btn-policy-stock'
-        : (selected === 'custom_ltpo' ? 'btn-policy-custom' : 'btn-policy-adfr');
+        : 'btn-policy-adfr';
     document.querySelectorAll('#policy-card .seg').forEach((seg) => {
-        if (seg.id === 'ltpo-daily-idle-modes') return;
         seg.querySelectorAll('.seg-btn').forEach((button) => {
             button.classList.toggle('active', button.id === selectedButtonId);
             button.disabled = busy;
         });
     });
-    // 禁用日常 LTPO 是自制 LTPO 专属选项：仅当选中自制 LTPO 时出现；
-    // 原厂 LTPS / 完美禁用 ADFR（顶栏按钮）都不显示。
-    const dailyRow = document.getElementById('ltpo-daily-idle-row');
-    if (dailyRow) {
-        dailyRow.hidden = !(isRmx5200 && selected === 'custom_ltpo');
-        if (dailyRow.hidden) {
-            const modes = document.getElementById('ltpo-daily-idle-modes');
-            if (modes) modes.hidden = true;
-        }
-    }
+    /* 自制 LTPO 已下线：日常降频/AOD 相关控件一并移除。 */
 }
 
 // 模块健康提示：每次 WebUI 会话最多弹一次（会话内状态变化由刷新时再次
@@ -3516,6 +3504,9 @@ async function loadAdfrPolicy() {
 }
 
 async function loadLtpoDailyIdle() {
+    /* 自制 LTPO 已下线，这里保留空实现以免旧调用点报错。 */
+    return;
+    // eslint-disable-next-line no-unreachable
     const row = document.getElementById('ltpo-daily-idle-row');
     const input = document.getElementById('ltpo-daily-idle');
     if (!row || !input) return;
@@ -3572,10 +3563,13 @@ async function setDailyIdleMode(mode) {
         if (!result.includes('Success:')) {
             await showConfirm('亮屏降频方案', result || '保存失败', { okLabel: '知道了', single: true });
         } else {
-            await showConfirm('需要重启', '亮屏降频方案已保存，重启设备后生效。', { okLabel: '知道了', single: true });
+            // Release the two sub-mode buttons as soon as the write landed; the
+            // acknowledgement dialog must not keep them disabled.
+            renderDailyIdleMode(mode, false);
+            showConfirm('需要重启', '亮屏降频方案已保存，重启设备后生效。', { okLabel: '知道了', single: true }).catch(() => {});
         }
     } finally {
-        await loadLtpoDailyIdle();
+        loadLtpoDailyIdle().catch(() => {});
     }
 }
 
@@ -3623,47 +3617,63 @@ async function setLtpoDailyIdle(enabled) {
         openAuthPanel();
         return;
     }
-    input.disabled = true;
+
+    /*
+     * Optimistic: the switch and its dependent rows follow the tap straight
+     * away, and the handler (which has to verify the Ed25519 lease, ~1s) writes
+     * in the background. Waiting for it made the switch look unresponsive.
+     */
+    dailyIdleWriteSequence += 1;
+    const sequence = dailyIdleWriteSequence;
+    applyDailyIdleUi(enabled);
+
     const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
     try {
         const result = await ksuExec(
             `sh "${scriptPath}" set_ltpo_daily_idle ${enabled ? 'on' : 'off'}`);
+        if (sequence !== dailyIdleWriteSequence) return;
         if (!result.includes('Success:')) {
             input.checked = !enabled;
-            await showConfirm('自制 LTPO', result || '保存失败', { okLabel: '知道了', single: true });
+            applyDailyIdleUi(!enabled);
+            showToast(result || '保存失败');
         } else {
-            const modes = document.getElementById('ltpo-daily-idle-modes');
-            if (modes) modes.hidden = !enabled;
-            const aodRow = document.getElementById('ltpo-aod-duration-row');
-            if (aodRow) aodRow.hidden = !enabled;
-            if (enabled) {
-                // 打开即默认原厂 LTPS 子方案，二选一不允许不选。
-                renderDailyIdleMode('stock_ltps');
-                await loadLtpoAodDuration();
-                await showConfirm('自制 LTPO',
-                    '日常 LTPO 已禁用：息屏仍降到 1Hz，亮屏默认由原厂 LTPS 接管（闲置降到 60Hz），也可切换为完美禁用 ADFR。',
-                    { okLabel: '知道了', single: true });
-            } else {
-                await showConfirm('自制 LTPO',
-                    '日常 LTPO 已恢复：亮屏空闲后自动逐档降频。',
-                    { okLabel: '知道了', single: true });
-            }
+            showToast(enabled
+                ? '日常 LTPO 已禁用：息屏保持 1Hz'
+                : '日常 LTPO 已恢复：亮屏空闲后自动降频');
         }
     } catch (error) {
+        if (sequence !== dailyIdleWriteSequence) return;
         input.checked = !enabled;
-    } finally {
-        input.disabled = false;
+        applyDailyIdleUi(!enabled);
+        showToast('保存失败');
+    }
+}
+
+/* Keep the rows that only exist while 禁用日常 LTPO is on in step with it. */
+let dailyIdleWriteSequence = 0;
+
+function applyDailyIdleUi(enabled) {
+    const input = document.getElementById('ltpo-daily-idle');
+    if (input) input.checked = enabled;
+    const modes = document.getElementById('ltpo-daily-idle-modes');
+    if (modes) modes.hidden = !enabled;
+    const aodRow = document.getElementById('ltpo-aod-duration-row');
+    if (aodRow) aodRow.hidden = !enabled;
+    if (enabled) {
+        // 打开即默认原厂 LTPS 子方案，二选一不允许不选。
+        renderDailyIdleMode('stock_ltps');
+        loadLtpoAodDuration().catch(() => {});
     }
 }
 
 async function setDisplayPolicy(policy) {
-    const paidPolicies = ['custom_ltpo', 'adfr_off'];
+    const paidPolicies = ['adfr_off'];
     if (paidPolicies.includes(policy) && !isPremium()) {
         openAuthPanel();
         return;
     }
     const policies = displayPolicyProfile === 'rmx5200'
-        ? ['stock_ltps', 'custom_ltpo', 'adfr_off']
+        ? ['stock_ltps', 'adfr_off']
         : ['stock_ltpo', 'adfr_off'];
     if (!policies.includes(policy)) return;
     if (adfrPolicyBusy) return;
@@ -3675,11 +3685,15 @@ async function setDisplayPolicy(policy) {
         if (!result.includes('Success:')) {
             await showConfirm('刷新率策略', result || '保存失败', { okLabel: '知道了', single: true });
         } else {
-            await showConfirm('需要重启', '刷新率策略已保存，重启设备后生效。', { okLabel: '知道了', single: true });
+            // Same rule: the policy buttons are usable again immediately, the
+            // restart notice is informational only.
+            adfrPolicyBusy = false;
+            renderDisplayPolicy(policy, policy, false);
+            showConfirm('需要重启', '刷新率策略已保存，重启设备后生效。', { okLabel: '知道了', single: true }).catch(() => {});
         }
     } finally {
         adfrPolicyBusy = false;
-        await loadAdfrPolicy();
+        loadAdfrPolicy().catch(() => {});
     }
 }
 
@@ -5159,8 +5173,20 @@ function bindStaticEvents() {
     safeBind('btn-restore', 'onclick', restoreDtbo);
     safeBind('btn-uninstall', 'onclick', uninstallModule);
     safeBind('btn-policy-stock', 'onclick', () => setDisplayPolicy(displayPolicyProfile === 'rmx5200' ? 'stock_ltps' : 'stock_ltpo'));
-    safeBind('btn-policy-custom', 'onclick', () => setDisplayPolicy('custom_ltpo'));
     safeBind('btn-policy-adfr', 'onclick', () => setDisplayPolicy('adfr_off'));
+    /* The WebView eats the first tap on a label-driven switch: the label takes
+     * the focus/highlight and the hidden checkbox only reports `change` on the
+     * second tap ("the row turns blue and nothing happens"). Drive the checkbox
+     * from the tap itself and let the existing change handlers run. */
+    document.querySelectorAll('.switch-control').forEach((control) => {
+        control.addEventListener('click', (event) => {
+            const input = control.querySelector('input[type="checkbox"]');
+            if (!input || input.disabled) return;
+            event.preventDefault();
+            input.checked = !input.checked;
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+    });
     safeBind('ltpo-daily-idle', 'onchange', (event) => setLtpoDailyIdle(event.target && event.target.checked));
     safeBind('ltpo-aod-duration-save', 'click', () => setLtpoAodDuration());
     safeBind('btn-daily-stock-ltpo', 'onclick', () => setDailyIdleMode('stock_ltps'));
@@ -5376,8 +5402,36 @@ async function initializeModuleData() {
     } finally {
         moduleInitializationRunning = false;
         if (!moduleInitializationComplete) scheduleModuleInitialization();
+        // Every exit path of the staged loader means the opening screen is
+        // either populated or the user already navigated away.
+        hideBootOverlay();
     }
 }
+
+/* ── 启动加载页 ──────────────────────────────────────────────
+ * index.html renders this overlay with the first paint. It is dismissed once
+ * the opening screen finished its staged bridge reads, and additionally by a
+ * tap or a safety timeout so a hung call can never lock the user out. */
+let bootOverlayDismissed = false;
+
+function hideBootOverlay() {
+    if (bootOverlayDismissed) return;
+    bootOverlayDismissed = true;
+    const overlay = document.getElementById('boot-overlay');
+    if (!overlay) return;
+    overlay.classList.add('boot-overlay-hidden');
+    setTimeout(() => {
+        if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    }, 320);
+}
+
+(function armBootOverlay() {
+    const overlay = document.getElementById('boot-overlay');
+    if (overlay) overlay.addEventListener('click', hideBootOverlay);
+    // The staged reads normally finish in a few seconds; never trap the user
+    // behind the overlay if one of them stalls.
+    setTimeout(hideBootOverlay, 12000);
+})();
 
 function init() {
     try {
@@ -5403,6 +5457,7 @@ function init() {
     } catch (e) {
         console.error("First-frame init failed:", e);
         showToast("初始化失败: " + e.message);
+        hideBootOverlay();
     }
 }
 

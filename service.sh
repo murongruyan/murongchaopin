@@ -101,19 +101,16 @@ if [ -f "$PREMIUM_SERVICE" ]; then
     fi
 fi
 
-# rate_daemon. Prefer the premium binary only when a premium display feature
-# (custom LTPO or video MEMC) is actually authorized; otherwise the free
-# daemon runs. Missing premium binary always falls back to the free daemon.
+# rate_daemon. Custom LTPO was removed in v2.9.37, so the premium binary is
+# only needed when video MEMC is actually authorized; otherwise the free daemon
+# runs. Missing premium binary always falls back to the free daemon.
 DAEMON_TO_START="$DAEMON_BIN"
 if [ -f "$PREMIUM_DAEMON_BIN" ]; then
     if [ -f "$GATE_HELPER" ]; then
         . "$GATE_HELPER" 2>/dev/null
-        gate_check custom_ltpo >/dev/null 2>&1
-        ltpo_rc=$?
         gate_check video_memc >/dev/null 2>&1
         memc_rc=$?
-        if [ "$ltpo_rc" -eq 0 ] || [ "$ltpo_rc" -eq 2 ] ||
-           [ "$memc_rc" -eq 0 ] || [ "$memc_rc" -eq 2 ]; then
+        if [ "$memc_rc" -eq 0 ] || [ "$memc_rc" -eq 2 ]; then
             DAEMON_TO_START="$PREMIUM_DAEMON_BIN"
         fi
     fi
