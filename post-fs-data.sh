@@ -107,26 +107,6 @@ fi
 
 [ -f "$DISPLAY_HELPER" ] || exit 0
 
-# Publish the internal panel's VRR frequency range before SurfaceFlinger
-# enumerates the display.  drm_debugfs.c's vrr_range_show() and every VRR
-# consumer read connector->display_info.monitor_range.{min,max}_vfreq, which is
-# parsed from EDID.  An internal DSI panel has no EDID, so both stay 0, the
-# vendor HWC reports no VRR range, and SurfaceFlinger leaves
-# idleScreenRefreshRateConfig as null.  The range must be in place BEFORE
-# SurfaceFlinger starts: SF reads the display config once, at startup.
-VRR_KO="$MODDIR/bin/rmx5200_vrr_range.ko"
-if [ -f "$VRR_KO" ]; then
-    if [ -d /sys/module/rmx5200_vrr_range ]; then
-        printf '%s vrr-range: already loaded\n' \
-            "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" >> "$MODDIR/daemon.log" 2>/dev/null
-    else
-        insmod "$VRR_KO" apply=1 min_vfreq=1 max_vfreq=144
-        VRR_RC=$?
-        printf '%s vrr-range: insmod rc=%s\n' \
-            "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" "$VRR_RC" >> "$MODDIR/daemon.log" 2>/dev/null
-    fi
-fi
-
 
 # Pure-test switch.  When this marker exists the boot still runs the whole
 # userspace path (mode publication, rate manifest, QSync idle properties) but
