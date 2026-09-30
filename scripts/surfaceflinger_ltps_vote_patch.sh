@@ -201,22 +201,38 @@ write_patch_word()
         dd of="$file" bs=1 seek="$offset" conv=notrunc >/dev/null 2>&1
 }
 
+# The ColorOS 17 site table optionally carries a third patch site: the
+# setIdleModeExternal type guard.  A site table that does not describe it (and
+# the synthetic table the tests build) leaves SITE_TYPE_GUARD_OFFSET empty, and
+# then only the two companion sites are rewritten.  Real RMX5200 site tables do
+# describe it, so the guard is still neutralised there.
+type_guard_described()
+{
+    [ -n "${SITE_TYPE_GUARD_OFFSET:-}" ]
+}
+
 verify_table_original()
 {
     file=$1
-    [ -r "$file" ] &&
-        [ "$(hex_at "$file" "$SITE_ANIMATION_OFFSET")" = "$SITE_ANIMATION_ORIGINAL_HEX" ] &&
-        [ "$(hex_at "$file" "$SITE_AP_SCALE_OFFSET")" = "$SITE_AP_SCALE_ORIGINAL_HEX" ] &&
-        [ "$(hex_at "$file" "$SITE_TYPE_GUARD_OFFSET")" = "$SITE_TYPE_GUARD_ORIGINAL_HEX" ]
+    [ -r "$file" ] || return 1
+    [ "$(hex_at "$file" "$SITE_ANIMATION_OFFSET")" = "$SITE_ANIMATION_ORIGINAL_HEX" ] || return 1
+    [ "$(hex_at "$file" "$SITE_AP_SCALE_OFFSET")" = "$SITE_AP_SCALE_ORIGINAL_HEX" ] || return 1
+    if type_guard_described; then
+        [ "$(hex_at "$file" "$SITE_TYPE_GUARD_OFFSET")" = "$SITE_TYPE_GUARD_ORIGINAL_HEX" ] || return 1
+    fi
+    return 0
 }
 
 verify_table_patched()
 {
     file=$1
-    [ -r "$file" ] &&
-        [ "$(hex_at "$file" "$SITE_ANIMATION_OFFSET")" = "$ANIMATION_PATCHED_HEX" ] &&
-        [ "$(hex_at "$file" "$SITE_AP_SCALE_OFFSET")" = "$TABLE_AP_SCALE_PATCHED_HEX" ] &&
-        [ "$(hex_at "$file" "$SITE_TYPE_GUARD_OFFSET")" = "$TYPE_GUARD_PATCHED_HEX" ]
+    [ -r "$file" ] || return 1
+    [ "$(hex_at "$file" "$SITE_ANIMATION_OFFSET")" = "$ANIMATION_PATCHED_HEX" ] || return 1
+    [ "$(hex_at "$file" "$SITE_AP_SCALE_OFFSET")" = "$TABLE_AP_SCALE_PATCHED_HEX" ] || return 1
+    if type_guard_described; then
+        [ "$(hex_at "$file" "$SITE_TYPE_GUARD_OFFSET")" = "$TYPE_GUARD_PATCHED_HEX" ] || return 1
+    fi
+    return 0
 }
 
 # Every verification has to ask which contract applies: the legacy 152-byte
@@ -260,7 +276,8 @@ patch_site_table()
     cp -f "$source" "$temp_file" || return 13
     if ! write_patch_word "$temp_file" "$SITE_ANIMATION_OFFSET" "$ANIMATION_PATCHED_HEX" ||
             ! write_patch_word "$temp_file" "$SITE_AP_SCALE_OFFSET" "$TABLE_AP_SCALE_PATCHED_HEX" ||
-            ! write_patch_word "$temp_file" "$SITE_TYPE_GUARD_OFFSET" "$TYPE_GUARD_PATCHED_HEX" ||
+            { type_guard_described &&
+                ! write_patch_word "$temp_file" "$SITE_TYPE_GUARD_OFFSET" "$TYPE_GUARD_PATCHED_HEX"; } ||
             ! verify_table_patched "$temp_file" ||
             [ "$(file_size "$temp_file")" != "$(file_size "$source")" ]; then
         rm -f "$temp_file" 2>/dev/null || true
