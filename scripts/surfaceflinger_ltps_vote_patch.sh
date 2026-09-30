@@ -6,6 +6,7 @@ STATE_FILE="$STATE_DIR/state.txt"
 LOG_FILE="$STATE_DIR/apply.log"
 BOOT_PENDING_FILE="$STATE_DIR/boot_pending.txt"
 BOOT_BLOCK_FILE="$STATE_DIR/boot_guard_blocked.txt"
+DYNAMIC_SITE_FILE="$STATE_DIR/dynamic-site-entry"
 POLICY_FILE="$MODDIR/config/rmx5200_display_policy.txt"
 SOURCE_FILE=/system/bin/surfaceflinger
 PATCHED_FILE="$MODDIR/bin/surfaceflinger.rmx5200.stock-ltps-vote"
@@ -62,7 +63,8 @@ AP_SCALE_PATCHED_HEX=18000014
 #
 # Forcing the branch keeps the requested mode and never consults the table.
 BUILD_SITE_TABLE="\
-4b9a0ca743aabe6cada245f5e9b789cdd5a3d345c5bf37168b353d7f38b88e03:3152928:addbfb97:3651804:41020054:4388892:81020054"
+4b9a0ca743aabe6cada245f5e9b789cdd5a3d345c5bf37168b353d7f38b88e03:3152928:addbfb97:3651804:41020054:4388892:81020054\
+ 965929dcface4123f83cdabdffe4c161a3a6c2c3b9fa0cf756c7a6424e5d170b:3152940:53f00c94:3652276:41020054"
 
 ANIMATION_PATCHED_HEX=1f2003d5
 TABLE_AP_SCALE_PATCHED_HEX=12000014
@@ -96,6 +98,11 @@ hex_at()
     hex_range "$1" "$2" 4
 }
 
+read_u32()
+{
+    od -An -tu4 -j "$2" -N 4 "$1" 2>/dev/null | tr -d '[:space:]'
+}
+
 # Unknown builds keep the legacy contract, which then fails closed on the
 # context check instead of patching an address nobody verified.
 load_site_entry()
@@ -114,16 +121,159 @@ load_site_entry()
         entry_rest=${entry_rest#*:}
         SITE_AP_SCALE_ORIGINAL_HEX=${entry_rest%%:*}
         entry_rest=${entry_rest#*:}
-        SITE_TYPE_GUARD_OFFSET=${entry_rest%%:*}
-        SITE_TYPE_GUARD_ORIGINAL_HEX=${SITE_TYPE_GUARD_OFFSET##*:}
-        SITE_TYPE_GUARD_ORIGINAL_HEX=${entry_rest#*:}
+        SITE_AP_SCALE_PATCHED_HEX=$TABLE_AP_SCALE_PATCHED_HEX
+        SITE_TYPE_GUARD_OFFSET=
+        SITE_TYPE_GUARD_ORIGINAL_HEX=
+        case "$entry_rest" in
+            *:*)
+                SITE_TYPE_GUARD_OFFSET=${entry_rest%%:*}
+                entry_rest=${entry_rest#*:}
+                SITE_TYPE_GUARD_ORIGINAL_HEX=${entry_rest%%:*}
+                ;;
+        esac
         return 0
     done
     return 1
 }
 
-# Unknown builds keep the legacy contract, which then fails closed on the
-# context check instead of patching an address nobody verified.
+load_dynamic_entry()
+{
+    entry_wanted=$1
+    [ -n "$entry_wanted" ] || return 1
+    [ -s "$DYNAMIC_SITE_FILE" ] || return 1
+    entry=$(sed -n '1p' "$DYNAMIC_SITE_FILE" 2>/dev/null | tr -d '[:space:]')
+    [ -n "$entry" ] || return 1
+    entry_sha=${entry%%:*}
+    [ "$entry_sha" = "$entry_wanted" ] || return 1
+    entry_rest=${entry#*:}
+    SITE_ANIMATION_OFFSET=${entry_rest%%:*}
+    entry_rest=${entry_rest#*:}
+    SITE_ANIMATION_ORIGINAL_HEX=${entry_rest%%:*}
+    entry_rest=${entry_rest#*:}
+    SITE_AP_SCALE_OFFSET=${entry_rest%%:*}
+    entry_rest=${entry_rest#*:}
+    SITE_AP_SCALE_ORIGINAL_HEX=${entry_rest%%:*}
+    entry_rest=${entry_rest#*:}
+    SITE_AP_SCALE_PATCHED_HEX=${entry_rest%%:*}
+    SITE_TYPE_GUARD_OFFSET=
+    SITE_TYPE_GUARD_ORIGINAL_HEX=
+    [ -n "$SITE_ANIMATION_OFFSET" ] && [ -n "$SITE_ANIMATION_ORIGINAL_HEX" ] &&
+        [ -n "$SITE_AP_SCALE_OFFSET" ] && [ -n "$SITE_AP_SCALE_ORIGINAL_HEX" ] &&
+        [ -n "$SITE_AP_SCALE_PATCHED_HEX" ]
+}
+
+# Return file offsets whose compact hex form matches a fixed signature.
+stream_matches()
+{
+    [ -s "$DYNAMIC_HEX_FILE" ] || return 1
+    grep -abo -F "$1" "$DYNAMIC_HEX_FILE" 2>/dev/null |
+        sed 's/:.*$//'
+}
+
+word_to_le_hex()
+{
+    word=$1
+    printf '%02x%02x%02x%02x' \
+        $((word & 0xff)) \
+        $(((word >> 8) & 0xff)) \
+        $(((word >> 16) & 0xff)) \
+        $(((word >> 24) & 0xff))
+}
+
+save_dynamic_entry()
+{
+    mkdir -p "$STATE_DIR" 2>/dev/null || return 1
+    printf '%s:%s:%s:%s:%s:%s\n' \
+        "$1" "$SITE_ANIMATION_OFFSET" "$SITE_ANIMATION_ORIGINAL_HEX" \
+        "$SITE_AP_SCALE_OFFSET" "$SITE_AP_SCALE_ORIGINAL_HEX" \
+        "$SITE_AP_SCALE_PATCHED_HEX" > "$DYNAMIC_SITE_FILE" || return 1
+    chmod 0600 "$DYNAMIC_SITE_FILE" 2>/dev/null || true
+}
+
+# Locate the two C17 instructions by their surrounding code, not by a build
+# hash.  The anchors are deliberately narrow and each located word is verified
+# against the exact bytes before patch_site_table writes the output.
+detect_dynamic_sites()
+{
+    file=$1
+    [ -r "$file" ] || return 1
+    command -v xxd >/dev/null 2>&1 || return 1
+
+    DYNAMIC_HEX_FILE="$STATE_DIR/.surfaceflinger.hex.$$"
+    rm -f "$DYNAMIC_HEX_FILE" 2>/dev/null || true
+    if ! xxd -p -c 0 "$file" 2>/dev/null | tr -d '\n' > "$DYNAMIC_HEX_FILE"; then
+        rm -f "$DYNAMIC_HEX_FILE" 2>/dev/null || true
+        return 1
+    fi
+    [ -s "$DYNAMIC_HEX_FILE" ] || {
+        rm -f "$DYNAMIC_HEX_FILE" 2>/dev/null || true
+        return 1
+    }
+
+    animation_anchor=d70e45f8080140f9e9cd8d52
+    anchor_char=$(stream_matches "$animation_anchor" | head -n 1)
+    [ -n "$anchor_char" ] || {
+        rm -f "$DYNAMIC_HEX_FILE" 2>/dev/null || true
+        return 1
+    }
+    anchor=$((anchor_char / 2))
+    animation_site=
+    bl_count=0
+    i=0
+    while [ "$i" -le 128 ]; do
+        off=$((anchor + i))
+        word_hex=$(hex_at "$file" "$off")
+        case "$word_hex" in
+            ??????94)
+                bl_count=$((bl_count + 1))
+                if [ "$bl_count" -eq 2 ]; then
+                    animation_site=$off
+                    break
+                fi
+                ;;
+        esac
+        i=$((i + 4))
+    done
+    [ -n "$animation_site" ] || {
+        rm -f "$DYNAMIC_HEX_FILE" 2>/dev/null || true
+        return 1
+    }
+    SITE_ANIMATION_OFFSET=$animation_site
+    SITE_ANIMATION_ORIGINAL_HEX=$(hex_at "$file" "$animation_site")
+
+    ap_prefix=682240f908d156f9088945391f050071
+    ap_count=0
+    for match in $(stream_matches "$ap_prefix"); do
+        off=$((match / 2))
+        branch_off=$((off + 16))
+        branch_hex=$(hex_at "$file" "$branch_off")
+        case "$branch_hex" in ????????) ;; *) continue ;; esac
+        word=$(read_u32 "$file" "$branch_off")
+        case "$word" in ''|*[!0-9]*) continue ;; esac
+        [ $((word & 0xff000000)) -eq $((0x54000000)) ] || continue
+        imm=$(((word >> 5) & 0x7ffff))
+        [ "$imm" -ge 8 ] 2>/dev/null || continue
+        [ "$imm" -le 64 ] 2>/dev/null || continue
+        ap_count=$((ap_count + 1))
+        SITE_AP_SCALE_OFFSET=$branch_off
+        SITE_AP_SCALE_ORIGINAL_HEX=$branch_hex
+        SITE_AP_SCALE_PATCHED_HEX=$(word_to_le_hex $((0x14000000 | imm)))
+    done
+    [ "$ap_count" -eq 1 ] || {
+        rm -f "$DYNAMIC_HEX_FILE" 2>/dev/null || true
+        return 1
+    }
+
+    SITE_TYPE_GUARD_OFFSET=
+    SITE_TYPE_GUARD_ORIGINAL_HEX=
+    rm -f "$DYNAMIC_HEX_FILE" 2>/dev/null || true
+    return 0
+}
+
+# The build hash is only a cache key for known OTAs.  Unknown builds are
+# located by instruction signatures in SurfaceFlinger itself, then the exact
+# original bytes are verified before anything is written.  A failed dynamic
+# lookup still falls back to the fail-closed legacy path.
 select_build_sites()
 {
     file=$1
@@ -132,6 +282,10 @@ select_build_sites()
     if [ -n "$build_sha" ] && load_site_entry "$build_sha"; then
         BUILD_CONTRACT=table
         record_contract "$build_sha"
+        return 0
+    fi
+    if [ -n "$build_sha" ] && load_dynamic_entry "$build_sha"; then
+        BUILD_CONTRACT=table
         return 0
     fi
     # A ColorOS 16 source still matches the legacy contract, so check that
@@ -148,14 +302,22 @@ select_build_sites()
     # synthetic or foreign file never inherits it.
     case "$file" in
         "$SOURCE_FILE"|"$PATCHED_FILE") ;;
-        *) BUILD_CONTRACT=legacy; return 0 ;;
+        *)
+            if detect_dynamic_sites "$file"; then
+                BUILD_CONTRACT=table
+                record_contract "$build_sha"
+                return 0
+            fi
+            BUILD_CONTRACT=legacy
+            return 0
+            ;;
     esac
     if [ -r "$STATE_DIR/contract" ] && [ -r "$STATE_DIR/contract-source" ]; then
         recorded=$(sed -n '1p' "$STATE_DIR/contract" 2>/dev/null | tr -d '[:space:]')
         recorded_sha=$(sed -n '1p' "$STATE_DIR/contract-source" 2>/dev/null | tr -d '[:space:]')
         case "$recorded" in
             table)
-                if load_site_entry "$recorded_sha"; then
+                if load_site_entry "$recorded_sha" || load_dynamic_entry "$recorded_sha"; then
                     BUILD_CONTRACT=table
                     return 0
                 fi
@@ -165,6 +327,12 @@ select_build_sites()
                 return 0
                 ;;
         esac
+    fi
+    if detect_dynamic_sites "$file"; then
+        save_dynamic_entry "$build_sha"
+        BUILD_CONTRACT=table
+        record_contract "$build_sha"
+        return 0
     fi
     BUILD_CONTRACT=legacy
     return 0
@@ -228,7 +396,7 @@ verify_table_patched()
     file=$1
     [ -r "$file" ] || return 1
     [ "$(hex_at "$file" "$SITE_ANIMATION_OFFSET")" = "$ANIMATION_PATCHED_HEX" ] || return 1
-    [ "$(hex_at "$file" "$SITE_AP_SCALE_OFFSET")" = "$TABLE_AP_SCALE_PATCHED_HEX" ] || return 1
+    [ "$(hex_at "$file" "$SITE_AP_SCALE_OFFSET")" = "$SITE_AP_SCALE_PATCHED_HEX" ] || return 1
     if type_guard_described; then
         [ "$(hex_at "$file" "$SITE_TYPE_GUARD_OFFSET")" = "$TYPE_GUARD_PATCHED_HEX" ] || return 1
     fi
@@ -275,7 +443,7 @@ patch_site_table()
     rm -f "$temp_file" 2>/dev/null || true
     cp -f "$source" "$temp_file" || return 13
     if ! write_patch_word "$temp_file" "$SITE_ANIMATION_OFFSET" "$ANIMATION_PATCHED_HEX" ||
-            ! write_patch_word "$temp_file" "$SITE_AP_SCALE_OFFSET" "$TABLE_AP_SCALE_PATCHED_HEX" ||
+            ! write_patch_word "$temp_file" "$SITE_AP_SCALE_OFFSET" "$SITE_AP_SCALE_PATCHED_HEX" ||
             { type_guard_described &&
                 ! write_patch_word "$temp_file" "$SITE_TYPE_GUARD_OFFSET" "$TYPE_GUARD_PATCHED_HEX"; } ||
             ! verify_table_patched "$temp_file" ||
@@ -703,6 +871,7 @@ case "$1" in
         SITE_AP_SCALE_OFFSET=$5
         SITE_AP_SCALE_ORIGINAL_HEX=$6
         TABLE_AP_SCALE_PATCHED_HEX=$7
+        SITE_AP_SCALE_PATCHED_HEX=$7
         patch_site_table "$8" "$9"
         ;;
     *)

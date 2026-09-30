@@ -210,16 +210,28 @@ fi
 grep -q '^4b9a0ca743aabe6cada245f5e9b789cdd5a3d345c5bf37168b353d7f38b88e03:3152928:addbfb97:3651804:41020054' "$HELPER"
 
 # Optional: feed a real installed SurfaceFlinger through the selector when one
-# is supplied, so the table is proven to be keyed to that exact build.
+# is supplied.  The current ColorOS 17 OTA has moved both sites again, and its
+# hash is deliberately treated as a cache hint rather than a gate.  The second
+# invocation mutates an unrelated byte, so the unknown-hash path must locate
+# the same two instructions from their surrounding code.
 if [ -n "${MURONG_RMX5200_SF:-}" ] && [ -r "$MURONG_RMX5200_SF" ]; then
+    CURRENT_ANIMATION_OFFSET=3152940
+    CURRENT_AP_SCALE_OFFSET=3652276
     sh "$HELPER" test-patch "$MODEL" "$POLICY" "$MURONG_RMX5200_SF" \
         "$TMPDIR_TEST/real-sf.bin"
-    [ "$(od -An -tx1 -j "$ANIMATION_OFFSET" -N 4 "$TMPDIR_TEST/real-sf.bin" | tr -d '[:space:]')" = 1f2003d5 ]
-    # The AP-scale site is the feature-flag branch that guards the whole
-    # "rewrite the selected modePtr" block, so it becomes a plain branch over
-    # the same distance.
-    [ "$(od -An -tx1 -j "$AP_SCALE_PTR_OFFSET" -N 4 "$TMPDIR_TEST/real-sf.bin" | tr -d '[:space:]')" = 12000014 ]
+    [ "$(od -An -tx1 -j "$CURRENT_ANIMATION_OFFSET" -N 4 "$TMPDIR_TEST/real-sf.bin" | tr -d '[:space:]')" = 1f2003d5 ]
+    [ "$(od -An -tx1 -j "$CURRENT_AP_SCALE_OFFSET" -N 4 "$TMPDIR_TEST/real-sf.bin" | tr -d '[:space:]')" = 12000014 ]
     [ "$(wc -c < "$TMPDIR_TEST/real-sf.bin" | tr -d '[:space:]')" = \
+        "$(wc -c < "$MURONG_RMX5200_SF" | tr -d '[:space:]')" ]
+
+    UNKNOWN_SF="$TMPDIR_TEST/real-sf-unknown.bin"
+    cp "$MURONG_RMX5200_SF" "$UNKNOWN_SF"
+    write_bytes "$UNKNOWN_SF" 128 '\0177'
+    sh "$HELPER" test-patch "$MODEL" "$POLICY" "$UNKNOWN_SF" \
+        "$TMPDIR_TEST/real-sf-unknown.out"
+    [ "$(od -An -tx1 -j "$CURRENT_ANIMATION_OFFSET" -N 4 "$TMPDIR_TEST/real-sf-unknown.out" | tr -d '[:space:]')" = 1f2003d5 ]
+    [ "$(od -An -tx1 -j "$CURRENT_AP_SCALE_OFFSET" -N 4 "$TMPDIR_TEST/real-sf-unknown.out" | tr -d '[:space:]')" = 12000014 ]
+    [ "$(wc -c < "$TMPDIR_TEST/real-sf-unknown.out" | tr -d '[:space:]')" = \
         "$(wc -c < "$MURONG_RMX5200_SF" | tr -d '[:space:]')" ]
 fi
 
