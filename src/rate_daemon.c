@@ -26,7 +26,7 @@
 #define MAX_APPS 200
 #define MAX_PKG_LEN 128
 #define MAX_EXTENSION_RATES 256
-#define RATE_DAEMON_VERSION "2.9.38"
+#define RATE_DAEMON_VERSION "2.9.40"
 #define BOOT_RESOLUTION_SETTLE_TIMEOUT_MS 8000
 #define BOOT_RESOLUTION_SETTLE_SAMPLE_MS 150
 #define BOOT_RESOLUTION_SETTLE_SAMPLES 4
@@ -1171,6 +1171,18 @@ static int wait_for_active_mode(int target_id, int timeout_ms) {
     return 0;
 }
 
+/* Tracks the last mode this daemon itself asked SurfaceFlinger for. The legacy
+ * 1035 transaction keeps a desired-mode policy next to the live HWC mode, so
+ * the refresh ladder re-issues the live mode before an adjacent one to make
+ * sure a stale policy cannot turn the new request into a no-op. When that live
+ * mode is the one we just requested and verified, the re-issue is provably
+ * redundant: it doubled every ladder step (84 of 191 transactions in one field
+ * log) and each one costs a fork plus a SurfaceFlinger lock. Trust our own
+ * policy only for a short window so an external vote still gets re-aligned. */
+#define SF_SELF_POLICY_TRUST_MS 4000
+static int last_sf_requested_mode = -1;
+static long long last_sf_requested_ms = 0;
+
 static int set_surface_flinger_mode(int mode_id) {
     char command[160];
     int rc;
@@ -1183,6 +1195,10 @@ static int set_surface_flinger_mode(int mode_id) {
     log_msg("SurfaceFlinger physical mode requested: mode=%d width=%d rc=%d",
             mode_id, get_mode_width(mode_id), rc);
     if (rc != 0) return 0;
+    /* The transaction reached SurfaceFlinger, so its desired-mode policy is now
+     * this mode even if the OTI re-assert below fails. */
+    last_sf_requested_mode = mode_id;
+    last_sf_requested_ms = monotonic_ms();
     if (!reassert_oti_pause_if_required(NULL)) {
         log_msg("SurfaceFlinger mode request could not keep OTI paused: mode=%d",
                 mode_id);
@@ -1215,7 +1231,9 @@ static int commit_refresh_step(int mode_id) {
      * addition to the live HWC mode. Re-issue the live mode first so a stale
      * previous request cannot make the adjacent transaction a no-op. */
     active_id = get_current_system_mode();
-    if (is_valid_mode(active_id) && active_id != mode_id) {
+    if (is_valid_mode(active_id) && active_id != mode_id &&
+            !(active_id == last_sf_requested_mode &&
+              monotonic_ms() - last_sf_requested_ms < SF_SELF_POLICY_TRUST_MS)) {
         log_msg("Refresh ladder aligns stale policy: active=%d/%dHz",
                 active_id, mode_fps(active_id));
         if (!set_surface_flinger_mode(active_id)) return 0;
@@ -2766,8 +2784,21 @@ static int issue_surfaceflinger_oti_pause(int paused) {
     return 1;
 }
 
+/* Every OTI assertion costs a shell fork plus a binder round trip, and the
+ * ladder re-asserts at each of its steps while the touch path re-asserts on
+ * every real finger-up edge. Those bursts land inside the same 500ms heartbeat
+ * window, so the loop then re-issues a pause the daemon has already proven live
+ * milliseconds earlier. Record the last successful assertion and skip only a
+ * near-simultaneous duplicate; the steady 500ms cadence the black-flash fix
+ * depends on stays exactly as it is. A wider window would let a skipped tick
+ * push the real interval towards 1000ms, too close to the vendor's ~1.5s OTI
+ * re-vote that the 500ms cadence exists to beat. */
+#define OTI_DUPLICATE_ASSERT_WINDOW_MS 150
+static long long last_sf_oti_asserted_ms = 0;
+
 static int set_surfaceflinger_oti_pause(const char *base_path, int paused) {
     if (!issue_surfaceflinger_oti_pause(paused)) return 0;
+    if (paused) last_sf_oti_asserted_ms = monotonic_ms();
     write_surfaceflinger_oti_pause_state(base_path, paused);
     log_msg("RMX5200 OTI policy synchronized: %s",
             paused ? "paused for fixed refresh" : "running for LTPO");
@@ -2840,6 +2871,13 @@ static void sync_oti_pause_policy(const char *base_path, int force) {
      * cannot prove SurfaceFlinger still holds the pause. */
     if (!force && pause && last_pause == pause &&
             now_ms - last_keepalive_ms >= RMX5200_OTI_PAUSE_KEEPALIVE_MS) {
+        /* A ladder step or a touch-up edge may already have asserted the pause
+         * inside this window; re-issuing it would be a provably redundant fork.
+         * The heartbeat clock still advances, so the next tick forks normally. */
+        if (now_ms - last_sf_oti_asserted_ms < OTI_DUPLICATE_ASSERT_WINDOW_MS) {
+            last_keepalive_ms = now_ms;
+            return;
+        }
         if (keepalive_surfaceflinger_oti_pause(base_path)) {
             last_keepalive_ms = now_ms;
             return;

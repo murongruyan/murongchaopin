@@ -83,8 +83,15 @@ if errorlevel 1 goto build_failed
 :: Record which source the checked-in free daemon came from.  Without this the
 :: repository can ship a daemon that is older than src\rate_daemon.c -- which is
 :: exactly what happened when the SurfaceFlinger OTI durability work landed.
+::
+:: The digest must be taken over the LF text, because that is what CI checks out
+:: and what tests/check_binary_fingerprint.sh compares against.  With
+:: core.autocrlf=true a local working copy holds CRLF, so hashing the file
+:: directly records a digest that can never match on the Linux runner and turns
+:: a correct build into a failing gate.  Normalize to LF first.
+:: Strip CR so the digest covers exactly the LF bytes the Linux gate hashes.
 set "DAEMON_SRC_SHA="
-for /f "skip=1 tokens=* delims=" %%H in ('certutil -hashfile src\rate_daemon.c SHA256') do (
+for /f "tokens=1" %%H in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0fingerprint_daemon_src.ps1" src\rate_daemon.c 2^>nul') do (
     if not defined DAEMON_SRC_SHA set "DAEMON_SRC_SHA=%%H"
 )
 if not defined DAEMON_SRC_SHA (
