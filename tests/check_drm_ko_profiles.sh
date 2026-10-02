@@ -34,7 +34,25 @@ grep -q 'OC_DROP_STOCK_FHD_DEFAULT false' src/ko/rmx5200_display_modes.c
 # The DRM module is loaded through the kernel symbol guard, which resolves the
 # file that actually matches the running kernel (shipped or adapted copy).
 grep -q 'ko_abi_resolve "$KO_MODULE"' scripts/display_backend.sh
+# Assert the RMX5200 insmod carries its own parameters, not that they sit on one
+# physical line.  dispatch is per profile now, so the argument list wraps:
+#
+#   *)  insmod "$KO_ABI_RESOLVED" probe_only=0 drop_stock_fhd=1 \
+#           mode_specs="$DRM_MODE_SPECS" \
+#           phy_profile="$DRM_PHY_PROFILE"
+#
+# Check the dispatch is still there and that the RMX5200 parameters appear
+# inside it, while the vendor-LTPO profiles must not receive them.
 grep -q 'insmod "$KO_ABI_RESOLVED" probe_only=0 drop_stock_fhd=1' scripts/display_backend.sh
+grep -q 'phy_profile="$DRM_PHY_PROFILE"' scripts/display_backend.sh
+# plk110 / plq110 share one branch and must not be handed those two names: the
+# kernel silently ignores unknown module parameters, which is how the intent was
+# lost before.
+if awk '/plk110\|plq110\)/,/;;/' scripts/display_backend.sh |
+        grep -qE 'drop_stock_fhd|phy_profile'; then
+    echo 'FAIL: RMX5200-only insmod parameters are sent to plk110/plq110' >&2
+    exit 1
+fi
 grep -q 'oc_prepare_runtime_base' src/ko/rmx5200_display_modes.c
 grep -q 'oc_hide_stock_fhd_drm_modes' src/ko/rmx5200_display_modes.c
 grep -q 'removed_stock_fhd_count' src/ko/rmx5200_display_modes.c
