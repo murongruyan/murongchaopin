@@ -109,16 +109,47 @@ grep -q 'pmb110_170_mode.c' src/ko/plk110_display_modes.c
 MODE_MANIFEST_FILE="$PWD/config/display_mode_manifest.txt"
 . scripts/mode_manifest.sh
 mode_manifest_validate
-[ "$(mode_manifest_specs RMX5200 drm)" = \
-  '1440x3136@123;1440x3136@150;1440x3136@155;1440x3136@160;1440x3136@165;1440x3136@170;1440x3136@175;1440x3136@180' ]
-[ "$(mode_manifest_specs PLK110 dtbo)" = \
-  '1272x2772@123;1272x2772@170;1272x2772@175;1272x2772@180;1272x2772@185;1272x2772@190;1272x2772@195;1272x2772@199' ]
-[ "$(mode_manifest_specs PLK110 drm)" = \
-  '1272x2772@170;1272x2772@175;1272x2772@180;1272x2772@185;1272x2772@190;1272x2772@195;1272x2772@199' ]
-[ "$(mode_manifest_specs PLQ110 dtbo)" = \
-  '1272x2772@123;1272x2772@170;1272x2772@175;1272x2772@180;1272x2772@185;1272x2772@190;1272x2772@195;1272x2772@199' ]
-[ "$(mode_manifest_specs PLQ110 drm)" = \
-  '1272x2772@170;1272x2772@175;1272x2772@180;1272x2772@185;1272x2772@190;1272x2772@195;1272x2772@199' ]
+# Derive the expected spec strings from config/display_mode_manifest.txt instead
+# of freezing one ladder here.  These literals were written for the eight-rate
+# PLK110/PLQ110 list (123,170..199); changing the ladder to 175,185,195,199 made
+# the test fail while mode_manifest_specs was doing exactly the right thing.  A
+# frozen literal turns every ladder change into a false failure and hides real
+# regressions in the specs builder.
+mm_expected() {
+    mode=$1
+    backend=$2
+    case "$mode" in
+        RMX5200) res='1440x3136' ;;
+        *)       res='1272x2772' ;;
+    esac
+    # mode_manifest_rates already resolves <model>_<backend>_rates per backend.
+    mode_manifest_rates "$mode" "$backend" |
+        tr ',' '\n' |
+        awk -v res="$res" '
+            BEGIN { first = 1 }
+            /^[0-9]+$/ {
+                if (!first) printf ";";
+                printf "%s@%s", res, $0;
+                first = 0;
+            }
+            END { if (!first) printf "\n" }'
+}
+
+for pair in 'RMX5200 drm' 'PLK110 dtbo' 'PLK110 drm' 'PLQ110 dtbo' 'PLQ110 drm'; do
+    set -- $pair
+    expected=$(mm_expected "$1" "$2")
+    actual=$(mode_manifest_specs "$1" "$2")
+    [ -n "$expected" ] || {
+        echo "FAIL: $1 $2 has no rates in the manifest" >&2
+        exit 1
+    }
+    [ "$actual" = "$expected" ] || {
+        echo "FAIL: $1 $2 specs mismatch" >&2
+        echo "  expected: $expected" >&2
+        echo "  actual:   $actual" >&2
+        exit 1
+    }
+done
 if grep -q 'oc_default_mode_specs' src/ko/rmx5200_display_modes.c src/ko/plk110_display_modes.c src/ko/plq110_display_modes.c; then
     echo "FAIL: KO still contains a second compiled default mode manifest" >&2
     exit 1
