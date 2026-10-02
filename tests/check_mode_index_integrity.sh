@@ -55,11 +55,33 @@ cp "$PJD_FIXTURE" "$TMP_DIR/pjd110/dtbo_dts/input.dts"
 
 (cd "$TMP_DIR/plk110" && "$TMP_DIR/process_dts_plk110" >/dev/null)
 PLK_OUTPUT="$TMP_DIR/plk110/dtbo_dts/input.dts"
+# The expected index range follows from the manifest, not from a frozen
+# literal.  process_dts deletes 90 and oplus_fhd_120, renames the 120 slot to
+# the first listed rate, keeps the remaining stock timings and appends one node
+# per remaining rate, so the group ends up with:
+#
+#   len(rates) + 3   timings
+#
+# With the previous eight-rate list that was 11 (indices 0..a); the current
+# four-rate list gives 7 (indices 0..6).  Hard-coding either one makes the test
+# fail on every ladder change while telling us nothing about the transform, so
+# derive the range and assert contiguity explicitly.
+plk_rates=$(sed -n 's/^plk110_dtbo_rates=//p' "$ROOT/config/display_mode_manifest.txt" |
+    tr -d '[:space:]')
+plk_rate_count=$(printf '%s' "$plk_rates" | tr ',' '\n' | grep -c '[0-9]')
+[ "$plk_rate_count" -gt 0 ] || {
+    echo 'FAIL: PLK110 rate list is empty' >&2
+    exit 1
+}
+plk_timing_count=$((plk_rate_count + 3))
+plk_expected=$(seq 0 $((plk_timing_count - 1)) |
+    awk '{ printf "%s%x", (NR > 1 ? "," : ""), $1 }')
 plk_indexes=$(grep 'cell-index' "$PLK_OUTPUT" | \
     sed -n 's/.*<0x\([0-9a-fA-F][0-9a-fA-F]*\)>.*/\1/p' | \
     tr 'A-F\n' 'a-f,' | sed 's/,$//')
-[ "$plk_indexes" = '0,1,2,3,4,5,6,7,8,9,a' ] || {
-    echo "FAIL: PLK110 final cell-index values are not contiguous: $plk_indexes" >&2
+[ "$plk_indexes" = "$plk_expected" ] || {
+    echo "FAIL: PLK110 final cell-index values are not contiguous: $plk_indexes" \
+        "(expected $plk_expected for $plk_rate_count rates)" >&2
     exit 1
 }
 if grep -q 'timing@sdc_fhd_90\|timing@oplus_fhd_120' "$PLK_OUTPUT"; then
@@ -72,8 +94,11 @@ cp "$PLK_NO_INDEX_FIXTURE" "$TMP_DIR/plk110-no-index/dtbo_dts/input.dts"
 (cd "$TMP_DIR/plk110-no-index" && "$TMP_DIR/process_dts_plk110" >/dev/null)
 PLK_NO_INDEX_OUTPUT="$TMP_DIR/plk110-no-index/dtbo_dts/input.dts"
 no_index_count=$(grep -c 'cell-index' "$PLK_NO_INDEX_OUTPUT")
-[ "$no_index_count" -eq 11 ] || {
-    echo "FAIL: missing PLK110 cell-index properties were not synthesized: $no_index_count" >&2
+# Same derivation as above: the vendor fixture carries no cell-index at all, so
+# synthesis must cover every timing in the resulting group.
+[ "$no_index_count" -eq "$plk_timing_count" ] || {
+    echo "FAIL: missing PLK110 cell-index properties were not synthesized: $no_index_count" \
+        "(expected $plk_timing_count)" >&2
     exit 1
 }
 
@@ -99,8 +124,21 @@ PLQ_OUTPUT="$TMP_DIR/plq110/dtbo_dts/input.dts"
 plq_indexes=$(grep 'cell-index' "$PLQ_OUTPUT" | \
     sed -n 's/.*<0x\([0-9a-fA-F][0-9a-fA-F]*\)\>.*/\1/p' | \
     tr 'A-F\n' 'a-f,' | sed 's/,$//')
-[ "$plq_indexes" = '0,1,2,3,4,5,6,7,8,9,a' ] || {
-    echo "FAIL: PLQ110 final cell-index values are not contiguous: $plq_indexes" >&2
+# PLQ110 shares the PLK110 transform (process_dts maps both to panel_id 2), so
+# its index range follows from its own rate list the same way.
+plq_rates=$(sed -n 's/^plq110_dtbo_rates=//p' "$ROOT/config/display_mode_manifest.txt" |
+    tr -d '[:space:]')
+plq_rate_count=$(printf '%s' "$plq_rates" | tr ',' '\n' | grep -c '[0-9]')
+[ "$plq_rate_count" -gt 0 ] || {
+    echo 'FAIL: PLQ110 rate list is empty' >&2
+    exit 1
+}
+plq_timing_count=$((plq_rate_count + 3))
+plq_expected=$(seq 0 $((plq_timing_count - 1)) |
+    awk '{ printf "%s%x", (NR > 1 ? "," : ""), $1 }')
+[ "$plq_indexes" = "$plq_expected" ] || {
+    echo "FAIL: PLQ110 final cell-index values are not contiguous: $plq_indexes" \
+        "(expected $plq_expected for $plq_rate_count rates)" >&2
     exit 1
 }
 if grep -q 'timing@sdc_fhd_90\|timing@oplus_fhd_120' "$PLQ_OUTPUT"; then
