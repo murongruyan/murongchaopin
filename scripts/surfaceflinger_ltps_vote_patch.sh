@@ -12,6 +12,44 @@ SOURCE_FILE=/system/bin/surfaceflinger
 PATCHED_FILE="$MODDIR/bin/surfaceflinger.rmx5200.stock-ltps-vote"
 
 EXPECTED_MODEL=RMX5200
+
+# This vote filter is an RMX5200-only mechanism, and the script must say so.
+#
+# RMX5200 is the device whose stock LTPS is broken by the vendor's own votes: an
+# animation vote plus an AP-scale table lookup resolves a legitimate 144Hz
+# request into the FHD-group 123Hz mode, and the filter drops that vote so the
+# requested mode survives.  That is what "stock_ltps" means here.
+#
+# PLK110 / PLQ110 / PJD110 ship vendor LTPO - web_handler.sh sets
+# DISPLAY_PROFILE=vendor_ltpo for all three - and there is nothing to filter:
+# the vendor directs refresh rates itself.  So skipping on those models is not a
+# limitation, it is the correct behaviour.
+#
+# It also closes a real hole.  The policy file ships as "stock_ltps" to every
+# model and the installer does not rewrite it per model, while
+# ltps_vote_wanted() treats "stock_ltps" as a request for this patch.  PLK110
+# therefore arrived with a policy value that web_handler.sh rejects as invalid
+# for that model (set_display_policy accepts only stock_ltpo / adfr_off there)
+# AND that armed an RMX5200-only patch on hardware it was never validated on.
+# Gating on the profile - not on the model name, and not on the policy alone -
+# makes that combination inert.
+current_display_profile()
+{
+    # Caller may name the model explicitly; the test harness does, because it
+    # cannot reach the real getprop. Runtime callers omit it and get the device.
+    case "${1:-$(current_model)}" in
+        RMX5200) printf '%s\n' rmx5200 ;;
+        PLK110|PLQ110|PJD110) printf '%s\n' vendor_ltpo ;;
+        *) printf '%s\n' unsupported ;;
+    esac
+}
+
+profile_uses_vote_filter()
+{
+    [ "$(current_display_profile "${1:-}")" = rmx5200 ]
+}
+
+
 EXPECTED_POLICY=stock_ltps
 EXPECTED_CONTEXT=u:object_r:surfaceflinger_exec:s0
 VOTE_PATCH_OFFSET=5220408
@@ -581,7 +619,7 @@ patch_semantic_file()
     output=$4
     offset=${5:-$VOTE_PATCH_OFFSET}
 
-    [ "$model" = "$EXPECTED_MODEL" ] || return 10
+    profile_uses_vote_filter "$model" || return 10
     ltps_vote_wanted "$policy" || return 11
     select_build_sites "$source"
     record_contract "$(hash_file "$source")"
@@ -653,8 +691,8 @@ prepare_runtime_patch()
 {
     model=$(current_model)
     policy=$(read_policy)
-    if [ "$model" != "$EXPECTED_MODEL" ]; then
-        write_state "skipped:model_${model:-unknown}"
+    if ! profile_uses_vote_filter "$model"; then
+        write_state "skipped:profile_$(current_display_profile "$model")"
         return 0
     fi
     if ! ltps_vote_wanted; then
@@ -705,8 +743,8 @@ apply_runtime_patch()
 {
     model=$(current_model)
     policy=$(read_policy)
-    if [ "$model" != "$EXPECTED_MODEL" ]; then
-        write_state "skipped:model_${model:-unknown}"
+    if ! profile_uses_vote_filter "$model"; then
+        write_state "skipped:profile_$(current_display_profile "$model")"
         return 0
     fi
     if ! ltps_vote_wanted; then

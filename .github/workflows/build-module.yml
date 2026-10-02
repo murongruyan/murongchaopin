@@ -307,6 +307,10 @@ jobs:
           sh tests/check_ko_abi_guard.sh
           sh tests/check_binary_fingerprint.sh
           sh tests/check_ko_build_fingerprint.sh
+          sh tests/check_coloros_config_source_integrity.sh
+          sh tests/check_plk110_timing_transform.sh
+          sh tests/check_dtbo_applied_history.sh
+          sh tests/check_drm_insmod_parameters.sh
           KO_ABI_GUARD_BIN="$PWD/build/bin/ko_abi_guard" \
             sh tests/check_ko_abi_guard_roundtrip.sh
 

@@ -151,6 +151,23 @@ foreach ($entry in $check.Entries) {
 }
 $check.Dispose()
 
+# Dev leftovers must never ship. A `.bak`/`.pre-` file next to a real config is
+# invisible in review but the installer copies whole directories, so it would be
+# extracted onto the device (this happened once with a manifest backup during a
+# rate-list experiment).
+$devLeftovers = @()
+$check = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+foreach ($entry in $check.Entries) {
+    if ($entry.FullName -match '(^|/)[^/]*\.(bak|orig|tmp|pre-[A-Za-z0-9._-]+)$' -or
+        $entry.FullName -match '\.bak-') {
+        $devLeftovers += $entry.FullName
+    }
+}
+$check.Dispose()
+if ($devLeftovers.Count -gt 0) {
+    throw "PUBLIC MODULE ASSERTION FAILED - dev backup files leaked into the ZIP: $($devLeftovers -join ', ')"
+}
+Write-Host "assertion: no dev backup file present - PASS"
 if ($leaked.Count -gt 0) {
     throw "PUBLIC MODULE ASSERTION FAILED - private/research files leaked: $($leaked -join ', ')"
 }

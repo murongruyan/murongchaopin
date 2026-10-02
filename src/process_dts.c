@@ -94,6 +94,21 @@ typedef struct {
     size_t plq110_dtbo_count;
 } DisplayModeManifest;
 
+#define DISPLAY_MODE_MANIFEST_RATE_CAPACITY 16U
+
+/* The overclock list is a tuning surface, not a contract: reducing it is how a
+ * rate set gets narrowed down on real hardware.  It therefore has to accept an
+ * empty list (key present, no rates -> synthesise cell-index only, add no timing
+ * nodes) and any prefix of the full set.
+ *
+ * The lower bound deliberately stays at 20 rather than "above the stock 165Hz
+ * ceiling": 123 is a first-class member of both default lists (RMX5200 and
+ * PLK110), and rejecting it here would break the installer on every device.  A
+ * rate that collides with a stock timing is a per-model question and belongs in
+ * the rate list review, not in this parser. */
+#define DISPLAY_MODE_MIN_RATE 20U
+#define DISPLAY_MODE_MAX_RATE 300U
+
 static DisplayModeManifest g_display_mode_manifest;
 
 #define RMX5200_PROFILE_VERSION_BIT       (1U << 0)
@@ -470,6 +485,13 @@ static int parse_manifest_rates(const char *text, unsigned int *rates,
     if (!text || !rates || !count_out || strlen(text) >= sizeof(buffer)) {
         return 0;
     }
+    /* An empty value is a deliberate choice ("no overclock timings"), not a
+     * malformed line.  Without this, narrowing the list down on real hardware
+     * was impossible: the manifest gate rejected the installer outright. */
+    if (*text == '\0') {
+        *count_out = 0;
+        return 1;
+    }
     strcpy(buffer, text);
     item = buffer;
     while (item && *item) {
@@ -478,7 +500,8 @@ static int parse_manifest_rates(const char *text, unsigned int *rates,
         unsigned long value;
         if (comma) *comma = '\0';
         value = strtoul(item, &end, 10);
-        if (end == item || *end != '\0' || value < 20 || value > 300 ||
+        if (end == item || *end != '\0' ||
+            value < DISPLAY_MODE_MIN_RATE || value > DISPLAY_MODE_MAX_RATE ||
             count >= capacity) {
             return 0;
         }
@@ -551,10 +574,12 @@ static int load_display_mode_manifest(void) {
     }
     fclose(in);
     if (version != 1 || !seen_rmx || !seen_plk || !seen_plq ||
-        g_display_mode_manifest.rmx5200_dtbo_count != 8 ||
-        g_display_mode_manifest.plk110_dtbo_count != 8 ||
-        g_display_mode_manifest.plq110_dtbo_count != 8) {
-        printf("ERROR: display mode manifest is incomplete; RMX5200/PLK110/PLQ110 DTBO entries must contain 8 rates.\n");
+        g_display_mode_manifest.rmx5200_dtbo_count > DISPLAY_MODE_MANIFEST_RATE_CAPACITY ||
+        g_display_mode_manifest.plk110_dtbo_count > DISPLAY_MODE_MANIFEST_RATE_CAPACITY ||
+        g_display_mode_manifest.plq110_dtbo_count > DISPLAY_MODE_MANIFEST_RATE_CAPACITY) {
+        printf("ERROR: display mode manifest is incomplete or over-long; "
+               "RMX5200/PLK110/PLQ110 DTBO entries must be present and may carry "
+               "0 to %u rates.\n", DISPLAY_MODE_MANIFEST_RATE_CAPACITY);
         return 0;
     }
     printf("Verified display mode manifest: RMX5200=%zu rates, PLK110=%zu rates, PLQ110=%zu rates.\n",
@@ -2409,36 +2434,73 @@ void process_file(const char *filename) {
                 last_plk110_panel_start = current_panel_start;
             }
             
-            // 1. Modify 120Hz -> 123Hz (Direct Replace)
+            // 1. The 120Hz slot is always taken out of the vendor refresh-rate
+            // table.  Design intent (confirmed by the maintainer): the global
+            // list must not be able to fall back to 120 or 90, so the stock
+            // 120Hz and 90Hz nodes are removed and the panel rests at the 165Hz
+            // node instead.  That is why the deletion below is unconditional.
+            //
+            // The rate list decides only WHICH extra timings get generated.  It
+            // influences this branch in exactly one way: when its first entry is
+            // 123, the stock 120Hz node is renamed rather than deleted, because
+            // the panel's 123Hz mode reuses those vendor timings.  Otherwise the
+            // 120Hz node is dropped outright.
+            //
+            // This separation is what the previous `for (i = 1; ...)` loop
+            // destroyed: it treated rate[0] as an always-consumed placeholder,
+            // so a single-rate list generated nothing at all, and any list not
+            // starting with 123 silently did nothing here.
+            #define PLK110_SLOT_RATE 123
             if (strstr(node_name, "timing@sdc_fhd_120")) {
-                printf("Modifying 120Hz node to 123Hz (Direct Replace)...\n");
-                char new_block[MAX_BLOCK];
-                strcpy(new_block, current_block);
-                
-                replace_str(new_block, "timing@sdc_fhd_120 {", "timing@sdc_fhd_123 {");
-                
-                unsigned long long base_clock = get_prop_u64(current_block, "qcom,mdss-dsi-panel-clockrate");
-                unsigned int base_fps = 120;
-                int target_fps = 123;
-                unsigned long long new_clock = base_clock * target_fps / base_fps;
-                unsigned int base_transfer = get_prop_u64(current_block, "qcom,mdss-mdp-transfer-time-us");
-                unsigned int new_transfer = 0;
-                if (base_transfer > 0) new_transfer = base_transfer * base_fps / target_fps;
-                
-                update_prop_u64(new_block, "qcom,mdss-dsi-panel-clockrate", new_clock);
-                update_prop_u64(new_block, "qcom,mdss-dsi-panel-framerate", target_fps);
-                if (new_transfer > 0) update_prop_u64(new_block, "qcom,mdss-mdp-transfer-time-us", new_transfer);
-                if (!update_prop_u64(new_block, "cell-index",
-                                     plk110_cell_index++)) {
-                    printf("ERROR: Failed to renumber PLK110 cell-index for %s.\n",
-                           node_name);
-                    g_processing_error = 1;
+                const unsigned int *slot_rates =
+                    (g_current_model == MODEL_PLQ110)
+                        ? g_display_mode_manifest.plq110_dtbo_rates
+                        : g_display_mode_manifest.plk110_dtbo_rates;
+                const size_t slot_rate_count =
+                    (g_current_model == MODEL_PLQ110)
+                        ? g_display_mode_manifest.plq110_dtbo_count
+                        : g_display_mode_manifest.plk110_dtbo_count;
+                if (slot_rate_count > 0 && (int)slot_rates[0] == PLK110_SLOT_RATE) {
+                    // Keep the vendor timings, relabelled as the 123Hz mode.
+                    printf("Modifying 120Hz node to %dHz (Direct Replace)...\n",
+                           PLK110_SLOT_RATE);
+                    char new_block[MAX_BLOCK];
+                    strcpy(new_block, current_block);
+
+                    char slot_header[64];
+                    sprintf(slot_header, "timing@sdc_fhd_%d {", PLK110_SLOT_RATE);
+                    replace_str(new_block, "timing@sdc_fhd_120 {", slot_header);
+
+                    unsigned long long base_clock = get_prop_u64(current_block, "qcom,mdss-dsi-panel-clockrate");
+                    unsigned int base_fps = 120;
+                    int target_fps = PLK110_SLOT_RATE;
+                    unsigned long long new_clock = base_clock * target_fps / base_fps;
+                    unsigned int base_transfer = get_prop_u64(current_block, "qcom,mdss-mdp-transfer-time-us");
+                    unsigned int new_transfer = 0;
+                    if (base_transfer > 0) new_transfer = base_transfer * base_fps / target_fps;
+
+                    update_prop_u64(new_block, "qcom,mdss-dsi-panel-clockrate", new_clock);
+                    update_prop_u64(new_block, "qcom,mdss-dsi-panel-framerate", target_fps);
+                    if (new_transfer > 0) update_prop_u64(new_block, "qcom,mdss-mdp-transfer-time-us", new_transfer);
+                    if (!update_prop_u64(new_block, "cell-index",
+                                         plk110_cell_index++)) {
+                        printf("ERROR: Failed to renumber PLK110 cell-index for %s.\n",
+                               node_name);
+                        g_processing_error = 1;
+                    }
+
+                    fputs(new_block, out);
+                    fputs("\n", out);
+                    generated_fhd_high[0] = 1;
+                } else {
+                    // No 123Hz mode requested: the 120Hz node is removed with
+                    // the rest of the fallback rates.  Dropping it here (rather
+                    // than emitting it) is what keeps the global list from
+                    // dropping to 120.
+                    printf("Deleting node (Skipping): %s\n", node_name);
                 }
-                
-                fputs(new_block, out);
-                fputs("\n", out);
             }
-            // 2. 165Hz -> Generate 170-199Hz
+            // 2. 165Hz -> Generate every remaining rate in the list
             else if (strstr(node_name, "timing@sdc_fhd_165")) {
                 if (!update_prop_u64(current_block, "cell-index",
                                      plk110_cell_index++)) {
@@ -2457,7 +2519,14 @@ void process_file(const char *filename) {
                     (g_current_model == MODEL_PLQ110)
                         ? g_display_mode_manifest.plq110_dtbo_count
                         : g_display_mode_manifest.plk110_dtbo_count;
-                for (size_t i = 1; i < model_dtbo_count; i++) {
+                // rate[0] participates unless it is the slot rate, which the
+                // 120Hz branch above already emitted (and marked in
+                // generated_fhd_high[0]).  A list like "170" therefore generates
+                // 170; a list like "123,170" generates 170 only.
+                const size_t loop_first =
+                    (model_dtbo_count > 0 &&
+                     (int)model_dtbo_rates[0] == PLK110_SLOT_RATE) ? 1 : 0;
+                for (size_t i = loop_first; i < model_dtbo_count; i++) {
                     int target_fps = (int)model_dtbo_rates[i];
                     char target_node_name[64];
                     sprintf(target_node_name, "timing@sdc_fhd_%d", target_fps);

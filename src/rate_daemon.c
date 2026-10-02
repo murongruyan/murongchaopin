@@ -26,7 +26,7 @@
 #define MAX_APPS 200
 #define MAX_PKG_LEN 128
 #define MAX_EXTENSION_RATES 256
-#define RATE_DAEMON_VERSION "2.9.40"
+#define RATE_DAEMON_VERSION "2.9.41"
 #define BOOT_RESOLUTION_SETTLE_TIMEOUT_MS 8000
 #define BOOT_RESOLUTION_SETTLE_SAMPLE_MS 150
 #define BOOT_RESOLUTION_SETTLE_SAMPLES 4
@@ -262,6 +262,7 @@ static int wait_for_active_width(int target_width, int timeout_ms);
 static int mode_height_for_width(int width);
 static int mode_for_width_fps(int width, int fps);
 static int mode_for_resolution_fps(int width, int height, int fps);
+static int mode_for_current_resolution_fps(int fps);
 static int wait_for_boot_resolution_stable(int *active_id, int *active_width);
 static int mode_fps(int mode_id);
 static void load_extension_rates(const char *base_path);
@@ -4540,6 +4541,59 @@ static int mode_for_app_fps(int fps) {
     return mode_for_resolution_fps(width, height, fps);
 }
 
+static int geometry_exists_in_table(int width, int height) {
+    for (int i = 0; i < mode_count; i++) {
+        if (modes[i].width == width && modes[i].height == height) return 1;
+    }
+    return 0;
+}
+
+/* Resolve a mode from the geometry a bridge client reports.
+ *
+ * A bridge client can only describe the geometry it sees through
+ * DisplayManager, and ColorOS keeps its own resolution preference
+ * (user_preferred_resolution_*) alongside the live HWC config. On PLK110 the
+ * framework reports the stored 1440-wide preference while the panel's HWC table
+ * only ever carries 1272x2772 and 1080x2354. An exact (width,height,fps) lookup
+ * then fails for every rate the same panel had just listed over LISTRATES, and
+ * the bridge answered "ERR mode" - the field report read as "refresh rate
+ * bridging failed" for every single button.
+ *
+ * Separate the two failure modes so a genuine rejection stays a rejection:
+ * a geometry that is absent from the table entirely is stale client
+ * information and is re-bound to the geometry this daemon is actually driving,
+ * while a geometry that exists without holding that rate is still refused. */
+static int mode_for_client_geometry(int width, int height, int fps,
+                                    int *fallback_used) {
+    int mode_id = mode_for_resolution_fps(width, height, fps);
+
+    if (fallback_used) *fallback_used = 0;
+    if (mode_id >= 0) return mode_id;
+    if (geometry_exists_in_table(width, height)) {
+        log_msg("Display hook rejected rate=%d for known geometry %dx%d",
+                fps, width, height);
+        return -1;
+    }
+    mode_id = mode_for_current_resolution_fps(fps);
+    if (mode_id >= 0 && fallback_used) *fallback_used = 1;
+    return mode_id;
+}
+
+/* Legacy bridge callers do not carry a Context, so bind their app override to
+ * the display geometry that is actually active. */
+static int mode_for_current_resolution_fps(int fps) {
+    int reference_id = get_current_applied_mode();
+    if (!is_valid_mode(reference_id)) reference_id = get_current_system_mode();
+    if (!is_valid_mode(reference_id)) reference_id = default_mode_id;
+    if (is_valid_mode(reference_id)) {
+        int width = get_mode_width(reference_id);
+        int height = mode_height(reference_id);
+        int mode_id = mode_for_resolution_fps(width, height, fps);
+        if (mode_id >= 0) return mode_id;
+    }
+    return mode_for_app_fps(fps);
+}
+
 static int write_app_config(const char *base_path, const char *package_name,
                             int mode_id) {
     char config_path[512];
@@ -5093,6 +5147,7 @@ static void handle_display_hook_client(int server_fd, const char *base_path) {
     char story_phase[16];
     int fps;
     int width;
+    int height;
     int source_width;
     long long adoption_arg;
     int adoption_fields;
@@ -5382,6 +5437,80 @@ static void handle_display_hook_client(int server_fd, const char *base_path) {
             dprintf(client_fd, "OK clear\n");
             log_msg("Display hook removed all app overrides");
         }
+    } else if (sscanf(request, "SETAPP %127s %d %d %d", package_name, &width,
+                      &height, &fps) == 4
+            && valid_package_name(package_name)
+            && width >= 480 && width <= 10000
+            && height >= 480 && height <= 20000
+            && fps >= 30 && fps <= 1000) {
+        /* The Settings hook and the Scene bridge both carry an explicit
+         * (width,height,fps) triple.  This command was missing from the free
+         * build's dispatcher entirely, so every such write fell through to the
+         * final `ERR request` below and the field saw
+         * "刷新率写入失败：ERR request" for a per-app rate that the daemon had
+         * the config plumbing for all along. */
+        int geometry_fallback = 0;
+        int mode_id = mode_for_client_geometry(width, height, fps,
+                                               &geometry_fallback);
+        if (mode_id < 0) {
+            dprintf(client_fd, "ERR mode\n");
+        } else if (!write_app_config(base_path, package_name, mode_id)) {
+            dprintf(client_fd, "ERR write\n");
+        } else {
+            load_config(base_path);
+            force_reapply = 1;
+            dprintf(client_fd, "OK %d\n", mode_id);
+            if (geometry_fallback) {
+                log_msg("Display hook stale app geometry %dx%d resolved on "
+                        "live %dx%d for fps=%d mode=%d",
+                        width, height, get_mode_width(mode_id),
+                        mode_height(mode_id), fps, mode_id);
+            }
+            log_msg("Display hook set app=%s %dx%d fps=%d mode=%d",
+                    package_name, width, height, fps, mode_id);
+        }
+    } else if (sscanf(request, "SETGLOBALMODE %d %d %d", &width, &height,
+                      &fps) == 3
+            && width >= 480 && width <= 10000
+            && height >= 480 && height <= 20000
+            && fps >= 30 && fps <= 1000) {
+        /* Scene and the Game Assistant persist the global mode through this
+         * form ("Persist the global mode; the daemon applies it from its config
+         * loop").  Like SETAPP it was simply absent here, so the write was
+         * rejected as an unknown request instead of being applied. */
+        int geometry_fallback = 0;
+        int mode_id = mode_for_client_geometry(width, height, fps,
+                                               &geometry_fallback);
+        if (mode_id < 0) {
+            dprintf(client_fd, "ERR mode\n");
+        } else if (!write_global_config(base_path, mode_id)) {
+            dprintf(client_fd, "ERR write\n");
+        } else {
+            load_config(base_path);
+            force_reapply = 1;
+            dprintf(client_fd, "OK %d\n", mode_id);
+            if (geometry_fallback) {
+                log_msg("Display hook stale client geometry %dx%d resolved on "
+                        "live %dx%d for fps=%d mode=%d",
+                        width, height, get_mode_width(mode_id),
+                        mode_height(mode_id), fps, mode_id);
+            }
+            log_msg("Display hook queued global mode width=%d height=%d fps=%d mode=%d",
+                    width, height, fps, mode_id);
+        }
+    } else if (strcmp(trim(request), "GETALL") == 0) {
+        /* The bridge reads the whole snapshot in one transaction
+         * ("MODES <global> [pkg fps]...").  Answering ERR request made the
+         * caller treat an empty snapshot as a failed read. */
+        int global_fps = mode_fps(default_mode_id);
+        dprintf(client_fd, "MODES %d", global_fps > 0 ? global_fps : 0);
+        for (int i = 0; i < app_config_count; i++) {
+            int app_fps = mode_fps(app_configs[i].mode_id);
+            if (app_fps > 0 && valid_package_name(app_configs[i].package)) {
+                dprintf(client_fd, " %s %d", app_configs[i].package, app_fps);
+            }
+        }
+        dprintf(client_fd, "\n");
     } else {
         dprintf(client_fd, "ERR request\n");
     }

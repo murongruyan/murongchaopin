@@ -214,9 +214,24 @@ for USER_STATE_PATH in \
   img/dtbo.img \
   img/dtbo.img.sha256 \
   img/dtbo.img.gz \
-  img/dtbo.applied.sha256; do
+  img/dtbo.applied.sha256 \
+  img/dtbo.applied.sha256.history; do
   preserve_installed_path "$USER_STATE_PATH"
 done
+
+# Keep the previous installation's history alongside the carried-over one. An
+# image can reach the partition through fastboot instead of through an install,
+# so the newest record is not always the one now on the partition; the previous
+# list is what makes "restore via fastboot, then install another variant" work
+# without having to flash the stock image back first.
+if [ "$INSTALLED_MOD_PATH" != "$MODPATH" ]; then
+  _prev_history="$INSTALLED_MOD_PATH/img/dtbo.applied.sha256.history"
+  _new_history="$IMG_DIR/dtbo.applied.sha256.history"
+  if [ -f "$_prev_history" ] && [ ! -L "$_prev_history" ] && \
+     [ -f "$_new_history" ] && [ ! -L "$_new_history" ]; then
+    cp -f "$_prev_history" "$_new_history.previous" 2>/dev/null || true
+  fi
+fi
 
 # The paid package is downloaded and verified independently of the public base
 # ZIP. A base-module update must not force an authorized user to download it
@@ -332,6 +347,19 @@ if [ -n "$CURRENT_DTBO_HASH" ] &&
     ui_print "当前 DTBO 与模块最近一次应用版本一致：走软件更新路径"
   fi
 elif [ -n "$CURRENT_DTBO_HASH" ] &&
+     dtbo_applied_history_matches "$CURRENT_DTBO_HASH" "$APPLIED_MANIFEST"; then
+  # The partition holds an image this module wrote at some earlier point, but it
+  # is not the most recent one (a variant swap). Treat it as ours: rewriting the
+  # backend is the whole point of the installation, and refusing here means the
+  # tester flashes a new build that never reaches the partition.
+  if [ -n "$UPDATE_BACKEND" ]; then
+    DTBO_ROUTE="applied_force"
+    ui_print "当前 DTBO 是本模块写过的历史版本：按显式要求重做底层后端"
+  else
+    DTBO_ROUTE="applied_force"
+    ui_print "当前 DTBO 是本模块写过的历史版本：重做底层后端"
+  fi
+elif [ -n "$CURRENT_DTBO_HASH" ] &&
      [ -n "$STOCK_HASH" ] &&
      [ "$CURRENT_DTBO_HASH" = "$STOCK_HASH" ]; then
   DTBO_ROUTE="stock"
@@ -362,7 +390,7 @@ else
       fi
     else
       DTBO_ROUTE="foreign"
-      ui_print "警告：当前 DTBO 不是原厂签名，且不是模块最近应用版本"
+      ui_print "警告：当前 DTBO 不是原厂签名，且不是本模块写过的任何版本"
     fi
   else
     ui_print "警告：无法读取当前 DTBO，拒绝底层刷写，继续软件层安装"
@@ -381,7 +409,21 @@ case "$DTBO_ROUTE" in
     INSTALL_BACKEND=$(sed -n '1p' "$MODPATH/config/dts_backend.txt" 2>/dev/null |
       tr -d '[:space:]')
     case "$INSTALL_BACKEND" in dtbo|drm) ;; *) INSTALL_BACKEND=dtbo ;; esac
-    ui_print "已跳过未知 DTBO 的底层刷写，仅继续安装软件组件"
+    SKIP_DISPLAY_BACKEND=1
+    ui_print " "
+    ui_print "############################################################"
+    ui_print "#  注意：本次没有写入 DTBO 分区！"
+    ui_print "#"
+    ui_print "#  当前分区上的镜像不是原厂、也不是本模块写过的任何版本，"
+    ui_print "#  为避免覆盖未知镜像，底层刷写已被跳过。"
+    ui_print "#"
+    ui_print "#  后果：本次安装只更新了软件组件，高刷/档位设置不会变化。"
+    ui_print "#  如果你正在对比不同档位包，本次结果无效——"
+    ui_print "#  请先 fastboot 刷回原厂 dtbo 再装，或先卸载模块再安装。"
+    ui_print "#"
+    ui_print "#  本模块写过的版本记录在：img/dtbo.applied.sha256（及 .history）"
+    ui_print "############################################################"
+    ui_print " "
     ;;
   *)
     SKIP_DISPLAY_BACKEND=0

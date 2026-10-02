@@ -63,7 +63,9 @@ validate_source() {
     # ColorOS 17 ships version 20260811; the mounted file is a copy of that
     # stock config so every new vendor entry (per-app override limits, game
     # settings) stays intact.
-    grep -Eq '<refresh_rate_config[^>]*version="20260811"' "$RATE_SOURCE" || return 1
+    # 版本门槛改成"已知版本集合"：ColorOS 17 的 PLK110 出厂版是 20260918，
+# RMX5200/C16 时代是 20260811。只接受已核对过的版本，其它一律拒绝（fail closed）。
+grep -Eq '<refresh_rate_config[^>]*version="(20260811|20260918)"' "$RATE_SOURCE" || return 1
     grep -Eq '<config[^>]*maxrefreshsettings="3"' "$RATE_SOURCE" || return 1
     grep -q '<config[^>]*defaultMaxRate=' "$RATE_SOURCE" && return 1
     grep -q '<config[^>]*extremeHighEnable=' "$RATE_SOURCE" && return 1

@@ -132,6 +132,37 @@ for wrong_policy in custom_ltpo stock_ltpo_typo; do
     fi
 done
 
+# The vote filter is RMX5200-only, and this must hold even when the policy file
+# happens to name the RMX5200 policy.
+#
+# Every model ships config/rmx5200_display_policy.txt as "stock_ltps" and the
+# installer does not rewrite it per model, while ltps_vote_wanted() treats
+# "stock_ltps" as a request for this patch.  Without a profile gate, PLK110
+# therefore arrived with a policy that web_handler.sh rejects as invalid for
+# that model (set_display_policy accepts only stock_ltpo / adfr_off there) and
+# that armed an RMX5200-only patch on hardware it was never validated on.
+# PLK110 / PLQ110 / PJD110 ship vendor LTPO: there is no vendor vote to filter.
+for vendor_ltpo_model in PLK110 PLQ110 PJD110; do
+    for stray_policy in stock_ltps adfr_off custom_ltpo; do
+        if ANDROID_RELEASE_MAJOR_OVERRIDE=17 sh "$HELPER" test-patch \
+                "$vendor_ltpo_model" "$stray_policy" "$SOURCE" \
+                "$TMPDIR_TEST/$vendor_ltpo_model-$stray_policy.bin"; then
+            echo "FAIL: $vendor_ltpo_model accepted the RMX5200-only vote filter" \
+                "under policy $stray_policy" >&2
+            exit 1
+        fi
+    done
+done
+
+# ... and the same guard must be what the runtime paths consult, not just the
+# test entry point, otherwise the two can drift apart.
+grep -q 'profile_uses_vote_filter' "$HELPER"
+grep -q "PLK110|PLQ110|PJD110) printf '%s\\\\n' vendor_ltpo" "$HELPER"
+if grep -q 'model_is_supported' "$HELPER"; then
+    echo 'FAIL: stale model allowlist gate is still present' >&2
+    exit 1
+fi
+
 reject_mutation()
 {
     name=$1

@@ -40,12 +40,18 @@ assert set(merged.get("frtc_framerate_ranges", [])) == expected_frtc
 
 root = ET.parse(rate_path).getroot()
 assert root.tag == "refresh_rate_config"
-# The mounted refresh-rate config tracks the ColorOS 17 stock revision so new
-# vendor entries (notSupportOverride, game settings) are preserved.
-assert int(root.attrib["version"]) == 20260811
+# The mounted refresh-rate config is based on the device's own stock revision, so
+# vendor entries are preserved. Known revisions:
+#   20260811 - ColorOS 16/17 baseline carried by the module for RMX5200
+#   20260918 - ColorOS 17 stock on PLK110 (OnePlus 15)
+assert int(root.attrib["version"]) in (20260811, 20260918)
 config = root.find("config")
 assert config is not None
 assert config.attrib.get("maxrefreshsettings") == "3"
+# These two belong to the vendor's own extreme-high-rate path. The module drives
+# the overclocked tiers itself, so its copy must never carry them: the runtime
+# gate in scripts/coloros_config.sh rejects the file outright when either is
+# present (that is what produced error:source_integrity on PLK110/C17).
 assert "defaultMaxRate" not in config.attrib
 assert "extremeHighEnable" not in config.attrib
 PY

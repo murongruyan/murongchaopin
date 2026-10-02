@@ -1,3 +1,13 @@
 *.sh text eol=lf
 *.mjs text eol=lf
 *.java text eol=lf
+
+# Windows checkouts must not rewrite the text configuration the module parses on
+# the device. core.autocrlf turned config/display_mode_manifest.txt into CRLF
+# once, and mode_manifest_resolution() rejects the resulting value because a
+# trailing CR is not in [0-9:] - which fails mode_manifest_validate() and takes
+# the whole installer down with it. Keep these LF everywhere.
+*.sh            text eol=lf
+*.txt           text eol=lf
+*.json          text eol=lf
+*.awk           text eol=lf

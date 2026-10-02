@@ -320,14 +320,45 @@ apply_drm_at_boot() {
         log_line "pure-test: skip drm insmod"
         return 0
     fi
-    if [ "$KO_PROFILE" = pjd110 ]; then
-        insmod "$KO_ABI_RESOLVED" probe_only=0 drop_stock_low=1 \
-            mode_specs="$DRM_MODE_SPECS" >/dev/null 2>&1
-    else
-        insmod "$KO_ABI_RESOLVED" probe_only=0 drop_stock_fhd=1 \
-            mode_specs="$DRM_MODE_SPECS" \
-            phy_profile="$DRM_PHY_PROFILE" >/dev/null 2>&1
-    fi
+    # Pass each profile only the parameters its own KO declares.
+    #
+    # These are deliberately not interchangeable.  rmx5200 declares
+    # drop_stock_fhd + phy_profile; plk110 / plq110 / pjd110 declare
+    # drop_stock_low instead and have no phy_profile at all.  A single
+    # catch-all branch used to send the RMX5200 pair to every non-pjd110
+    # profile, so on PLK110 the kernel logged
+    #
+    #   plk110_drm_modes: unknown parameter 'drop_stock_fhd' ignored
+    #   plk110_drm_modes: unknown parameter 'phy_profile' ignored
+    #
+    # and the intent behind them was silently dropped: PLK110 was never told
+    # what to do about the stock low modes, and nothing said so.
+    #
+    # Note what "ignored" did and did not cost here.  drop_stock_fhd is an
+    # RMX5200-only concept, and PLK110 keeps its stock low modes on purpose
+    # (OC_DROP_STOCK_LOW_DEFAULT is false and OC_EXPECT_REMOVED_STOCK_LOW is 0),
+    # so the correct fix is to stop sending the parameter rather than to map it
+    # onto drop_stock_low - forcing that on would try to remove modes PLK110
+    # expects to keep and trip the removed-count check.  phy_profile=stock is
+    # likewise inert for PLK110, whose PHY vector is inherited from the 165Hz
+    # timing rather than selected from a table.
+    case "$KO_PROFILE" in
+        pjd110)
+            # drop_stock_low is this profile's default; step 2 upstream has
+            # always passed it, so keep passing it.
+            insmod "$KO_ABI_RESOLVED" probe_only=0 drop_stock_low=1 \
+                mode_specs="$DRM_MODE_SPECS" >/dev/null 2>&1
+            ;;
+        plk110|plq110)
+            insmod "$KO_ABI_RESOLVED" probe_only=0 \
+                mode_specs="$DRM_MODE_SPECS" >/dev/null 2>&1
+            ;;
+        *)
+            insmod "$KO_ABI_RESOLVED" probe_only=0 drop_stock_fhd=1 \
+                mode_specs="$DRM_MODE_SPECS" \
+                phy_profile="$DRM_PHY_PROFILE" >/dev/null 2>&1
+            ;;
+    esac
     display_rc=$?
     if [ "$display_rc" -ne 0 ]; then
         set_status "error:drm_insmod:$display_rc"
@@ -336,10 +367,17 @@ apply_drm_at_boot() {
     display_installed=$(cat "/sys/module/$KO_MODULE_NAME/parameters/applied" 2>/dev/null)
     display_cache=$(cat "/sys/module/$KO_MODULE_NAME/parameters/cache_applied" 2>/dev/null)
     display_failure=$(cat "/sys/module/$KO_MODULE_NAME/parameters/failure_code" 2>/dev/null)
-    display_removed_fhd=$(cat "/sys/module/$KO_MODULE_NAME/parameters/removed_stock_fhd_count" 2>/dev/null)
-    display_removed_fhd_drm=$(cat "/sys/module/$KO_MODULE_NAME/parameters/removed_stock_fhd_drm_count" 2>/dev/null)
-    display_removed_low=$(cat "/sys/module/$KO_MODULE_NAME/parameters/removed_stock_low_count" 2>/dev/null)
-    display_removed_low_drm=$(cat "/sys/module/$KO_MODULE_NAME/parameters/removed_stock_low_drm_count" 2>/dev/null)
+    # Only rmx5200 exposes the removed_stock_fhd counters; on the other profiles
+    # these files do not exist and the reads return empty.  Report them as "na"
+    # instead of leaving the status line looking like a failed zero.
+    display_removed_fhd=$(cat "/sys/module/$KO_MODULE_NAME/parameters/removed_stock_fhd_count" 2>/dev/null || true)
+    display_removed_fhd_drm=$(cat "/sys/module/$KO_MODULE_NAME/parameters/removed_stock_fhd_drm_count" 2>/dev/null || true)
+    display_removed_low=$(cat "/sys/module/$KO_MODULE_NAME/parameters/removed_stock_low_count" 2>/dev/null || true)
+    display_removed_low_drm=$(cat "/sys/module/$KO_MODULE_NAME/parameters/removed_stock_low_drm_count" 2>/dev/null || true)
+    [ -n "$display_removed_fhd" ] || display_removed_fhd=na
+    [ -n "$display_removed_fhd_drm" ] || display_removed_fhd_drm=na
+    [ -n "$display_removed_low" ] || display_removed_low=na
+    [ -n "$display_removed_low_drm" ] || display_removed_low_drm=na
     if { [ "$display_installed" = Y ] || [ "$display_installed" = 1 ]; } &&
        { [ "$display_cache" = Y ] || [ "$display_cache" = 1 ]; } &&
        [ "$display_failure" = 0 ] &&

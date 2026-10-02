@@ -112,6 +112,67 @@ dtbo_write_device_manifest() {
         "$dtbo_device_manifest_tmp" || return 1
     mv -f "$dtbo_device_manifest_tmp" "$dtbo_device_manifest_file" || return 1
     chmod 0444 "$dtbo_device_manifest_file" 2>/dev/null
+    dtbo_append_applied_history "$dtbo_device_manifest_file" \
+        "$dtbo_device_manifest_hash"
+}
+
+# Every DTBO this module writes is remembered, newest first.
+#
+# "Which image is on the partition right now" is only part of the question the
+# installer has to answer. The other part is "did this module produce it": the
+# AVB test cannot answer that, because dtbo_apply_stock_avb() reuses the vendor
+# VBMeta and therefore every image we write fails avbtool verify_image by
+# construction. Without this history, installing variant B over variant A
+# classifies A's own output as a foreign image and silently skips the backend
+# write, so the tester believes a new build was flashed when the old DTBO is
+# still on the partition. That is exactly how a rate bisect produces a false
+# "still hangs" or a false "now boots".
+dtbo_append_applied_history() {
+    dtbo_history_manifest="$1"
+    dtbo_history_hash="$2"
+    [ "${#dtbo_history_hash}" -eq 64 ] || return 0
+    dtbo_history_file="$dtbo_history_manifest.history"
+    dtbo_history_tmp="$dtbo_history_file.tmp.$$"
+    {
+        printf '%s\n' "$dtbo_history_hash"
+        cat "$dtbo_history_file" 2>/dev/null
+    } | awk '!seen[$0]++' | head -n 16 > "$dtbo_history_tmp" 2>/dev/null || {
+        rm -f "$dtbo_history_tmp" 2>/dev/null
+        return 0
+    }
+    mv -f "$dtbo_history_tmp" "$dtbo_history_file" 2>/dev/null || {
+        rm -f "$dtbo_history_tmp" 2>/dev/null
+        return 0
+    }
+    # Deliberately left writable: the next installation appends to it, and a
+    # 0444 file inside the module directory cannot be rewritten. Atomicity comes
+    # from the write-to-tmp + rename above, not from the mode.
+    chmod 0644 "$dtbo_history_file" 2>/dev/null
+    return 0
+}
+
+dtbo_applied_history_matches() {
+    # The query is normalised the same way the stored lines are: the installer
+    # compares hashes coming from several different helpers, and a case
+    # difference must not turn one of our own images into a foreign one.
+    dtbo_history_query=$(printf '%s' "$1" | tr -d '[:space:]' | tr 'A-F' 'a-f')
+    dtbo_history_manifest="$2"
+    [ "${#dtbo_history_query}" -eq 64 ] || return 1
+    # The live file first, then the copy carried over from the installed module.
+    # The carried-over path matters because an image can reach the partition
+    # through fastboot (a recovery flash) rather than through an installation,
+    # so the newest record is not always the one now on the partition.
+    for dtbo_history_candidate in \
+        "$dtbo_history_manifest.history" \
+        "$dtbo_history_manifest.history.previous"; do
+        [ -f "$dtbo_history_candidate" ] || continue
+        while IFS= read -r dtbo_history_line; do
+            dtbo_history_line=$(printf '%s' "$dtbo_history_line" | tr -d '[:space:]' | tr 'A-F' 'a-f')
+            [ "${#dtbo_history_line}" -eq 64 ] || continue
+            [ "$dtbo_history_line" = "$dtbo_history_query" ] && return 0
+        done < "$dtbo_history_candidate"
+    done
+    return 1
 }
 
 dtbo_clear_device_manifest() {

@@ -57,6 +57,12 @@ extern void *get_main_display(void);
 #ifndef OC_MODE_COUNT
 #define OC_MODE_COUNT 6U
 #endif
+#ifndef OC_MODE_COUNT_MIN
+/* Lower bound, not an exact match: the DTBO backend may already have removed
+ * 90/120/oplus_fhd_120.  The smallest tree this KO can still work against is
+ * the 165Hz source plus the two timings the DTBO keeps (60/144). */
+#define OC_MODE_COUNT_MIN 3U
+#endif
 #define OC_TARGET_MODE_COUNT 3U
 #define OC_MAX_RUNTIME_MODES 32U
 #define OC_MAX_SPEC_MODES 32U
@@ -461,14 +467,49 @@ static noinline int oc_find_dt_state(void)
 			case 120U: seen_120++; break;
 			case 144U: seen_144++; break;
 			case 165U: seen_165++; break;
-			default: return -ESTALE;
+			default:
+				/* Any other rate is an overclock timing that the DTBO
+				 * backend has already appended.  It is expected here,
+				 * not an error: this KO runs *after* the DTBO, and on
+				 * PLK110 the DTBO path deletes 90/120/oplus_fhd_120
+				 * and appends 175/185/195/199.  Rejecting the tree for
+				 * containing exactly the modes this module installs is
+				 * what made DT discovery return -ESTALE (-116) with
+				 * targets=0 on the first real PLK110 probe. */
+				break;
 			}
 		}
 	}
-	if (oc_dt.count != OC_MODE_COUNT || seen_60 != OC_EXPECT_60 ||
-	    seen_90 != OC_EXPECT_90 || seen_120 != OC_EXPECT_120 ||
-	    seen_144 != OC_EXPECT_144 || seen_165 != OC_EXPECT_165)
+	/* Validate the panel identity, not a frozen mode list.
+	 *
+	 * The original check demanded exactly the six stock timings
+	 * (count == OC_MODE_COUNT, seen_120 == 2, seen_90 == 1, ...).  That only
+	 * holds for a pristine vendor DT.  With the DTBO backend active the tree
+	 * legitimately holds a different set, so the exact comparison rejects a
+	 * correct tree.
+	 *
+	 * rmx5200_display_modes.c already solved this the right way and states the
+	 * reason in a comment: "The DTBO backend may already have appended verified
+	 * WQHD modes. Keep the original eight-mode ABI as the minimum baseline, but
+	 * discover and validate every timing exposed by the active DTBO so the KO
+	 * can add only modes that are not already present."
+	 *
+	 * The invariant that actually matters is the one everything downstream is
+	 * computed from: the 165Hz source timing must be present and unique (it is
+	 * the template the private timing and clock maths are anchored to), and the
+	 * panel must expose at least the native geometry.  The stored count is the
+	 * discovered count, so the runtime layout search validates against the same
+	 * set the DT actually has. */
+	if (!oc_dt.source_node || seen_165 != 1U ||
+	    oc_dt.count < OC_MODE_COUNT_MIN)
 		return -ENODEV;
+	/* Kept as evidence for the first real-device probes: it shows which of the
+	 * stock rates survived whatever the DTBO backend did to the tree. */
+	pr_info(OC_LOG_PREFIX
+		": DT discovery count=%u (stock-seen 60=%u 90=%u 120=%u 144=%u 165=%u)"
+		" source=%px targets=%u\n",
+		oc_dt.count, seen_60, seen_90, seen_120, seen_144, seen_165,
+		oc_dt.source_node, oc_dt.target_count);
 	return 0;
 }
 
