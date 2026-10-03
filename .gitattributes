@@ -11,3 +11,11 @@
 *.txt           text eol=lf
 *.json          text eol=lf
 *.awk           text eol=lf
+# Executables without a .sh extension are launched through their shebang, so a
+# CRLF checkout makes the kernel look for an interpreter literally named "sh\r".
+# That is how the release job died with "/usr/bin/env: 'sh\r': No such file or
+# directory" on src/settings_hook/gradlew.  Update-binary runs from the installer
+# on the device, where the same rule applies.
+gradlew              text eol=lf
+update-binary        text eol=lf
+gradlew.bat          text eol=crlf
