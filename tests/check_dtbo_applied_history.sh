@@ -4,7 +4,14 @@
 # 于是档位对比实验实际测的是旧 DTBO。这个测试保证历史记录能正确识别自己的产物。
 
 set -eu
-REPO=${1:-/mnt/c/android-ndk-r27d-windows/diaodu/apk/murongchaopin/murongchaopin}
+# Resolve the repository root from this script's own location. It used to default
+# to the author's checkout path, which does not exist on any other machine or on
+# the release runner, where the step then died on the very first source.
+REPO=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
+[ -f "$REPO/scripts/dtbo_avb.sh" ] || {
+    echo "FAIL: cannot locate scripts/dtbo_avb.sh under $REPO" >&2
+    exit 1
+}
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 
