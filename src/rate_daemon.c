@@ -26,7 +26,7 @@
 #define MAX_APPS 200
 #define MAX_PKG_LEN 128
 #define MAX_EXTENSION_RATES 256
-#define RATE_DAEMON_VERSION "2.9.41"
+#define RATE_DAEMON_VERSION "2.9.42"
 #define BOOT_RESOLUTION_SETTLE_TIMEOUT_MS 8000
 #define BOOT_RESOLUTION_SETTLE_SAMPLE_MS 150
 #define BOOT_RESOLUTION_SETTLE_SAMPLES 4
@@ -817,22 +817,45 @@ void load_config(const char* base_path) {
  * The one-second policy loop and the mode-verification loops used to spawn it
  * once per poll, which showed up as a periodic hitch (and as a burst of dumps
  * during every mode transaction). Share one result for 400ms instead, which is
- * still close to the ~300ms a mode transaction needs to settle. */
-#define SYSTEM_MODE_CACHE_MS 400
+ * still close to the ~300ms a mode transaction needs to settle.
+ *
+ * Each miss is a full `dumpsys SurfaceFlinger` inside SurfaceFlinger itself,
+ * so the steady-state TTL stays far above the old 400ms. Verification does not
+ * depend on this cache: it samples through sample_system_mode_now(). */
+#define SYSTEM_MODE_CACHE_MS 700
+#define SYSTEM_MODE_VERIFY_INTERVAL_MS 350
+#define SYSTEM_MODE_VERIFY_MAX_SAMPLES 4
 
 static int get_current_system_mode_uncached(void);
 
+static int system_mode_cache = -2;
+static long long system_mode_cache_ms = 0;
+
 int get_current_system_mode() {
-    static int cached_mode = -2;
-    static long long cached_mode_ms = 0;
     long long now_ms = monotonic_ms();
 
-    if (cached_mode != -2 && now_ms - cached_mode_ms < SYSTEM_MODE_CACHE_MS) {
-        return cached_mode;
+    if (system_mode_cache != -2 &&
+            now_ms - system_mode_cache_ms < SYSTEM_MODE_CACHE_MS) {
+        return system_mode_cache;
     }
-    cached_mode = get_current_system_mode_uncached();
-    cached_mode_ms = now_ms;
-    return cached_mode;
+    system_mode_cache = get_current_system_mode_uncached();
+    system_mode_cache_ms = now_ms;
+    return system_mode_cache;
+}
+
+/* One unconditional sample, for the transaction verification loop only.
+ *
+ * Verifying from the cache is worthless -- the same cached reading would
+ * "confirm" itself twice -- so the loop used to re-dump every 100-150ms, up to
+ * ten full SurfaceFlinger dumps per ladder step. Those dumps run inside
+ * SurfaceFlinger and compete with composition for the same locks, which is
+ * exactly the frame drop the user sees while scrolling or switching apps.
+ * Sampling deliberately and bounding the sample count keeps the proof and drops
+ * the cost. */
+static int sample_system_mode_now(void) {
+    system_mode_cache = get_current_system_mode_uncached();
+    system_mode_cache_ms = monotonic_ms();
+    return system_mode_cache;
 }
 
 static int get_current_system_mode_uncached() {
@@ -1134,7 +1157,8 @@ static int wait_for_active_mode(int target_id, int timeout_ms) {
     long long started_ms = monotonic_ms();
     long long deadline_ms = started_ms + timeout_ms;
     int consecutive_matches = 0;
-    int required_matches = rmx5200_ltpo_ordered_rise_active ? 1 : 3;
+    int required_matches = rmx5200_ltpo_ordered_rise_active ? 1 : 2;
+    int samples = 0;
 
     do {
 #ifndef MURONG_FREE_BUILD
@@ -1153,36 +1177,28 @@ static int wait_for_active_mode(int target_id, int timeout_ms) {
             return 0;
         }
 #endif
-        int active_id = get_current_system_mode();
+        int active_id = sample_system_mode_now();
+        samples++;
         if (active_id == target_id) {
             consecutive_matches++;
             if (consecutive_matches >= required_matches) {
-                log_msg("Active display mode verified: mode=%d after=%dms",
-                        active_id, (int)(monotonic_ms() - started_ms));
+                log_msg("Active display mode verified: mode=%d after=%dms "
+                        "samples=%d", active_id,
+                        (int)(monotonic_ms() - started_ms), samples);
                 return 1;
             }
         } else {
             consecutive_matches = 0;
         }
-        usleep(rmx5200_ltpo_ordered_rise_active ? 100000 : 150000);
-    } while (monotonic_ms() <= deadline_ms);
+        usleep(rmx5200_ltpo_ordered_rise_active
+                ? 100000 : SYSTEM_MODE_VERIFY_INTERVAL_MS * 1000);
+    } while (monotonic_ms() <= deadline_ms &&
+             samples < SYSTEM_MODE_VERIFY_MAX_SAMPLES);
 
     log_msg("Active display mode verification timed out: target=%d active=%d "
             "timeout=%dms", target_id, get_current_system_mode(), timeout_ms);
     return 0;
 }
-
-/* Tracks the last mode this daemon itself asked SurfaceFlinger for. The legacy
- * 1035 transaction keeps a desired-mode policy next to the live HWC mode, so
- * the refresh ladder re-issues the live mode before an adjacent one to make
- * sure a stale policy cannot turn the new request into a no-op. When that live
- * mode is the one we just requested and verified, the re-issue is provably
- * redundant: it doubled every ladder step (84 of 191 transactions in one field
- * log) and each one costs a fork plus a SurfaceFlinger lock. Trust our own
- * policy only for a short window so an external vote still gets re-aligned. */
-#define SF_SELF_POLICY_TRUST_MS 4000
-static int last_sf_requested_mode = -1;
-static long long last_sf_requested_ms = 0;
 
 static int set_surface_flinger_mode(int mode_id) {
     char command[160];
@@ -1196,10 +1212,6 @@ static int set_surface_flinger_mode(int mode_id) {
     log_msg("SurfaceFlinger physical mode requested: mode=%d width=%d rc=%d",
             mode_id, get_mode_width(mode_id), rc);
     if (rc != 0) return 0;
-    /* The transaction reached SurfaceFlinger, so its desired-mode policy is now
-     * this mode even if the OTI re-assert below fails. */
-    last_sf_requested_mode = mode_id;
-    last_sf_requested_ms = monotonic_ms();
     if (!reassert_oti_pause_if_required(NULL)) {
         log_msg("SurfaceFlinger mode request could not keep OTI paused: mode=%d",
                 mode_id);
@@ -1227,21 +1239,36 @@ static int same_mode_geometry(int first_id, int second_id) {
 
 static int commit_refresh_step(int mode_id) {
     int active_id;
+    int target_applied = 0;
 
-    /* SurfaceFlinger's legacy transaction keeps a desired-mode policy in
-     * addition to the live HWC mode. Re-issue the live mode first so a stale
-     * previous request cannot make the adjacent transaction a no-op. */
-    active_id = get_current_system_mode();
-    if (is_valid_mode(active_id) && active_id != mode_id &&
-            !(active_id == last_sf_requested_mode &&
-              monotonic_ms() - last_sf_requested_ms < SF_SELF_POLICY_TRUST_MS)) {
-        log_msg("Refresh ladder aligns stale policy: active=%d/%dHz",
-                active_id, mode_fps(active_id));
-        if (!set_surface_flinger_mode(active_id)) return 0;
-        usleep(50000);
-    }
+    /* SurfaceFlinger's legacy transaction keeps a desired-mode policy next to
+     * the live HWC mode, and a stale policy can turn an adjacent request into a
+     * no-op. That used to be handled by re-issuing the live mode before every
+     * step, which doubled the transaction count of the common (successful)
+     * case: two forks plus two SurfaceFlinger binder calls per step, each one
+     * competing with composition while the user is switching apps.
+     *
+     * Try the target first and re-align only when the verification actually
+     * fails. The stale-policy case is still covered, one failed step later,
+     * and the successful path costs a single transaction. */
     if (!set_surface_flinger_mode(mode_id)) return 0;
-    if (!wait_for_active_mode(mode_id, 1500)) {
+    if (wait_for_active_mode(mode_id, 1500)) {
+        target_applied = 1;
+    } else {
+        active_id = sample_system_mode_now();
+        if (is_valid_mode(active_id) && active_id != mode_id) {
+            log_msg("Refresh ladder aligns stale policy: active=%d/%dHz",
+                    active_id, mode_fps(active_id));
+            if (set_surface_flinger_mode(active_id)) {
+                usleep(50000);
+                if (set_surface_flinger_mode(mode_id) &&
+                        wait_for_active_mode(mode_id, 1500)) {
+                    target_applied = 1;
+                }
+            }
+        }
+    }
+    if (!target_applied) {
         reassert_oti_pause_if_required(NULL);
         log_msg("Refresh ladder step failed: mode=%d fps=%d", mode_id,
                 mode_fps(mode_id));
@@ -2196,31 +2223,127 @@ void smooth_switch(int target_id) {
 }
 
 // 获取前台应用 (使用用户提供的优化逻辑)
-/* The window dump is the heaviest query on the per-second policy path and it
- * blocks WindowManager while it runs. Cache the answer for two seconds: app
- * switching and the per-application rates stay responsive, but the system no
- * longer takes a lock hit every second. */
+/* `dumpsys window` is not a cheap query: WindowManagerService.doDump runs on a
+ * binder thread inside system_server and holds WindowManagerGlobalLock for the
+ * whole dump. The system gesture listener needs that same lock, so a dump that
+ * lands on a swipe can delay touch delivery by hundreds of milliseconds, and a
+ * chain of them starves it outright (field ANR: "Input dispatching timed out,
+ * PointerEventDispatcher0 ... Waited 5000ms for MotionEvent", with the gesture
+ * thread blocked on WindowManagerGlobalLock behind a window dump).
+ *
+ * The system_server Hook already receives the vendor's front-app callback
+ * (`handleFrontAppChange`), so let it push that answer over the bridge instead
+ * of asking the window manager again. The dump stays as a fallback for builds
+ * without the Hook, and even then it backs off when the device proves that
+ * dumping is expensive. */
 #define FOREGROUND_APP_CACHE_MS 2000
+#define FOREGROUND_APP_SLOW_CACHE_MS 6000
+#define FOREGROUND_APP_SLOW_DUMP_MS 250
+#define FOREGROUND_PUSH_FRESH_MS 15000
+/* Once the Hook has proved it owns the foreground answer, the window dump is a
+ * safety net, not the source: reconcile slowly instead of every two seconds.
+ * Without this the push would only suppress polling until its freshness window
+ * expired, which is how a real device exposed the gap. */
+#define FOREGROUND_PUSH_RECONCILE_MS 60000
+
+/* Gesture navigation and the recents switcher produce a burst of foreground
+ * changes inside one animation. Re-driving the refresh ladder for each of them
+ * puts a SurfaceFlinger transaction next to every transition frame -- the
+ * "switching apps stutters" report. Wait for the foreground to hold still. */
+#define APP_CHANGE_SETTLE_MS 600
+
+static char pushed_foreground_pkg[MAX_PKG_LEN] = "";
+static long long pushed_foreground_ms = 0;
+/* Set as soon as one push arrives, so the fallback can back off to a slow
+ * reconciliation instead of the old two-second poll. */
+static int foreground_push_seen = 0;
+/* Shared with the bridge push, so a pushed answer is still the cached answer
+ * once its freshness window has passed. */
+static char foreground_cached_pkg[MAX_PKG_LEN] = "";
+static long long foreground_cached_ms = 0;
+static long long foreground_cached_ttl_ms = FOREGROUND_APP_CACHE_MS;
 
 static void get_foreground_app_uncached(char *buffer, int size);
 
+/* Called from the bridge. The caller is system_server, which is the only
+ * component that can answer "which package owns the top window" without
+ * taking the window manager lock. */
+static void note_pushed_foreground_app(const char *package_name) {
+    if (!package_name || !*package_name) return;
+    if (!valid_package_name(package_name)) return;
+    long long now_ms = monotonic_ms();
+
+    if (strcmp(pushed_foreground_pkg, package_name) == 0) {
+        pushed_foreground_ms = now_ms;
+        foreground_cached_ms = now_ms;
+        return;
+    }
+    /* Field logs must show that the push path replaced the window dump: this
+     * line is the difference between "the daemon polls the window manager" and
+     * "the Hook told it", which is the whole point of the command. */
+    log_msg("Foreground app pushed by the display hook: %s", package_name);
+    strncpy(pushed_foreground_pkg, package_name,
+            sizeof(pushed_foreground_pkg) - 1);
+    pushed_foreground_pkg[sizeof(pushed_foreground_pkg) - 1] = '\0';
+    pushed_foreground_ms = now_ms;
+    /* Publish it as the cached answer as well. The push is only sent when the
+     * foreground app changes, so without this the value would be forgotten the
+     * moment the freshness window expires and the daemon would fall back to
+     * polling the window manager for a package it already knows. */
+    strncpy(foreground_cached_pkg, package_name,
+            sizeof(foreground_cached_pkg) - 1);
+    foreground_cached_pkg[sizeof(foreground_cached_pkg) - 1] = '\0';
+    foreground_cached_ms = now_ms;
+    foreground_push_seen = 1;
+}
+
 void get_foreground_app(char *buffer, int size) {
-    static char cached_pkg[MAX_PKG_LEN] = "";
-    static long long cached_pkg_ms = 0;
     long long now_ms;
+    long long cache_ttl_ms;
 
     if (buffer == NULL || size <= 0) return;
 
     now_ms = monotonic_ms();
-    if (cached_pkg[0] != '\0' && now_ms - cached_pkg_ms < FOREGROUND_APP_CACHE_MS) {
-        strncpy(buffer, cached_pkg, size);
+    if (pushed_foreground_pkg[0] != '\0' &&
+            now_ms - pushed_foreground_ms < FOREGROUND_PUSH_FRESH_MS) {
+        strncpy(buffer, pushed_foreground_pkg, size);
         buffer[size - 1] = '\0';
         return;
     }
-    get_foreground_app_uncached(buffer, size);
-    strncpy(cached_pkg, buffer, sizeof(cached_pkg) - 1);
-    cached_pkg[sizeof(cached_pkg) - 1] = '\0';
-    cached_pkg_ms = now_ms;
+    /* While the Hook is feeding this daemon, the window dump is only a slow
+     * reconciliation: the app is already known, so there is nothing to poll
+     * for. Deviating from the pushed answer means the Hook stopped reporting,
+     * and the normal cadence has to take over again. */
+    cache_ttl_ms = foreground_push_seen ? FOREGROUND_PUSH_RECONCILE_MS
+                                        : foreground_cached_ttl_ms;
+    if (foreground_cached_pkg[0] != '\0' &&
+            now_ms - foreground_cached_ms < cache_ttl_ms) {
+        strncpy(buffer, foreground_cached_pkg, size);
+        buffer[size - 1] = '\0';
+        return;
+    }
+    {
+        long long started_ms = now_ms;
+        int differed_from_push;
+
+        get_foreground_app_uncached(buffer, size);
+        differed_from_push = foreground_push_seen &&
+                strcmp(buffer, pushed_foreground_pkg) != 0;
+        if (differed_from_push) {
+            log_msg("Foreground push went stale: pushed=%s dumped=%s; "
+                    "resuming the window query", pushed_foreground_pkg, buffer);
+            foreground_push_seen = 0;
+        }
+        /* A slow dump is a dump that is holding the window manager lock for
+         * that long. Ask for it less often on such a device instead of paying
+         * the same stall every two seconds. */
+        foreground_cached_ttl_ms = (monotonic_ms() - started_ms >=
+                FOREGROUND_APP_SLOW_DUMP_MS)
+                ? FOREGROUND_APP_SLOW_CACHE_MS : FOREGROUND_APP_CACHE_MS;
+    }
+    strncpy(foreground_cached_pkg, buffer, sizeof(foreground_cached_pkg) - 1);
+    foreground_cached_pkg[sizeof(foreground_cached_pkg) - 1] = '\0';
+    foreground_cached_ms = now_ms;
 }
 
 static void get_foreground_app_uncached(char *buffer, int size) {
@@ -5268,6 +5391,19 @@ static void handle_display_hook_client(int server_fd, const char *base_path) {
         } else {
             dprintf(client_fd, "ERR mode\n");
         }
+    } else if (strncmp(trim(request), "FRONTAPP ", 9) == 0) {
+        /* The system_server Hook already knows the foreground package from the
+         * vendor's own front-app callback, so it pushes the answer here instead
+         * of making this daemon run a window dump. A dump holds
+         * WindowManagerGlobalLock for its whole duration, and the system
+         * gesture listener needs that same lock. */
+        const char *pushed_package = trim(request) + 9;
+        if (valid_package_name(pushed_package)) {
+            note_pushed_foreground_app(pushed_package);
+            dprintf(client_fd, "OK frontapp\n");
+        } else {
+            dprintf(client_fd, "ERR frontapp\n");
+        }
     } else if (strcmp(trim(request), "VIDEOSTART VENDOR") == 0) {
 #ifndef MURONG_FREE_BUILD
         if (start_video_vendor_hold(base_path)) {
@@ -5581,6 +5717,7 @@ int main(int argc, char *argv[]) {
     }
 
     char last_pkg[MAX_PKG_LEN] = "";
+    long long app_settle_until_ms = 0;
     int last_screen_state = -1;
     long long last_policy_poll_ms = 0;
     long long last_touch_receipt_poll_ms = 0;
@@ -5651,6 +5788,11 @@ int main(int argc, char *argv[]) {
                 timeout.tv_sec = 0;
                 timeout.tv_usec = 10000;
             } else if (native_resolution_adoption.valid || rmx5200_ltpo.active) {
+                timeout.tv_sec = 0;
+                timeout.tv_usec = 100000;
+            } else if (monotonic_ms() < app_settle_until_ms) {
+                /* The foreground is still settling after a switch burst. Come
+                 * back quickly instead of sleeping a full second. */
                 timeout.tv_sec = 0;
                 timeout.tv_usec = 100000;
             } else {
@@ -5795,9 +5937,16 @@ int main(int argc, char *argv[]) {
             last_screen_state = screen_state;
         }
 
-        // 获取前台应用
+        // 获取前台应用。息屏/待机时前台策略不会生效，没有理由每两秒去 dump 一次
+        // 窗口管理器：那次 dump 会在 system_server 里一直握着
+        // WindowManagerGlobalLock，而系统手势监听线程需要的正是这把锁。
         char current_pkg[MAX_PKG_LEN] = "";
-        get_foreground_app(current_pkg, sizeof(current_pkg));
+        if (screen_state == 0 && usable_foreground_package(last_pkg)) {
+            strncpy(current_pkg, last_pkg, sizeof(current_pkg) - 1);
+            current_pkg[sizeof(current_pkg) - 1] = '\0';
+        } else {
+            get_foreground_app(current_pkg, sizeof(current_pkg));
+        }
 
         if (!usable_foreground_package(current_pkg)) {
             if (usable_foreground_package(last_pkg)) {
@@ -5819,7 +5968,13 @@ int main(int argc, char *argv[]) {
             if (strcmp(current_pkg, last_pkg) != 0) {
                  log_msg("Detected App Change / 检测到应用切换: %s", current_pkg);
                  strncpy(last_pkg, current_pkg, MAX_PKG_LEN);
+                 app_settle_until_ms = monotonic_ms() + APP_CHANGE_SETTLE_MS;
             }
+
+            /* 手势导航/最近任务会把一次切换拆成好几次前台变化。等前台稳定
+             * 下来再走刷新率阶梯：阶梯的每一步都要和 SurfaceFlinger 打交道，
+             * 正好与切换动画抢锁，用户看到的就是“切后台卡一下”。 */
+            if (monotonic_ms() < app_settle_until_ms) continue;
 
             // 总是检查是否需要切换，因为可能配置变了但应用没变
             int target_id;

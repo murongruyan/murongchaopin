@@ -95,6 +95,7 @@ final class OplusLtpsModeHooks {
             // rest on (the injected lowest tier while it is idle). The stock
             // 60Hz LTPS request is the idle marker, so redirect its final mode
             // id instead of letting the daemon set SurfaceFlinger modes.
+            // Non-blocking: the route snapshot is refreshed on the bridge worker.
             BridgeClient.LtpoRoute route = BridgeClient.ltpoRoute();
             if (route != null) {
                 Display.Mode routed = findExactMode(modes, width, height,

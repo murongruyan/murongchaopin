@@ -246,6 +246,7 @@ final class FrameworkModeResolverHooks {
             if (specs == null) {
                 return;
             }
+            // Non-blocking: the route snapshot is refreshed on the bridge worker.
             BridgeClient.LtpoRoute route = BridgeClient.ltpoRoute();
             int baseId = intField(specs, "baseModeId");
             probeIdleConfig(module, device, specs);

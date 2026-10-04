@@ -200,21 +200,36 @@ final class OplusVrrTierHooks {
         return installed;
     }
 
-        private static volatile int bridgeGlobalRate;
-    private static volatile long bridgeGlobalRateAt;
+    private static final long MODULE_RATE_TTL_MS = 5000L;
+    private static volatile int moduleRateCache;
+    private static volatile long moduleRateCachedAt;
 
-    /** The rate the daemon currently runs, straight from its own state socket. */
+    /**
+     * Rate the daemon currently runs. DisplayModeDirector calls this from
+     * setAppRequest while it holds WindowManagerGlobalLock, so it only reads
+     * the volatile snapshot and lets the bridge refresh worker do the I/O.
+     */
     private static int moduleTargetRate() {
         long now = android.os.SystemClock.elapsedRealtime();
-        if (now - bridgeGlobalRateAt < 5000L && bridgeGlobalRate > 0) {
-            return bridgeGlobalRate;
+        int cached = moduleRateCache;
+        if (cached >= 30 && now - moduleRateCachedAt < MODULE_RATE_TTL_MS) {
+            return cached;
         }
-        int value = BridgeClient.globalRate();
+        int value = bridgeModuleRateSnapshot();
         if (value >= 30) {
-            bridgeGlobalRate = value;
-            bridgeGlobalRateAt = now;
+            moduleRateCache = value;
+            moduleRateCachedAt = now;
+            return value;
         }
-        return value;
+        // Daemon unavailable or backing off: keep the last known rate, and -1
+        // when there never was one so the caller keeps its stock behaviour.
+        return cached >= 30 ? cached : -1;
+    }
+
+    /** Non-blocking bridge read; the refresh itself runs on the bridge worker. */
+    private static int bridgeModuleRateSnapshot() {
+        BridgeClient.refreshGlobalRateAsync();
+        return BridgeClient.globalRateSnapshot();
     }
     static int installEventHooks(DisplaySettingsHook module, ClassLoader loader) {
         int installed = 0;
@@ -451,6 +466,7 @@ final class OplusVrrTierHooks {
                     // when the screen is idle. That decision is the route hook --
                     // resolve the *same* request against the injected low tier so
                     // the system itself selects 1Hz, instead of a manual mode set.
+                    // Non-blocking: refreshed on the bridge worker, never here.
                     BridgeClient.LtpoRoute route = BridgeClient.ltpoRoute();
                     if (route != null
                             && Math.abs(rate - LTPS_IDLE_RATE_HZ) <= RATE_EPSILON_HZ) {

@@ -23,6 +23,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Communicates only with the root daemon bound to the device loopback address. */
 final class BridgeClient {
@@ -39,11 +40,35 @@ final class BridgeClient {
     private static final long LTPO_FAIL_TTL_MS = 2000L;
     private static final int LTPO_TIMEOUT_MS = 200;
     private static final long LTPO_HOLD_MS = 3000L;
+    /**
+     * Failure backoff shared by the background refreshers. A daemon that is
+     * unavailable or timing out must not turn every framework callback into a
+     * fresh connect() attempt.
+     */
+    static final long FAIL_BACKOFF_MS = 5000L;
+    /** How long a background-refreshed rate snapshot stays fresh. */
+    private static final long GLOBAL_RATE_TTL_MS = 5000L;
     private static final ExecutorService IO = Executors.newCachedThreadPool(runnable -> {
         Thread thread = new Thread(runnable, "MurongDisplayHookIo");
         thread.setDaemon(true);
         return thread;
     });
+    /**
+     * Single background refresher for the values the framework hooks read. Its
+     * tasks may block on the loopback socket; the hooks never wait for them and
+     * only read the volatile snapshots declared here.
+     */
+    private static final ExecutorService WORKER = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "MurongBridgeRefresh");
+        thread.setDaemon(true);
+        return thread;
+    });
+    private static final AtomicBoolean GLOBAL_RATE_REFRESH = new AtomicBoolean();
+    private static final AtomicBoolean LTPO_REFRESH = new AtomicBoolean();
+    private static volatile int cachedGlobalRate = -1;
+    private static volatile long cachedGlobalRateAt;
+    private static volatile long bridgeFailureAt;
+    private static volatile long ltpoRouteRefreshAt;
     private static final Object RATES_LOCK = new Object();
     private static final ConcurrentHashMap<String, CachedValue> READ_CACHE =
             new ConcurrentHashMap<>();
@@ -264,8 +289,79 @@ final class BridgeClient {
         return request("SETAUTO").startsWith("OK ");
     }
 
+    /**
+     * Blocking global-rate read, kept for worker or user-initiated callers.
+     * Hook callbacks that run on a framework thread must use
+     * {@link #globalRateSnapshot()} together with
+     * {@link #refreshGlobalRateAsync()} instead: those never wait for the
+     * daemon.
+     */
     static int globalRate() {
         return parseFpsResponse(request("GETGLOBAL"));
+    }
+
+    /**
+     * Last global rate a background refresh observed, or -1 while the daemon
+     * never answered. Reading it is a single volatile load, so a Hooker may
+     * call it while holding a framework lock without stalling the system.
+     */
+    static int globalRateSnapshot() {
+        return cachedGlobalRate;
+    }
+
+    /**
+     * Posts at most one background GETGLOBAL. The snapshot keeps its previous
+     * value until a new answer lands, and {@link #FAIL_BACKOFF_MS} keeps an
+     * unavailable daemon from being reconnected once per framework callback.
+     */
+    static void refreshGlobalRateAsync() {
+        long now = SystemClock.elapsedRealtime();
+        if (now - cachedGlobalRateAt < GLOBAL_RATE_TTL_MS) {
+            return;
+        }
+        if (now - bridgeFailureAt < FAIL_BACKOFF_MS) {
+            return;
+        }
+        if (!GLOBAL_RATE_REFRESH.compareAndSet(false, true)) {
+            return;
+        }
+        WORKER.execute(() -> {
+            try {
+                int value = parseFpsResponse(requestSocket("GETGLOBAL", TIMEOUT_MS));
+                long at = SystemClock.elapsedRealtime();
+                if (value >= 30) {
+                    cachedGlobalRate = value;
+                    cachedGlobalRateAt = at;
+                    bridgeFailureAt = 0L;
+                } else {
+                    bridgeFailureAt = at;
+                }
+            } finally {
+                GLOBAL_RATE_REFRESH.set(false);
+            }
+        });
+    }
+
+    /**
+     * Tells the daemon which package currently owns the foreground window.
+     *
+     * <p>The daemon used to run `dumpsys window` every two seconds just to learn
+     * this. That dump executes inside system_server and holds
+     * WindowManagerGlobalLock for its entire duration, which is the same lock the
+     * system gesture listener needs -- a swipe that lands inside the dump is
+     * delayed, and a chain of dumps starves input outright (field ANR:
+     * "Input dispatching timed out ... Waited 5000ms for MotionEvent").
+     *
+     * <p>This must only be called from a bridge worker. It hands the write to the
+     * cached IO pool and returns immediately, so even a stalled daemon cannot
+     * delay the caller, and it is never retried: the daemon keeps its previous
+     * foreground answer and its dumpsys fallback covers a missed push.
+     */
+    static void pushForegroundApp(String packageName) {
+        if (!validPackage(packageName)) {
+            return;
+        }
+        IO.execute(() -> requestSocket("FRONTAPP " + packageName, TIMEOUT_MS));
     }
 
     static ModeState globalMode() {
@@ -386,6 +482,12 @@ final class BridgeClient {
      * only needs this value to place the final mode id on the injected
      * low-rate node. Returns null when the module is not routing, so callers
      * keep their stock behaviour.
+     *
+     * <p>Never blocks. Every caller is installed on a framework path that runs
+     * under WindowManagerGlobalLock (setDesiredDisplayModeSpecsLocked,
+     * getModeId, getFinalDisplayModeIdLocked), so a stale cache only posts a
+     * refresh on the bridge worker and the last known route is served until
+     * the answer arrives ({@link #LTPO_HOLD_MS}).
      */
     static LtpoRoute ltpoRoute() {
         long now = SystemClock.elapsedRealtime();
@@ -420,40 +522,56 @@ final class BridgeClient {
                 return cached.isRouting() ? cached : null;
             }
         }
-        String response;
-        // A missing daemon must never add its timeout to a framework mode
-        // resolution, so keep the round trip short and remember the failure.
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            Future<String> future = IO.submit(
-                    () -> requestSocket("GETLTPO", LTPO_TIMEOUT_MS));
-            try {
-                response = future.get(LTPO_TIMEOUT_MS + 60L, TimeUnit.MILLISECONDS);
-            } catch (Exception timeout) {
-                future.cancel(true);
-                response = "";
-            }
-        } else {
-            response = requestSocket("GETLTPO", LTPO_TIMEOUT_MS);
-        }
-        LtpoRoute parsed = LtpoRoute.parse(response);
-        if (response == null || response.isEmpty()) {
-            // Transport hiccup: the daemon handles the bridge in the same loop
-            // that shells out to dumpsys, so a query can time out. Keeping the
-            // last published route for a short hold window stops that from
-            // flipping the panel back to the stock 60Hz pin.
-            if (cached != null && now - ltpoRouteLastGoodAt < LTPO_HOLD_MS) {
-                ltpoRouteCache = cached;
-                ltpoRouteCachedAt = now;
-                return cached.isRouting() ? cached : null;
-            }
-            ltpoRouteCache = parsed;
+        // The cached answer expired. This method is called from inside the
+        // window manager's global lock (setDesiredDisplayModeSpecsLocked,
+        // getModeId, getFinalDisplayModeIdLocked), so it must never wait for
+        // the daemon: ask the refresh worker for a new answer and keep serving
+        // the last known route until it lands.
+        refreshLtpoRouteAsync(now);
+        if (cached != null && now - ltpoRouteLastGoodAt < LTPO_HOLD_MS) {
+            ltpoRouteCache = cached;
             ltpoRouteCachedAt = now;
-            return null;
+            return cached.isRouting() ? cached : null;
         }
-        ltpoRouteCache = parsed;
-        ltpoRouteCachedAt = now;
-        ltpoRouteLastGoodAt = now;
-        return parsed.isRouting() ? parsed : null;
+        return null;
+    }
+
+    /**
+     * Posts at most one background GETLTPO. The daemon serves the bridge in
+     * the same loop that shells out to dumpsys, so a query can time out; the
+     * shared failure backoff then keeps the next framework callback from
+     * reconnecting until the daemon had a chance to recover.
+     */
+    private static void refreshLtpoRouteAsync(long now) {
+        if (now - ltpoRouteRefreshAt < LTPO_TTL_MS) {
+            return;
+        }
+        if (now - bridgeFailureAt < FAIL_BACKOFF_MS) {
+            return;
+        }
+        if (!LTPO_REFRESH.compareAndSet(false, true)) {
+            return;
+        }
+        ltpoRouteRefreshAt = now;
+        WORKER.execute(() -> {
+            try {
+                String response = requestSocket("GETLTPO", LTPO_TIMEOUT_MS);
+                long at = SystemClock.elapsedRealtime();
+                if (response == null || response.isEmpty()) {
+                    // Transport hiccup: keep the last published route and stop
+                    // reconnecting for the backoff window.
+                    bridgeFailureAt = at;
+                    return;
+                }
+                LtpoRoute parsed = LtpoRoute.parse(response);
+                ltpoRouteCache = parsed;
+                ltpoRouteCachedAt = at;
+                ltpoRouteLastGoodAt = at;
+                bridgeFailureAt = 0L;
+            } finally {
+                LTPO_REFRESH.set(false);
+            }
+        });
     }
 
     static final class LtpoRoute {

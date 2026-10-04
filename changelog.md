@@ -1,5 +1,72 @@
 # 更新日志
 
+## v2.9.42
+
+1. **修复手势导航/切后台时的输入卡死（有 ANR 证据）**：用户三（PLK110 / ColorOS 17 / 2.9.41）
+   的反馈包里，system_server 出现 `Input dispatching timed out (PointerEventDispatcher0 ...
+   Waited 5000ms for MotionEvent(action=MOVE))`。系统手势监听线程 `oplus.ui` 阻塞在
+   `DisplayPolicy$1.onSwipeFromTop`，等的是 `WindowManagerGlobalLock`；而**持有这把锁的
+   binder 线程栈里出现的是本模块 Hook APK 的代码**——栈帧 R8 标记
+   `r8-map-id-f311ff7af83126d8daacb353cb15aca5b5689cab5ed446d4cad8135349c8d63d`
+   与 `bin/display_settings_hook.apk` 的 classes.dex 字符串完全一致，映射里
+   `BridgeClient -> g`、`request(String,int) -> c`，再下一帧就是 `Socket.connect`。
+   也就是说 Hook 在框架线程（且持有窗口管理器全局锁）上同步连了一次守护进程。
+   同一份 `daemon.log` 在 05:59:38 到 05:59:52 有 14 秒空档（守护进程卡在 dumpsys），
+   这次连接只能等超时；只要它不返回，全局锁就一直被握着，触摸事件一个也收不到。
+   本版让 Hook 侧**永远不阻塞框架线程**：新增后台刷新器，Hook 回调只读 volatile 快照，
+   socket 往返全部移到后台线程，并加 5 秒失败退避（守护进程不可用时不再每次回调都重连）。
+
+2. **付费 Hook 同步修复**：付费 Hook（`display_premium_hook.apk`）与免费 Hook 是一套代码的两份副本，
+   授权设备上两个包同时注入 system_server，同样会在框架锁内同步等守护进程。本版把同样的
+   非阻塞改造移植到付费 Hook 源码并重新构建签名产物；`tests/check_hook_nonblocking_bridge.sh`
+   现在同时守住两份副本（付费源码树存在时才检查，不影响 CI 的免费仓库）。
+
+3. **守护进程不再周期性 dump 窗口管理器**：`dumpsys window` 每次都会在 system_server 内持有
+   `WindowManagerGlobalLock`，而手势监听线程要的正是这把锁。本版改由 system_server 的 Hook
+   通过新桥接命令 `FRONTAPP <pkg>` 主动推送前台应用（Hook 本来就在 `handleFrontAppChange`
+   上收到厂商回调），守护进程不再轮询；无 Hook 时保留 dump 兜底，但按实测耗时退避
+   （单次 ≥250ms 就把间隔从 2 秒拉到 6 秒），息屏/待机时完全不查。
+
+4. **刷新率阶梯的成功路径事务数减半**：每一步先请求目标档位，只有校验失败才回退到
+   “先对齐当前档位再请求”。成功路径由 2 次 SurfaceFlinger 事务降到 1 次。
+   v2.9.40 的 4 秒信任窗口在实测日志里对绝大多数阶梯的第一步仍然失效
+   （上一次请求早已超过 4 秒），所以这一步的冗余事务一直存在；现在只在校验失败时才做。
+
+5. **阶梯校验不再刷 `dumpsys SurfaceFlinger`**：校验必须读新鲜值（否则会自己确认自己），
+   所以本版收敛的是采样次数：从“每 100-150ms 一次、最多十几次”改为
+   **最多 4 次、间隔 350ms、总时长仍受 1500ms 上限**，连续 2 次一致即成功；
+   稳态缓存 400ms → 700ms。刷抖音/搜索页卡顿期间减少的正是这类与合成抢锁的 dump。
+
+6. **切换前台后先等 600ms 再做阶梯**：手势导航与最近任务会把一次切换拆成多次前台变化
+   （用户三日志 05:59:10–05:59:28 连续来回切了 4 次，每次都跑完整阶梯）。本版加 600ms
+   稳定窗口，避免在切换动画里和 SurfaceFlinger 抢锁。
+
+7. **版本号同步**：守护进程内置版本统一到 2.9.42（付费侧此前停留在 2.9.40）。
+
+### 真机验证（RMX5200 / ColorOS 17，adb 部署实测）
+
+- 部署：两个守护进程二进制与两个 Hook APK 推到模块目录，Hook 重新安装并重启；
+  system_server 侧确认加载：`Oplus services hooks installed … front=1 appRequest=1`（共 20 个 hook）。
+- **窗口管理器 dump 归零**：修复前守护进程每 2 秒执行一次 `dumpsys window`；
+  修复后"一次真实前台切换 + 40 秒空闲"期间，962 次快速采样中 **0 次** 抓到该进程，
+  日志同时出现 `Foreground app pushed by the display hook: <pkg>`。
+- **阶梯事务**：同机同日基线为 32 次切换 / 120 次 SurfaceFlinger 事务（3.75 次/切换，
+  其中 25 次是冗余的 `aligns stale policy`）；修复后 7 次切换 / 22 次事务（3.14 次/切换），
+  **冗余对齐 0 次**，每步恰好 1 次事务。
+- **校验采样有界**：日志中的验证行变为 `verified: mode=N after=…ms samples=2/3`。
+- 设备实测还抓出一个缺口并已修复：推送只在"前台变化"时到达，最初的实现只把推送当作
+  15 秒新鲜值，过期后守护进程又退回每 2 秒轮询——等于稳态失效。现在推送同时写入缓存，
+  之后最多每 60 秒做一次慢速对账；对账结果与推送不一致（Hook 停止上报）时自动恢复轮询。
+
+### 现场证据（PLK110 / ColorOS 17 / 2.9.41）
+
+- ANR：`用户反馈/用户三反馈/murong-bugpack-20261004-071752/anr/anr_5750_2026-10-04-05-59-39-673`
+- 锁持有者栈：`relayoutWindow → Session.relayout → applySurfaceChangesTransaction →
+  DisplayManagerService.setDisplayPropertiesInternal → ... → BridgeClient.request → Socket.connect`
+- 手势线程：`SystemGesturesPointerEventListener.onPointerEvent → DisplayPolicy$1.onSwipeFromTop`
+  （等待 `WindowManagerGlobalLock`）
+- 完整证据链与统计见 `docs/JANK_EVIDENCE_20261005.md`。
+
 ## v2.9.41
 
 1. **修复 Scene / 游戏助手改刷新率报「刷新率写入失败：ERR request」**：免费版刷新率服务的

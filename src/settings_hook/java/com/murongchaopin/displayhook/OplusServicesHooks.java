@@ -220,22 +220,40 @@ final class OplusServicesHooks {
         return value instanceof String ? (String) value : "";
     }
 
+    private static final long GLOBAL_RATE_TTL_MS = 5000L;
     private static volatile int globalRateCache;
     private static volatile long globalRateCachedAt;
     private static final java.util.Set<String> PREFERRED_LOGGED =
             java.util.Collections.newSetFromMap(new ConcurrentHashMap<>());
 
+    /**
+     * Rate the daemon currently applies. getPreferredFrameRate and
+     * addFRTCFrameRate are both called inside the window manager, so this only
+     * reads the volatile snapshot: the socket round trip belongs to the bridge
+     * refresh worker and a stalled daemon can no longer hold
+     * WindowManagerGlobalLock while the vendor asks for a frame-rate target.
+     */
     private static int globalRate() {
         long now = android.os.SystemClock.elapsedRealtime();
-        if (now - globalRateCachedAt < 5000L && globalRateCache > 0) {
-            return globalRateCache;
+        int cached = globalRateCache;
+        if (cached >= 30 && now - globalRateCachedAt < GLOBAL_RATE_TTL_MS) {
+            return cached;
         }
-        int value = BridgeClient.globalRate();
+        int value = bridgeRateSnapshot();
         if (value >= 30) {
             globalRateCache = value;
             globalRateCachedAt = now;
+            return value;
         }
-        return value;
+        // Daemon unavailable or backing off: keep the last known rate, and -1
+        // when there never was one so the caller keeps its stock behaviour.
+        return cached >= 30 ? cached : -1;
+    }
+
+    /** Non-blocking bridge read; the refresh itself runs on the bridge worker. */
+    private static int bridgeRateSnapshot() {
+        BridgeClient.refreshGlobalRateAsync();
+        return BridgeClient.globalRateSnapshot();
     }
 
     private static void logPreferredOverride(DisplaySettingsHook module, String packageName,
@@ -281,6 +299,11 @@ final class OplusServicesHooks {
                                                           Object packageValue) {
         String packageName = packageValue instanceof String ? (String) packageValue : "";
         try {
+            /* Push the foreground package to the daemon. This runs on the bridge
+             * worker, never on the framework thread that received the vendor
+             * callback, and it removes the daemon's two-second window dump (a dump
+             * holds WindowManagerGlobalLock for its whole duration). */
+            BridgeClient.pushForegroundApp(packageName);
             if (BridgeClient.validPackage(activePackage)
                     && !activePackage.equals(packageName)) {
                 Reflect.call(service, "setFrameRateTargetControlAsynchronous",
