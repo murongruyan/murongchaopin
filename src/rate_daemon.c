@@ -26,7 +26,7 @@
 #define MAX_APPS 200
 #define MAX_PKG_LEN 128
 #define MAX_EXTENSION_RATES 256
-#define RATE_DAEMON_VERSION "2.9.44"
+#define RATE_DAEMON_VERSION "2.9.45"
 #define BOOT_RESOLUTION_SETTLE_TIMEOUT_MS 8000
 #define BOOT_RESOLUTION_SETTLE_SAMPLE_MS 150
 #define BOOT_RESOLUTION_SETTLE_SAMPLES 4
@@ -1538,18 +1538,20 @@ static int apply_mode_transaction(int target_id, int resolution_change,
 
     sync_android_settings(target_id);
     if (resolution_change) {
-        /* Only mirror the user's own geometry. An app row that drags the
-         * panel into another group is transient, and publishing it as the
-         * global resolution preference makes the app geometry sticky and
-         * fights the user's next choice. */
-        if (!is_valid_mode(default_mode_id) ||
-                same_mode_geometry(default_mode_id, target_id)) {
-            sync_android_resolution_settings(target_id);
-        } else {
-            log_msg("Resolution settings mirror skipped: mode=%d is not the "
-                    "configured geometry (default=%d)", target_id,
-                    default_mode_id);
+        /* Mirror the geometry that is really on screen, never the requested
+         * one. ColorOS accepts a mode request yet keeps the previous
+         * resolution (boot log: "keeping configured geometry"), and the
+         * vendor density ladder is width-dependent: mirroring a requested QHD
+         * width on an FHD panel wrote the QHD density (560 instead of 420) and
+         * the whole UI rendered too large -- the field report "the DPI is
+         * wrong after opening the game assistant". */
+        int observed_mirror = get_current_system_mode();
+        int mirror_id = is_valid_mode(observed_mirror) ? observed_mirror : target_id;
+        if (mirror_id != target_id) {
+            log_msg("Resolution settings mirror follows the live geometry: "
+                    "requested=%d live=%d", target_id, mirror_id);
         }
+        sync_android_resolution_settings(mirror_id);
     }
     /* A panel mode transaction is exactly the event that clears the
      * SurfaceFlinger-side OTI pause, so re-assert it here instead of waiting

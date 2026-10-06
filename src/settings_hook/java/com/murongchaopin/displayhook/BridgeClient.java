@@ -155,6 +155,20 @@ final class BridgeClient {
         return sorted;
     }
 
+    /**
+     * Warm the daemon rate ladder. Needs no Context, so a hook-install worker
+     * can call it before the first grid is built: the panel then lists the
+     * panel's real rates instead of the vendor framework table, which on
+     * ColorOS 17 carries placeholders such as 123/150/155Hz.
+     */
+    static void primeDisplayRates() {
+        try {
+            fetchHwcRates();
+        } catch (Throwable ignored) {
+            // Bridge unavailable: displayRates() keeps the Display fallback.
+        }
+    }
+
     private static List<Integer> fetchHwcRates() {
         String response = requestSocket("LISTRATES", TIMEOUT_MS);
         ArrayList<Integer> parsed = new ArrayList<>();
