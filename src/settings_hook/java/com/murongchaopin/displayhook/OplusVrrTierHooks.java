@@ -150,7 +150,21 @@ final class OplusVrrTierHooks {
      * never the overclock rate the panel is running at.  Raise the app range to
      * the module selection when it asks for a lower high-rate ceiling.
      */
+    private static final java.util.concurrent.atomic.AtomicBoolean MODULE_RATE_PRIMED =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
     static int installAppRequestHooks(DisplaySettingsHook module, ClassLoader loader) {
+        // Install runs on an LSPosed worker before the first framework
+        // callback: one blocking GETGLOBAL here is what lets the FIRST
+        // setAppRequest of this process raise the ceiling. The async refresh
+        // cannot, because it returns before the worker's answer lands.
+        if (MODULE_RATE_PRIMED.compareAndSet(false, true)) {
+            int primed = BridgeClient.primeGlobalRate();
+            if (primed >= 30) {
+                moduleRateCache = primed;
+                moduleRateCachedAt = android.os.SystemClock.elapsedRealtime();
+            }
+        }
         int installed = 0;
         try {
             Class<?> owner = Class.forName(DISPLAY_MODE_DIRECTOR_OBSERVER, false, loader);

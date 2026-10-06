@@ -310,6 +310,29 @@ final class BridgeClient {
     }
 
     /**
+     * Seed the global-rate snapshot from the calling thread.
+     *
+     * <p>Hook install runs on an LSPosed worker before the first framework
+     * callback, so one blocking GETGLOBAL here is safe. It is also required:
+     * {@link #refreshGlobalRateAsync()} returns before its answer lands, so the
+     * first setAppRequest of a fresh process used to read -1, skip the override
+     * and leave the vendor ceiling in place (field report: the game assistant
+     * kept its stock rate after the non-blocking change).
+     */
+    static int primeGlobalRate() {
+        int value = parseFpsResponse(request("GETGLOBAL"));
+        long at = SystemClock.elapsedRealtime();
+        if (value >= 30) {
+            cachedGlobalRate = value;
+            cachedGlobalRateAt = at;
+            bridgeFailureAt = 0L;
+        } else {
+            bridgeFailureAt = at;
+        }
+        return value;
+    }
+
+    /**
      * Posts at most one background GETGLOBAL. The snapshot keeps its previous
      * value until a new answer lands, and {@link #FAIL_BACKOFF_MS} keeps an
      * unavailable daemon from being reconnected once per framework callback.

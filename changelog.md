@@ -1,5 +1,27 @@
 # 更新日志
 
+## v2.9.44
+
+1. **修复「游戏助手一开、整屏分辨率乱跳、刷新率像失效」**（用户四真机日志）。
+   - 现场：`mode.txt` 里多了一条 `com.oplus.games 1272x2772 185`（游戏助手自己），于是每次切换 App，
+     daemon 都在 **1272x2772 ↔ 1080x2354** 之间整套切换：每次都是 `SurfaceFlinger physical mode`
+     变更（~440ms）+ 4 次分辨率 `settings put` + 5 次刷新率 `settings put`，来回震荡三轮。
+   - 修复：**悬浮窗宿主（`com.oplus.games` / `com.oplus.gameassist` / `com.coloros.gamespace`）
+     不再被当作普通 App**——它在前台时保持游戏当前的模式，绝不按它自己的条目动面板。
+2. **per-app 条目的几何不再驱动整屏切换**：条目里的分辨率只是「写入那一刻」的附带值。
+   当它与当前面板几何不一致时，只应用该条目的**刷新率**，保持当前几何（日志新增
+   `App row … is … but the panel runs …; applying …Hz in the live geometry`）。
+3. **不再把临时几何回写成用户的全局分辨率偏好**：只有与用户配置的几何一致时才同步
+   `oplus_customize_screen_resolution_adjust` 等键，避免 App 的几何被「粘住」并与用户下一次选择打架。
+4. **ColorOS 17 设置页刷新率条目恢复**：该版本把 `mScreenRefreshAppCategory` 改名为
+   `mScreenRefreshRateSettingsCategory` / `mScreenRefreshRateCategory`，旧代码硬编码取字段抛
+   `NoSuchFieldException`，导致整个「设置首页」补丁被跳过。现改为候选字段探测 + 空值容忍。
+   - 真机验证（RMX5200 / ColorOS 17）：`Settings front-page rates=[…]`，不再出现该异常。
+5. **进程启动后第一次请求也能抬高刷新率上限**：新增 `BridgeClient.primeGlobalRate()`，在 Hook 安装线程
+   （LSPosed worker，不在 WindowManagerGlobalLock 内）做一次阻塞读取并写入快照，热路径仍只读 volatile。
+   此前异步快照未落地时首次 `setAppRequest` 会拿到 -1 而跳过抬高。
+6. 版本号同步 2.9.44（模块与守护进程）。
+
 ## v2.9.43
 
 1. **修复「有授权却显示未授权、重新绑定卡密报 409」的设备身份漂移**（真机 + 线上数据佐证）。

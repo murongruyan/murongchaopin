@@ -26,7 +26,7 @@
 #define MAX_APPS 200
 #define MAX_PKG_LEN 128
 #define MAX_EXTENSION_RATES 256
-#define RATE_DAEMON_VERSION "2.9.43"
+#define RATE_DAEMON_VERSION "2.9.44"
 #define BOOT_RESOLUTION_SETTLE_TIMEOUT_MS 8000
 #define BOOT_RESOLUTION_SETTLE_SAMPLE_MS 150
 #define BOOT_RESOLUTION_SETTLE_SAMPLES 4
@@ -1538,7 +1538,18 @@ static int apply_mode_transaction(int target_id, int resolution_change,
 
     sync_android_settings(target_id);
     if (resolution_change) {
-        sync_android_resolution_settings(target_id);
+        /* Only mirror the user's own geometry. An app row that drags the
+         * panel into another group is transient, and publishing it as the
+         * global resolution preference makes the app geometry sticky and
+         * fights the user's next choice. */
+        if (!is_valid_mode(default_mode_id) ||
+                same_mode_geometry(default_mode_id, target_id)) {
+            sync_android_resolution_settings(target_id);
+        } else {
+            log_msg("Resolution settings mirror skipped: mode=%d is not the "
+                    "configured geometry (default=%d)", target_id,
+                    default_mode_id);
+        }
     }
     /* A panel mode transaction is exactly the event that clears the
      * SurfaceFlinger-side OTI pause, so re-assert it here instead of waiting
@@ -2719,6 +2730,26 @@ static void rmx5200_oti_state_path(char *path, size_t size,
     if (!base_path || !*base_path)
         base_path = "/data/adb/modules/murongchaopin";
     snprintf(path, size, "%s/config/adfr_lock/%s", base_path, name);
+}
+
+/* The game assistant (and any other floating-panel host) is an overlay, not an
+ * app the user chose to display. Its own row in mode.txt is incidental: honour
+ * it and opening the panel mid-game drags the whole panel into another
+ * resolution group, which the user sees as the display resetting and the rate
+ * they picked for the game being lost. */
+static int is_overlay_host_package(const char *package_name) {
+    static const char *hosts[] = {
+        "com.oplus.games",
+        "com.oplus.gameassist",
+        "com.coloros.gamespace",
+        NULL
+    };
+    int i;
+    if (!package_name || !*package_name) return 0;
+    for (i = 0; hosts[i]; i++) {
+        if (strcmp(package_name, hosts[i]) == 0) return 1;
+    }
+    return 0;
 }
 
 static void sync_android_resolution_settings(int id) {
@@ -6032,10 +6063,37 @@ int main(int argc, char *argv[]) {
 #endif
             {
                 target_id = default_mode_id;
-                for (int i=0; i<app_config_count; i++) {
-                    if (strcmp(app_configs[i].package, current_pkg) == 0) {
-                        target_id = app_configs[i].mode_id;
-                        break;
+                if (is_overlay_host_package(current_pkg)) {
+                    /* Overlay host in front: keep whatever the game
+                     * underneath is running. */
+                    int applied_overlay = get_current_applied_mode();
+                    target_id = is_valid_mode(applied_overlay) ? applied_overlay
+                                                              : default_mode_id;
+                } else {
+                    for (int i=0; i<app_config_count; i++) {
+                        if (strcmp(app_configs[i].package, current_pkg) == 0) {
+                            target_id = app_configs[i].mode_id;
+                            break;
+                        }
+                    }
+                    /* Rows are written with whatever geometry was live when
+                     * the rate was picked, so they routinely disagree with the
+                     * group the panel now runs. Treating that as a resolution
+                     * request turns every app switch into a full mode change
+                     * plus a settings rewrite; keep the live geometry and
+                     * apply the row's rate inside it. */
+                    if (is_valid_mode(target_id) && is_valid_mode(current_mode_id) &&
+                            !same_mode_geometry(current_mode_id, target_id)) {
+                        int rate_only = mode_for_app_fps(mode_fps(target_id));
+                        if (is_valid_mode(rate_only)) {
+                            log_msg("App row %s is %dx%d but the panel runs %dx%d; "
+                                    "applying %dHz in the live geometry",
+                                    current_pkg, get_mode_width(target_id),
+                                    mode_height(target_id),
+                                    get_mode_width(current_mode_id),
+                                    mode_height(current_mode_id), mode_fps(target_id));
+                            target_id = rate_only;
+                        }
                     }
                 }
             }
