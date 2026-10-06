@@ -1492,7 +1492,10 @@ download_paid_package() {
     PACKAGE_REQUEST=$(mktemp) || { echo "Error: 无法创建下载请求"; return 1; }
     TOKEN_RESPONSE=$(mktemp) || { rm -f "$PACKAGE_REQUEST"; echo "Error: 无法创建令牌响应"; return 1; }
     DEVICE_ID=$(gate_device_id)
-    DEVICE_SN=$(gate_device_sn)
+    # sn carries a second identity candidate: the server matches any raw
+    # identity, so a binding created before ro.serialno was rewritten by a
+    # spoofing tool is still found instead of reported as not purchased.
+    DEVICE_SN=$(gate_device_sn_alt)
     [ -n "$DEVICE_SN" ] || DEVICE_SN="$DEVICE_ID"
     DEVICE_IMEI1=$(gate_device_imei1)
     DEVICE_IMEI2=$(gate_device_imei2)
@@ -1635,7 +1638,8 @@ install_latest_paid_package() {
     fi
 
     DEVICE_ID=$(gate_device_id)
-    DEVICE_SN=$(gate_device_sn)
+    # Second identity candidate, see the package download request above.
+    DEVICE_SN=$(gate_device_sn_alt)
     [ -n "$DEVICE_SN" ] || DEVICE_SN="$DEVICE_ID"
     DEVICE_IMEI1=$(gate_device_imei1)
     DEVICE_IMEI2=$(gate_device_imei2)

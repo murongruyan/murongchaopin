@@ -1,5 +1,39 @@
 # 更新日志
 
+## v2.9.43
+
+1. **修复「有授权却显示未授权、重新绑定卡密报 409」的设备身份漂移**（真机 + 线上数据佐证）。
+   - 现象：用户（PLK110 / 2.9.42）本机有未过期租约，界面却显示未授权；手动「输入卡密绑定」返回
+     「绑定状态冲突或请求已处理」。
+   - 根因：模块**每次都从系统属性重新推导设备身份**（`ro.serialno` → `ro.boot.serialno`），
+     而设备 ID 伪装类工具会把 `ro.serialno` / `ro.boot.chipecid` 改成随机串。反馈包里三个值：
+     `ro.serialno` 和 `ro.boot.chipecid` 同为 `5inKbvQAalccHUj`，硬件序列号
+     `ro.boot.serialno` / `ro.vendor.oplus.radio.serialno` / `vendor.oplus.caihong.serialno`
+     都是 `3B16590023L00000`（且与更早的 LSPosed props 快照对比，chipecid 原本是正常十六进制值）。
+     身份一变，本地租约被判成「绑定到另一台设备」→ 未授权；服务端已有 active 绑定又对不上 → 409。
+     逐字节验证：绑定时的身份哈希 `sha256("3b16590023l00000")` = 租约里的 `device_id_hash` ✓。
+   - 修复：
+     - **身份钉住**：`config/auth/device_id.txt`（注释本来就写着 OTA-stable）一旦写入即**只读复用**，
+       只有文件缺失/损坏时才重新推导；以前它是每次调用都被覆盖，等于没缓存。
+     - **多候选校验**：租约 claim 命中「钉住值 / 硬件序列号 / 各属性候选」中**任意一个**即视为本机，
+       已经漂移过的存量用户无需重新绑定即可恢复。
+     - **新身份改以 `ro.boot.serialno` 优先**（引导器序列号，只改 `ro.serialno` 的伪装工具动不了），
+       sysfs SoC 序列号与其余属性作为候选；保持与 App、服务端既有身份一致。
+     - **漂移留痕**：身份不一致时写 `runtime/device_identity.log`（同一对只记一次），
+       `device_info` 增加 `identity_candidates` / `identity_hashes` / `lease_claim_matches_this_device`，
+       客服一眼可见。
+     - 服务端查询（权益与付费包）带上第二身份候选（`sn`），使「绑定早于属性变化」的记录仍能被匹配。
+   - 线上处置：受影响用户（user 2074 / license 86 / 卡密尾号 KD3F）已在管理端解绑并按当前身份
+     重新绑定（binding 89，`device_id_hash=39671000058c8cdd…`，模块算出的值与之逐字节一致）。
+2. 版本号同步 2.9.43。
+
+### 真机验证（RMX5200 / ColorOS 17，临时目录模拟「身份已被伪装工具改过」）
+
+- 钉住生效：身份返回 `5inKbvQAalccHUj`（伪装值），派生值 `3B15AQ00DHW00000`（硬件序列号）；
+- 候选集合：`5inKbvQAalccHUj` / `3B15AQ00DHW00000`，哈希集合 = 两者的 sha256（与模块自身口径一致）；
+- 三种 claim 判定：硬件序列号 claim → 接受 ✓、钉住值 claim → 接受 ✓、无关哈希 → 拒绝 ✓；
+- 漂移日志写入 `pinned=5inKbvQAalccHUj derived=3B15AQ00DHW00000` ✓。
+
 ## v2.9.42
 
 1. **修复手势导航/切后台时的输入卡死（有 ANR 证据）**：用户三（PLK110 / ColorOS 17 / 2.9.41）

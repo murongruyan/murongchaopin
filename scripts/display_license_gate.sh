@@ -253,23 +253,143 @@ gate_usb_prop() {
     printf '%s' "$_id" | tr -d '[:space:]'
 }
 
+# An identity value that is usable: never empty, never a placeholder.
+gate_identity_usable() {
+    case "${1:-}" in
+        ''|unknown|Unknown|UNKNOWN|null|NULL|0|0x00000000|00000000) return 1 ;;
+    esac
+    return 0
+}
+
+# Primary source for a NEW identity: the kernel's SoC serial, not a property.
+#
+# Field evidence (PLK110 feedback pack, 2026-10-06): a device-ID spoofing tool
+# had rewritten ro.serialno and ro.boot.chipecid to 5inKbvQAalccHUj, while
+# ro.boot.serialno, ro.vendor.oplus.radio.serialno, vendor.oplus.caihong.serialno
+# and /sys/devices/soc0/serial_number still held the hardware serial
+# 3B16590023L00000. Preferring sysfs and the bootloader serial keeps new
+# bindings on the value such tools do not touch.
+gate_board_id() {
+    # ro.boot.serialno first: it is the bootloader serial, so tools that only
+    # rewrite ro.serialno (the common spoofing case) cannot move it, and it
+    # stays identical to what the rest of the ecosystem already uses. The SoC
+    # sysfs serial comes next: it is the hardest to forge but nobody else uses
+    # it, so binding on it would put new devices on an identity the app and the
+    # existing rows do not share.
+    for _p in ro.boot.serialno ro.serialno ro.vendor.oplus.radio.serialno vendor.oplus.caihong.serialno; do
+        _v=$(getprop "$_p" 2>/dev/null | tr -d '\000\t ')
+        gate_identity_usable "$_v" && { printf '%s\n' "$_v"; return 0; }
+    done
+    for _f in /sys/devices/soc0/serial_number /sys/devices/system/soc/soc0/serial_number; do
+        [ -r "$_f" ] || continue
+        _v=$(sed -n '1{s/\r$//;p;q;}' "$_f" 2>/dev/null | tr -d '\000\t ')
+        gate_identity_usable "$_v" && { printf '%s\n' "$_v"; return 0; }
+    done
+    if [ -r /proc/cpuinfo ]; then
+        _v=$(grep -i '^Serial' /proc/cpuinfo 2>/dev/null | head -n 1 | sed 's/^[Ss]erial[[:space:]]*:[[:space:]]*//' | tr -d '[:space:]')
+        gate_identity_usable "$_v" && { printf '%s\n' "$_v"; return 0; }
+    fi
+    return 0
+}
+
+# Every identity this device can legitimately present, de-duplicated. A lease
+# claim is accepted when it matches ANY of them: a device that bound before a
+# property changed keeps working instead of being told the lease belongs to
+# another device.
+GATE_CANDIDATE_SEEN=""
+gate_candidate_emit() {
+    gate_identity_usable "${1:-}" || return 0
+    case " $GATE_CANDIDATE_SEEN " in
+        *" $1 "*) return 0 ;;
+    esac
+    GATE_CANDIDATE_SEEN="$GATE_CANDIDATE_SEEN $1"
+    printf '%s\n' "$1"
+}
+
+gate_device_candidates() {
+    GATE_CANDIDATE_SEEN=""
+    gate_candidate_emit "$(gate_device_id)"
+    gate_candidate_emit "$(gate_board_id)"
+    for _p in ro.boot.serialno ro.serialno ro.vendor.oplus.radio.serialno vendor.oplus.caihong.serialno; do
+        gate_candidate_emit "$(getprop "$_p" 2>/dev/null | tr -d '[:space:]')"
+    done
+    gate_candidate_emit "$(gate_device_imei1)"
+    gate_candidate_emit "$(gate_device_imei2)"
+}
+
+# sha256 (lowercase) of every candidate, one per line.
+gate_device_hash_set() {
+    # Must hash exactly like gate_device_id_hash: no trailing newline. A
+    # newline here would produce a set whose entries never match the claim the
+    # server signed, and every lease would look foreign.
+    gate_device_candidates | while IFS= read -r _cand; do
+        _lower=$(printf '%s' "$_cand" | tr '[:upper:]' '[:lower:]')
+        if command -v sha256sum >/dev/null 2>&1; then
+            printf '%s' "$_lower" | sha256sum 2>/dev/null | awk 'NR == 1 { print $1 }'
+        elif [ -x "$GATE_MOD_PATH/bin/openssl" ]; then
+            printf '%s' "$_lower" | "$GATE_MOD_PATH/bin/openssl" dgst -sha256 2>/dev/null | awk '{ print tolower($NF) }'
+        fi
+    done
+}
+
+gate_device_hash_matches() {
+    [ -n "${1:-}" ] || return 1
+    for _h in $(gate_device_hash_set); do
+        [ "$_h" = "$1" ] && return 0
+    done
+    return 1
+}
+
+# The primary identity stays authoritative, but a mismatch between the pinned
+# value and what the properties now report is recorded once per distinct pair,
+# so support can see what a spoofing tool changed.
+gate_device_log_drift() {
+    _pinned=$(sed -n '1{s/\r$//;p;q;}' "$GATE_DEVICE_FILE" 2>/dev/null | tr -d '[:space:]')
+    _derived=$(gate_board_id)
+    [ -n "$_pinned" ] && [ -n "$_derived" ] || return 0
+    [ "$_pinned" = "$_derived" ] && return 0
+    _drift_log="$GATE_MOD_PATH/runtime/device_identity.log"
+    mkdir -p "$GATE_MOD_PATH/runtime" 2>/dev/null
+    if [ -f "$_drift_log" ]; then
+        case "$(tail -n 1 "$_drift_log" 2>/dev/null)" in
+            *"pinned=$_pinned derived=$_derived"*) return 0 ;;
+        esac
+    fi
+    printf '%s pinned=%s derived=%s\n' "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" \
+        "$_pinned" "$_derived" >> "$_drift_log" 2>/dev/null
+    chmod 600 "$_drift_log" 2>/dev/null
+    return 0
+}
+
 # Keep the display authorization identity compatible with the normal card-key
 # client: device_id and sn are the same stable hardware identifier, while
 # imei1/imei2 are additional fields shown to the administrator.
 gate_device_sn() {
-    _sn=""
-    for _p in ro.serialno ro.boot.serialno; do
-        _v=$(getprop "$_p" 2>/dev/null)
-        case "$_v" in ''|unknown|Unknown|UNKNOWN|null|0|0x00000000) ;; *) _sn="$_v"; break ;; esac
-    done
-    if [ -z "$_sn" ] && [ -r /sys/devices/soc0/serial_number ]; then
-        _v=$(sed -n '1{s/\r$//;p;q;}' /sys/devices/soc0/serial_number 2>/dev/null)
-        case "$_v" in ''|unknown|Unknown|UNKNOWN|null|0|0x00000000) ;; *) _sn="$_v" ;; esac
-    fi
-    if [ -z "$_sn" ] && [ -r /proc/cpuinfo ]; then
-        _sn=$(grep -i '^Serial' /proc/cpuinfo 2>/dev/null | head -n 1 | sed 's/^[Ss]erial[[:space:]]*:[[:space:]]*//' | tr -d '[:space:]')
-    fi
+    # Same pinned identity as device_id: sn is stored server-side as a second
+    # raw identity, so it must not drift either.
+    _pinned=$(sed -n '1{s/\r$//;p;q;}' "$GATE_DEVICE_FILE" 2>/dev/null | tr -d '[:space:]')
+    gate_identity_usable "$_pinned" && { printf '%s\n' "$_pinned"; return 0; }
+    _sn=$(gate_board_id)
     printf '%s\n' "$_sn" | tr -d '[:space:]'
+}
+
+# A second identity candidate for server lookups (entitlement, package query).
+# The API matches any raw identity, so a device whose primary identity drifted
+# still finds the binding it created with the older value.
+gate_device_sn_alt() {
+    _primary=$(gate_device_sn)
+    for _cand in "$(gate_board_id)" \
+            "$(getprop ro.boot.serialno 2>/dev/null)" \
+            "$(getprop ro.serialno 2>/dev/null)" \
+            "$(getprop ro.vendor.oplus.radio.serialno 2>/dev/null)" \
+            "$(getprop vendor.oplus.caihong.serialno 2>/dev/null)"; do
+        _cand=$(printf '%s' "$_cand" | tr -d '[:space:]')
+        gate_identity_usable "$_cand" || continue
+        [ "$_cand" = "$_primary" ] && continue
+        printf '%s\n' "$_cand"
+        return 0
+    done
+    printf '%s\n' "$_primary"
 }
 
 gate_device_imei_values() {
@@ -293,7 +413,21 @@ gate_device_imei2() {
 
 gate_device_id() {
     gate_init
-    GATE_DEVICE_ID=$(gate_usb_prop)
+    # The pinned identity wins. device_id.txt is documented as the OTA-stable
+    # cache, and that is exactly what a bound device needs: re-deriving it from
+    # properties is what let a spoofing tool's ro.serialno change invalidate the
+    # lease and turn a legitimate re-bind into a 409 state conflict.
+    if [ -s "$GATE_DEVICE_FILE" ]; then
+        _pinned=$(sed -n '1{s/\r$//;p;q;}' "$GATE_DEVICE_FILE" 2>/dev/null | tr -d '\000\t ')
+        if gate_identity_usable "$_pinned"; then
+            GATE_DEVICE_ID="$_pinned"
+            gate_device_log_drift
+            printf '%s\n' "$GATE_DEVICE_ID"
+            return 0
+        fi
+    fi
+    GATE_DEVICE_ID=$(gate_board_id)
+    [ -n "$GATE_DEVICE_ID" ] || GATE_DEVICE_ID=$(gate_usb_prop)
     if [ -n "$GATE_DEVICE_ID" ]; then
         _tmp="$GATE_DEVICE_FILE.tmp.$$"
         printf '%s\n' "$GATE_DEVICE_ID" > "$_tmp" 2>/dev/null && \
@@ -388,9 +522,12 @@ gate_lease_verify() {
     [ "$_claim_keyid" = "$_keyid" ] || {
         rm -rf "$_work"; GATE_LEASE_MODE="invalid"; GATE_LEASE_REASON="claim key_id mismatch"; return 1
     }
-    [ "$_claim_device" = "$_devhash" ] || {
+    # Accept any identity this device can legitimately present. A device that
+    # bound before a property changed (spoofing tool, OTA, repair) must not be
+    # told its own lease belongs to another device.
+    if ! gate_device_hash_matches "$_claim_device"; then
         rm -rf "$_work"; GATE_LEASE_MODE="invalid"; GATE_LEASE_REASON="lease is bound to another device"; return 1
-    }
+    fi
     [ ${#_nonce} -ge 16 ] 2>/dev/null || {
         rm -rf "$_work"; GATE_LEASE_MODE="invalid"; GATE_LEASE_REASON="lease nonce is missing"; return 1
     }
@@ -594,8 +731,27 @@ gate_device_info_print() {
     _imei1=$(gate_device_imei1)
     _imei2=$(gate_device_imei2)
     _hash=$(gate_device_id_hash)
+    # sn carries the second candidate so the server can still match a binding
+    # that was created before a property changed; the primary stays in
+    # sn_primary/device_id for support and for the local hash.
+    _sn_alt=$(gate_device_sn_alt)
+    [ -n "$_sn_alt" ] || _sn_alt="$_sn"
+    _cands=$(gate_device_candidates | tr '\n' ',' | sed 's/,$//')
+    _cand_hashes=$(gate_device_hash_set | tr '\n' ',' | sed 's/,$//')
+    _claim=""
+    [ -s "$GATE_LEASE_FILE" ] && _claim=$(gate_json_field "$GATE_LEASE_FILE" device_id_hash)
+    _claim_match="none"
+    if [ -n "$_claim" ]; then
+        if gate_device_hash_matches "$_claim"; then _claim_match="yes"; else _claim_match="no"; fi
+    fi
     echo "device_id=${_device_id:-}"
-    echo "sn=${_sn:-}"
+    echo "sn=${_sn_alt:-}"
+    echo "sn_primary=${_sn:-}"
+    echo "device_id_pinned=$([ -s "$GATE_DEVICE_FILE" ] && echo yes || echo no)"
+    echo "identity_candidates=${_cands:-}"
+    echo "identity_hashes=${_cand_hashes:-}"
+    echo "lease_claim_device_id_hash=${_claim:-}"
+    echo "lease_claim_matches_this_device=${_claim_match}"
     echo "imei1=${_imei1:-}"
     echo "imei2=${_imei2:-}"
     echo "device_id_hash=${_hash:-}"
@@ -707,7 +863,10 @@ gate_lease_save() {
     }
     _claim_device=$(gate_json_field "$_tmpdir/payload" device_id_hash)
     _devhash=$(gate_device_id_hash)
-    [ -n "$_devhash" ] && [ "$_claim_device" = "$_devhash" ] || {
+    [ -n "$_devhash" ] || {
+        rm -rf "$_tmpdir"; echo "Error: device id could not be resolved"; return 1
+    }
+    gate_device_hash_matches "$_claim_device" || {
         rm -rf "$_tmpdir"; echo "Error: lease is bound to another device"; return 1
     }
     mv -f "$_tmpdir/lease.json" "$GATE_LEASE_FILE" || {
