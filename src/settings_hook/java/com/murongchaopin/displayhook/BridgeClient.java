@@ -85,6 +85,18 @@ final class BridgeClient {
     static List<Integer> displayRates(Context context) {
         List<Integer> base = baseRates(context);
         List<Integer> hwc = hwcRatesCache;
+        /* The daemon list is the panel's real ladder. The framework list on
+         * ColorOS is a vendor table: it carries placeholders (123/150/155Hz on
+         * RMX5200/PLK110) and stops below the module's top rates, so a card
+         * built from it offers the wrong choices -- the field report "the game
+         * assistant refresh rate does not work". Serve the daemon list even
+         * past its TTL (a stale ladder beats a wrong one) and refresh behind. */
+        if (hwc != null && !hwc.isEmpty()) {
+            if (SystemClock.elapsedRealtime() - hwcRatesCachedAt >= RATES_TTL_MS) {
+                warmRatesAsync();
+            }
+            return hwc;
+        }
         if (hwc != null && SystemClock.elapsedRealtime() - hwcRatesCachedAt
                 < RATES_TTL_MS) {
             return mergeRates(base, hwc);
