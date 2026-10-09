@@ -1,5 +1,31 @@
 # 更新日志
 
+## v2.9.46
+
+1. **修复 RMX5200 在 2K 下切刷新率时整屏闪烁（面板在两个分辨率组之间来回跳）**。
+   - 现场：ColorOS 17（2026-10-05 OTA，SF sha256 `c3b8273f…`）上厂商 SurfaceFlinger 的
+     `OplusRefreshRateDirector` 把 `<prefix>-animation` 投票按一张残留的 AP-scale 映射表解析到
+     `1080x2352`（mode 10/11），而 `DisplayModeSpecs.allowGroupSwitching=true` 让它真的去切分辨率组。
+     实测 2K 切 120→165：面板 1 秒内物理切换 11 次，其中 **9 次跨组**，并伴随 9 次显示断连重连、
+     9 次 `DisplayTopology` 变更、10 次 WindowManager CHANGE transition；密度仍是 560，
+     所以跨组瞬间整机 UI 缩放跳变（反馈里的"DPI 变了"）。1080p 下同一张表指向的就是 FHD 档，因此不闪。
+   - 模块自带的 SF 投票过滤补丁本该挡住它，但这台机器上始终是 `rejected:source_contract_12`：
+     `select_build_sites()` 无条件相信上一次记录的 `legacy` 契约，而 `record_contract()` 每次都把
+     `contract-source` 改写成**当前**哈希——"旧 OTA 的 legacy 判决"被绑到新二进制上，152 字节块校验
+     永远失败，按签名重定位的逻辑永远走不到。
+   - 修复三处：① 站点表加入本 OTA 的两个站点（`0x301da0` 的 `std::string::insert` → NOP、
+     `0x37bc24` 的 AP-scale 分支 → 无条件跳转）；② `legacy` 记录先重新校验字节，不符则回落到
+     签名重定位；③ `detect_dynamic_sites()` 不再硬依赖 `xxd`（`od -An -v -tx1` 兜底）。
+   - 真机验证：修复后同样的 2K 120→165 只剩 3–5 次**同组**切换（144/155/165），
+     **跨组 0、断连 0、Topology 0、CHANGE transition 0**；日志里 `window-animation` 投票与
+     `id=10/11` 映射完全消失。分辨率切换不受影响（2K↔1080p 各 1 次正常重连，密度 560↔420 跟随）。
+2. **诊断包新增卡顿/走帧证据**：`collect_bugpack.sh` 现在收集 SF 漏帧计数、`dumpsys gfxinfo <前台包>`
+   （Janky frames 与百分位）与 framestats、`SurfaceFlinger --latency`，输出到 `display/frame_pacing.txt`
+   和 `display/jank_probe.txt`。此前"浏览某 App 偶尔小卡顿"这类反馈无法判定——包里只有 3~4 秒 logcat，
+   没有任何帧数据。
+3. 测试同步更新：新增"陈旧 legacy 记录 + 签名重定位"回归用例、新 OTA 站点断言、平台门限固定为 16
+   （避免在 ColorOS 17 真机上误判）、真机 SF 偏移可用环境变量覆盖。
+
 ## v2.9.45
 
 1. **游戏助手刷新率卡片全面修复**（真机 + 反编译定位，不再靠猜混淆字段名）。

@@ -71,6 +71,44 @@ echo "==> recent logcat"
 logcat -d -v threadtime -t 4000 > "$WORK/logcat_main.txt" 2>/dev/null || true
 logcat -d -b events -v threadtime -t 2000 > "$WORK/logcat_events.txt" 2>/dev/null || true
 
+echo "==> frame pacing / jank evidence"
+mkdir -p "$WORK/display"
+{
+  echo "--- SurfaceFlinger missed frames ---"
+  dumpsys SurfaceFlinger 2>/dev/null |
+    grep -E "Total missed frame count|HWC missed frame count|GPU missed frame count" |
+    head -n 6
+  echo "--- display mode / policy ---"
+  dumpsys SurfaceFlinger 2>/dev/null | grep -m1 "activeMode="
+  dumpsys display 2>/dev/null | grep -m1 "mDisplayModeSpecs"
+  echo "--- refresh rate settings ---"
+  echo "peak_refresh_rate=$(settings get system peak_refresh_rate 2>/dev/null)"
+  echo "min_refresh_rate=$(settings get system min_refresh_rate 2>/dev/null)"
+  echo "user_refresh_rate=$(settings get system user_refresh_rate 2>/dev/null)"
+} > "$WORK/display/frame_pacing.txt" 2>/dev/null
+
+# Per-app frame stats.  A "jank while scrolling app X" report cannot be judged
+# from logcat alone: Android keeps the janky-frame counters and the per-frame
+# timestamps only in gfxinfo, and the pack has to name the app the user was in.
+FOCUS_PKG=$(dumpsys window 2>/dev/null |
+  sed -n 's/.*mCurrentFocus=.* \([A-Za-z0-9_.]*\)\/.*/\1/p' | head -n 1)
+[ -n "$FOCUS_PKG" ] || FOCUS_PKG=$(dumpsys activity activities 2>/dev/null |
+  sed -n 's/.*mResumedActivity.* \([A-Za-z0-9_.]*\)\/.*/\1/p' | head -n 1)
+{
+  echo "focus_package=$FOCUS_PKG"
+  if [ -n "$FOCUS_PKG" ]; then
+    echo "--- $FOCUS_PKG gfxinfo summary ---"
+    dumpsys gfxinfo "$FOCUS_PKG" 2>/dev/null |
+      sed -n '/Total frames rendered/,/99th percentile/p' | head -n 24
+    echo "--- $FOCUS_PKG framestats (most recent frames) ---"
+    dumpsys gfxinfo "$FOCUS_PKG" framestats 2>/dev/null |
+      sed -n '/---PROFILEDATA---/,/---PROFILEDATA---/p' | tail -n 130
+  fi
+  echo "--- SurfaceFlinger --latency ---"
+  dumpsys SurfaceFlinger --latency 2>/dev/null | head -n 130
+} > "$WORK/display/jank_probe.txt" 2>/dev/null
+
+
 echo "==> module runtime"
 mkdir -p "$WORK/module"
 for f in daemon.log config/adfr_lock.log config/adfr_lock_state.txt          config/mode.txt config/rmx5200_display_policy.txt          config/rmx5200_adfr_mode.txt config/rmx5200_ltpo_daily_idle.txt          config/rmx5200_aod_duration.txt config/game_assistant_apps.txt          config/game_assistant_features.txt config/display_backend.txt          config/display_mode_backend.txt; do

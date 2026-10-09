@@ -9,7 +9,12 @@ POST_FS="$ROOT/post-fs-data.sh"
 SERVICE="$ROOT/service.sh"
 UNINSTALL="$ROOT/uninstall.sh"
 TMPDIR_TEST=$(mktemp -d)
-trap 'rm -rf "$TMPDIR_TEST"' EXIT HUP INT TERM
+STALE_STATE="$ROOT/config/surfaceflinger_ltps_vote_patch"
+# bin/surfaceflinger.rmx5200.stock-ltps-vote is the helper's PATCHED_FILE, so a
+# stub written there exercises the runtime selector path instead of the
+# arbitrary-file shortcut.
+STALE_SOURCE="$ROOT/bin/surfaceflinger.rmx5200.stock-ltps-vote"
+trap 'rm -rf "$TMPDIR_TEST"; rm -f "$STALE_SOURCE"' EXIT HUP INT TERM
 
 MODEL=RMX5200
 POLICY=stock_ltps
@@ -107,7 +112,10 @@ else
 fi
 # 纯自制 LTPO（未打开"禁用日常 LTPO"）在 ColorOS 17 上同样走这层过滤：
 # 静止投票由框架 hook 定向到注入的最低档，必须先挡住厂商 AP-scale 顶档。
-if sh "$HELPER" test-patch "$MODEL" custom_ltpo "$SOURCE" \
+# The platform gate is pinned to 16 here: the assertion is about the gate, not
+# about the device the suite happens to run on (ColorOS 17 devices otherwise
+# satisfy the >= 17 arm and the check would "fail" on a correct helper).
+if ANDROID_RELEASE_MAJOR_OVERRIDE=16 sh "$HELPER" test-patch "$MODEL" custom_ltpo "$SOURCE" \
         "$TMPDIR_TEST/custom_ltpo_plain_16.bin" 2>/dev/null; then
     echo 'FAIL: pure custom_ltpo was accepted without a ColorOS 17 platform' >&2
     exit 1
@@ -238,7 +246,57 @@ fi
     exit 1
 }
 
+# The pinned site table also carries the RMX5200 ColorOS 17 2026-10-05 OTA
+# (sha256 c3b8273f...), whose two companion sites sit at 3153312 / 3652644.
 grep -q '^4b9a0ca743aabe6cada245f5e9b789cdd5a3d345c5bf37168b353d7f38b88e03:3152928:addbfb97:3651804:41020054' "$HELPER"
+grep -q '^ c3b8273f211536783ba48229e4ea70314b0c979e3774ea3a2f5fc80b3836e2a9:3153312:06f00c94:3652644:41020054' "$HELPER"
+
+# A recorded "legacy" verdict must not outlive the bytes it described.  An OTA
+# that replaces SurfaceFlinger leaves contract=legacy while record_contract()
+# rewrites contract-source to the NEW hash, and trusting that record kept the
+# 152-byte block check failing forever: the vote filter never got to relocate
+# itself by signature.  That is exactly how this device ended up as
+# rejected:source_contract_12 on a build whose two sites were still there.
+# The runtime selector has to re-verify the block and fall through to
+# detect_dynamic_sites().
+mkdir -p "$ROOT/bin" "$STALE_STATE"
+cp "$STALE_STATE/contract" "$TMPDIR_TEST/contract.bak" 2>/dev/null || true
+cp "$STALE_STATE/contract-source" "$TMPDIR_TEST/contract-source.bak" 2>/dev/null || true
+cp "$STALE_STATE/dynamic-site-entry" "$TMPDIR_TEST/dynamic-site-entry.bak" 2>/dev/null || true
+dd if=/dev/zero of="$STALE_SOURCE" bs=1 count=0 seek="$SITES_SIZE" >/dev/null 2>&1
+# animation anchor d70e45f8080140f9e9cd8d52, then the second bl-shaped word
+write_bytes "$STALE_SOURCE" 1000 '\0327\0016\0105\0370\0010\0001\0100\0371\0351\0315\0215\0122'
+write_bytes "$STALE_SOURCE" 1012 '\0021\0042\0063\0224'
+write_bytes "$STALE_SOURCE" 1016 '\0006\0360\0014\0224'
+# AP-scale anchor 682240f908d156f9088945391f050071, branch word at +16
+write_bytes "$STALE_SOURCE" 2000 '\0150\0042\0100\0371\0010\0321\0126\0371\0010\0211\0105\0071\0037\0005\0000\0161'
+write_bytes "$STALE_SOURCE" 2016 '\0101\0002\0000\0124'
+printf 'legacy\n' > "$STALE_STATE/contract"
+sha256sum "$STALE_SOURCE" | awk '{ print $1 }' > "$STALE_STATE/contract-source"
+STALE_OUTPUT="$TMPDIR_TEST/stale-dynamic.bin"
+sh "$HELPER" test-patch "$MODEL" "$POLICY" "$STALE_SOURCE" "$STALE_OUTPUT"
+[ "$(od -An -tx1 -j 1016 -N 4 "$STALE_OUTPUT" | tr -d '[:space:]')" = 1f2003d5 ] || {
+    echo 'FAIL: stale legacy record blocked the animation site' >&2
+    exit 1
+}
+[ "$(od -An -tx1 -j 2016 -N 4 "$STALE_OUTPUT" | tr -d '[:space:]')" = 12000014 ] || {
+    echo 'FAIL: stale legacy record blocked the AP-scale site' >&2
+    exit 1
+}
+[ "$(sed -n '1p' "$STALE_STATE/contract")" = table ] || {
+    echo 'FAIL: signature relocation did not record the table contract' >&2
+    exit 1
+}
+rm -f "$STALE_SOURCE" "$STALE_STATE/dynamic-site-entry"
+if [ -f "$TMPDIR_TEST/contract.bak" ]; then
+    cp "$TMPDIR_TEST/contract.bak" "$STALE_STATE/contract"
+fi
+if [ -f "$TMPDIR_TEST/contract-source.bak" ]; then
+    cp "$TMPDIR_TEST/contract-source.bak" "$STALE_STATE/contract-source"
+fi
+if [ -f "$TMPDIR_TEST/dynamic-site-entry.bak" ]; then
+    cp "$TMPDIR_TEST/dynamic-site-entry.bak" "$STALE_STATE/dynamic-site-entry"
+fi
 
 # Optional: feed a real installed SurfaceFlinger through the selector when one
 # is supplied.  The current ColorOS 17 OTA has moved both sites again, and its
@@ -246,8 +304,11 @@ grep -q '^4b9a0ca743aabe6cada245f5e9b789cdd5a3d345c5bf37168b353d7f38b88e03:31529
 # invocation mutates an unrelated byte, so the unknown-hash path must locate
 # the same two instructions from their surrounding code.
 if [ -n "${MURONG_RMX5200_SF:-}" ] && [ -r "$MURONG_RMX5200_SF" ]; then
-    CURRENT_ANIMATION_OFFSET=3152940
-    CURRENT_AP_SCALE_OFFSET=3652276
+    # Defaults describe the OTA whose sites are already in BUILD_SITE_TABLE.
+    # Other builds pass theirs, e.g. the RMX5200 ColorOS 17 2026-10-05 OTA
+    # (sha256 c3b8273f...) with 3153312 / 3652644.
+    CURRENT_ANIMATION_OFFSET=${MURONG_RMX5200_SF_ANIMATION_OFFSET:-3152940}
+    CURRENT_AP_SCALE_OFFSET=${MURONG_RMX5200_SF_AP_SCALE_OFFSET:-3652276}
     sh "$HELPER" test-patch "$MODEL" "$POLICY" "$MURONG_RMX5200_SF" \
         "$TMPDIR_TEST/real-sf.bin"
     [ "$(od -An -tx1 -j "$CURRENT_ANIMATION_OFFSET" -N 4 "$TMPDIR_TEST/real-sf.bin" | tr -d '[:space:]')" = 1f2003d5 ]

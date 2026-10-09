@@ -100,9 +100,24 @@ AP_SCALE_PATCHED_HEX=18000014
 #                 cmp w8,#1; b.ne 0x37b924        (orig 41020054 -> 12000014)
 #
 # Forcing the branch keeps the requested mode and never consults the table.
+# RMX5200 ColorOS 17 (Android 17, build 2026-10-05, sha256 c3b8273f...) carries
+# the same two instructions at new offsets: the "-animation" insert is at 0x301da0 and
+# the AP-scale guard at 0x37bc24.  Both were located from the signatures above and
+# confirmed by disassembly -- 0x301da0 is the std::string::insert that turns the
+# request name into "<prefix>-animation" (the literal is staged inline, 8 bytes at
+# sp+9 plus "on" at sp+0x11), and 0x37bc24 is the "cmp w8, #1; b.ne" that guards
+# the stale pairing-table rewrite.  Pinning the hash only shortens the lookup; the
+# exact bytes are still verified before anything is written.
+#
+# The setIdleModeExternal type guard is deliberately not described for this OTA:
+# the helper only needs it for the pure-custom-LTPO idle tier, and a site table
+# without it rewrites just the two companion sites (the second entry works the
+# same way).  Nothing regresses by leaving it out -- this build rejected the
+# patch entirely before, so the idle tier had the guard in place anyway.
 BUILD_SITE_TABLE="\
 4b9a0ca743aabe6cada245f5e9b789cdd5a3d345c5bf37168b353d7f38b88e03:3152928:addbfb97:3651804:41020054:4388892:81020054\
- 965929dcface4123f83cdabdffe4c161a3a6c2c3b9fa0cf756c7a6424e5d170b:3152940:53f00c94:3652276:41020054"
+ 965929dcface4123f83cdabdffe4c161a3a6c2c3b9fa0cf756c7a6424e5d170b:3152940:53f00c94:3652276:41020054\
+ c3b8273f211536783ba48229e4ea70314b0c979e3774ea3a2f5fc80b3836e2a9:3153312:06f00c94:3652644:41020054"
 
 ANIMATION_PATCHED_HEX=1f2003d5
 TABLE_AP_SCALE_PATCHED_HEX=12000014
@@ -235,13 +250,17 @@ detect_dynamic_sites()
 {
     file=$1
     [ -r "$file" ] || return 1
-    command -v xxd >/dev/null 2>&1 || return 1
 
     DYNAMIC_HEX_FILE="$STATE_DIR/.surfaceflinger.hex.$$"
     rm -f "$DYNAMIC_HEX_FILE" 2>/dev/null || true
-    if ! xxd -p -c 0 "$file" 2>/dev/null | tr -d '\n' > "$DYNAMIC_HEX_FILE"; then
-        rm -f "$DYNAMIC_HEX_FILE" 2>/dev/null || true
-        return 1
+    if command -v xxd >/dev/null 2>&1; then
+        xxd -p -c 0 "$file" 2>/dev/null | tr -d '\n' > "$DYNAMIC_HEX_FILE"
+    else
+        # xxd is not guaranteed: toybox only ships it on some ROMs, and a missing
+        # xxd used to make detection fail closed for every unknown build.  od is
+        # always there, and "-v" matters: without it od collapses runs of equal
+        # bytes into "*" and the anchors below would not be found.
+        od -An -v -tx1 "$file" 2>/dev/null | tr -d ' \n' > "$DYNAMIC_HEX_FILE"
     fi
     [ -s "$DYNAMIC_HEX_FILE" ] || {
         rm -f "$DYNAMIC_HEX_FILE" 2>/dev/null || true
@@ -361,8 +380,18 @@ select_build_sites()
                 fi
                 ;;
             legacy)
-                BUILD_CONTRACT=legacy
-                return 0
+                # A recorded legacy verdict only describes the bytes that were
+                # current when it was written, and record_contract() rewrites
+                # contract-source on every attempt.  An OTA that replaces
+                # SurfaceFlinger therefore leaves "legacy" bound to the NEW
+                # hash: trusting it makes the 152-byte block check fail forever
+                # and the filter never gets to relocate itself by signature.
+                # Re-verify the block and fall through to the signature lookup
+                # when it no longer describes this build.
+                if verify_original "$file" 2>/dev/null; then
+                    BUILD_CONTRACT=legacy
+                    return 0
+                fi
                 ;;
         esac
     fi
