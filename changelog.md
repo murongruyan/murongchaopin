@@ -1,5 +1,23 @@
 # 更新日志
 
+## v2.9.47
+
+1. **修复"熄屏后再亮屏要抖两秒才回到超频档，偶尔还卡在 165/175"**（用户 PLK110 反馈）。
+   - 现场（超频 185Hz，人脸/指纹解锁）：118 次亮屏、118 次同一套动作——
+     `Screen ON reapply seeded native anchor: target=7/185Hz anchor=5/165Hz` → 先切 165 → 175 → 185，
+     **3 次真实面板切换 + 约 2 秒 + 6 次 settings put**。其中 2 次锚点校验失败、2 次 `retry pending`，
+     面板停在 165/175，要手动降档再升档才恢复。
+   - 根因：熄屏后 SurfaceFlinger 的 `activeMode` 仍可能报目标档（面板其实已经掉到 fallback），
+     通用重放逻辑分不清"面板没掉"和"面板真掉了"，于是**只要 SF 报目标就无条件先降到原生锚点再爬梯**。
+   - 修复：改成用证据决定——① DisplayManager 的 applied 快照已是目标；② 厂商 ADFR floor
+     （`/sys/kernel/oplus_display/min_fps`）≥ 目标；③ 有可读的实时 TE（`test_te`）时必须一致。
+     三条同时成立才跳过恢复（只补设置镜像，**面板切换 0 次**）；任何一项读不到或不一致，老路径原样待命。
+     RMX5200 自制 LTPO 那条分支未改动。
+   - 校验：`rate_ladder_unit` 新增 8 个判定用例（floor 低于目标 / applied 仍停在锚点 / TE 掉档 /
+     节点读不到 / 目标为 0 …），`check_screen_on_reapply` 增加对应断言；免费与付费 daemon 用 CI
+     同参数编译通过，WSL 下单元测试与相关测试全绿。
+2. 内置 daemon 版本同步至 2.9.47。
+
 ## v2.9.46
 
 1. **修复 RMX5200 在 2K 下切刷新率时整屏闪烁（面板在两个分辨率组之间来回跳）**。
