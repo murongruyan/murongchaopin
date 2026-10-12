@@ -26,7 +26,7 @@
 #define MAX_APPS 200
 #define MAX_PKG_LEN 128
 #define MAX_EXTENSION_RATES 256
-#define RATE_DAEMON_VERSION "2.9.47"
+#define RATE_DAEMON_VERSION "2.9.48"
 #define BOOT_RESOLUTION_SETTLE_TIMEOUT_MS 8000
 #define BOOT_RESOLUTION_SETTLE_SAMPLE_MS 150
 #define BOOT_RESOLUTION_SETTLE_SAMPLES 4
@@ -2704,72 +2704,6 @@ static int write_unsigned_file(const char *path, unsigned int value, int hex) {
                   : fprintf(fp, "%u\n", value)) < 0;
     if (fclose(fp) != 0) failed = 1;
     return !failed;
-}
-
-/* Vendor ADFR floor: the rate the vendor stack itself holds the panel at across
- * DOZE.  The module publishes the user's floor there (maintain_adfr_lock repairs
- * it), so when it already covers the target the panel needs no restore at all. */
-static int vendor_floor_fps(void) {
-    static const char *const paths[] = {
-        "/sys/kernel/oplus_display/min_fps",
-        "/sys/module/rmx5200_adfr_lock/parameters/fixed_min_fps",
-    };
-    unsigned int value;
-    size_t i;
-
-    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
-        if (read_unsigned_file(paths[i], &value) &&
-                value >= 24U && value <= 250U) {
-            return (int)value;
-        }
-    }
-    return -1;
-}
-
-/* Live panel timing where the vendor exposes one.  An unreadable node is
- * "unknown", never "matches": the restore path stays armed in that case. */
-static int vendor_live_te_fps(void) {
-    static const char *const paths[] = {
-        "/sys/kernel/oplus_display/test_te",
-        "/sys/kernel/oplus_display/dynamic_float_te",
-    };
-    unsigned int value;
-    size_t i;
-
-    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
-        if (read_unsigned_file(paths[i], &value) &&
-                value >= 24U && value <= 250U) {
-            return (int)value;
-        }
-    }
-    return -1;
-}
-
-/* The screen-on restore exists for the post-DOZE fallback: SurfaceFlinger keeps
- * reporting the requested extension while the panel can still sit on a stock
- * timing.  Once DisplayManager's applied snapshot already carries the target and
- * the vendor floor is what holds it there, there is nothing to restore -- and
- * re-driving it made every single wake a visible 185 -> 165 -> 175 -> 185 round
- * trip whose anchor raced that floor and sometimes left 165/175 behind (the
- * reported "after face/fingerprint unlock the rate is stuck at 165"). */
-/* Pure form of the screen-on skip rule.  Kept separate from the sampling so the
- * semantics stay unit-testable: the applied snapshot has to carry the target,
- * the vendor floor has to hold it there, and a readable live-TE has to agree --
- * an unreadable node must never turn into a silent "matches". */
-static int screen_on_reapply_rule(int target_fps, int applied_fps,
-                                  int floor_fps, int live_te_fps) {
-    if (target_fps <= 0 || applied_fps != target_fps) return 0;
-    if (floor_fps < target_fps) return 0;
-    return live_te_fps < 0 || live_te_fps == target_fps;
-}
-
-static int screen_on_reapply_satisfied(int target_id, int applied_id) {
-    int target_fps;
-
-    if (!is_valid_mode(target_id) || applied_id != target_id) return 0;
-    target_fps = mode_fps(target_id);
-    return screen_on_reapply_rule(target_fps, target_fps,
-                                  vendor_floor_fps(), vendor_live_te_fps());
 }
 
 static int adfr_lock_requested(const char *base_path) {
@@ -6286,73 +6220,7 @@ int main(int argc, char *argv[]) {
                     } else if (is_valid_mode(target_id) &&
                                (target_id != current_mode_id || force_reapply)) {
                         int completing_screen_on = screen_on_reapply_pending;
-                        int applied_id = completing_screen_on
-                                ? get_current_applied_mode() : -1;
 
-                        if (completing_screen_on &&
-                                screen_on_reapply_satisfied(target_id,
-                                                            applied_id)) {
-                            /* Nothing to restore: publish the mirror only.
-                             * The cached id has to follow the applied one,
-                             * otherwise the next tick sees a mismatch again
-                             * and submits the very ladder we just skipped. */
-                            current_mode_id = target_id;
-                            screen_on_reapply_pending = 0;
-                            force_reapply = 0;
-                            sync_android_settings(target_id);
-                            log_msg("Screen ON reapply skipped: mode=%d/%dHz "
-                                    "applied=%d floor=%dHz", target_id,
-                                    mode_fps(target_id), applied_id,
-                                    vendor_floor_fps());
-                        } else {
-                            smooth_switch(target_id);
-                            if (completing_screen_on) {
-                                int observed_id = get_current_applied_mode();
-
-                                if (screen_on_reapply_transaction_ok &&
-                                        observed_id == target_id) {
-                                    screen_on_reapply_pending = 0;
-                                    force_reapply = 0;
-                                    log_msg("Screen ON generic reapply completed: "
-                                            "mode=%d/%dHz", target_id,
-                                            mode_fps(target_id));
-                                } else {
-                                    force_reapply = 1;
-                                    log_msg("Screen ON generic reapply retry pending: "
-                                            "target=%d/%dHz observed=%d", target_id,
-                                            mode_fps(target_id), observed_id);
-                                }
-                            }
-                        }
-                    }
-                }
-#else
-                if (strcmp(device_model, "RMX5200") == 0 &&
-                        screen_state == 0) {
-                    /* Doze owns panel timing. The OFF/DOZE -> ON path already
-                     * sets force_reapply after display init. */
-                    } else if (is_valid_mode(target_id) &&
-                           (target_id != current_mode_id || force_reapply)) {
-                    int completing_screen_on = screen_on_reapply_pending;
-                    int applied_id = completing_screen_on
-                            ? get_current_applied_mode() : -1;
-
-                    if (completing_screen_on &&
-                            screen_on_reapply_satisfied(target_id,
-                                                        applied_id)) {
-                        /* Nothing to restore: publish the mirror only.
-                         * The cached id has to follow the applied one,
-                         * otherwise the next tick sees a mismatch again and
-                         * submits the very ladder we just skipped. */
-                        current_mode_id = target_id;
-                        screen_on_reapply_pending = 0;
-                        force_reapply = 0;
-                        sync_android_settings(target_id);
-                        log_msg("Screen ON reapply skipped: mode=%d/%dHz "
-                                "applied=%d floor=%dHz", target_id,
-                                mode_fps(target_id), applied_id,
-                                vendor_floor_fps());
-                    } else {
                         smooth_switch(target_id);
                         if (completing_screen_on) {
                             int observed_id = get_current_applied_mode();
@@ -6370,6 +6238,34 @@ int main(int argc, char *argv[]) {
                                         "target=%d/%dHz observed=%d", target_id,
                                         mode_fps(target_id), observed_id);
                             }
+                        }
+                    }
+                }
+#else
+                if (strcmp(device_model, "RMX5200") == 0 &&
+                        screen_state == 0) {
+                    /* Doze owns panel timing. The OFF/DOZE -> ON path already
+                     * sets force_reapply after display init. */
+                    } else if (is_valid_mode(target_id) &&
+                           (target_id != current_mode_id || force_reapply)) {
+                    int completing_screen_on = screen_on_reapply_pending;
+
+                    smooth_switch(target_id);
+                    if (completing_screen_on) {
+                        int observed_id = get_current_applied_mode();
+
+                        if (screen_on_reapply_transaction_ok &&
+                                observed_id == target_id) {
+                            screen_on_reapply_pending = 0;
+                            force_reapply = 0;
+                            log_msg("Screen ON generic reapply completed: "
+                                    "mode=%d/%dHz", target_id,
+                                    mode_fps(target_id));
+                        } else {
+                            force_reapply = 1;
+                            log_msg("Screen ON generic reapply retry pending: "
+                                    "target=%d/%dHz observed=%d", target_id,
+                                    mode_fps(target_id), observed_id);
                         }
                     }
                 }

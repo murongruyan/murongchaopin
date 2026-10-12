@@ -43,23 +43,6 @@ printf '%s\n' "$GENERIC" | grep -q 'Screen ON generic reapply completed'
 printf '%s\n' "$GENERIC" | grep -q 'screen_on_reapply_pending = 0;'
 printf '%s\n' "$GENERIC" | grep -q 'screen_on_reapply_transaction_ok'
 
-# The restore is skipped when DisplayManager already reports the target as
-# applied AND the vendor ADFR floor holds it there: forcing the native anchor
-# made every wake a visible 185 -> 165 -> 175 -> 185 round trip that raced the
-# floor and sometimes left 165/175 behind.  The skip has to stay conditional --
-# an unreadable live-TE node keeps the restore armed, and the anchor path is
-# still reachable for a real post-DOZE fallback.
-printf '%s\n' "$GENERIC" | grep -q 'screen_on_reapply_satisfied'
-printf '%s\n' "$GENERIC" | grep -q 'Screen ON reapply skipped'
-printf '%s\n' "$GENERIC" | grep -q 'vendor_floor_fps()'
-grep -q 'static int vendor_floor_fps(void)' "$SOURCE"
-grep -q 'static int vendor_live_te_fps(void)' "$SOURCE"
-grep -q 'static int screen_on_reapply_rule(int target_fps' "$SOURCE"
-grep -q 'if (floor_fps < target_fps) return 0;' "$SOURCE"
-grep -q 'return live_te_fps < 0 || live_te_fps == target_fps;' "$SOURCE"
-grep -q 'screen_on_reapply_rule(target_fps, target_fps,' "$SOURCE"
-printf '%s\n' "$GENERIC" | grep -q 'if (completing_screen_on &&'
-
 FORCE_REAPPLY=$(sed -n '/if (force_reapply)/,/if (current_mode_id == -1)/p' "$SOURCE")
 printf '%s\n' "$FORCE_REAPPLY" | grep -q 'prepare_screen_on_reapply_anchor'
 if printf '%s\n' "$FORCE_REAPPLY" | grep -q 'apply_mode_transaction(target_id'; then
