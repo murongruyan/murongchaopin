@@ -227,6 +227,39 @@ int main(void) {
         }
     }
 
+    /* Screen-on skip rule: the anchor restore may only be skipped when the
+     * applied snapshot carries the target, the vendor floor holds it there and
+     * a readable live-TE agrees.  Anything unknown must keep it armed. */
+    {
+        static const struct {
+            const char *name;
+            int target, applied, floor, live, expected;
+        } skip_cases[] = {
+            {"floor holds target",      185, 185, 185, 185, 1},
+            {"live te unknown",         185, 185, 185,  -1, 1},
+            {"floor below target",      185, 185, 120, 185, 0},
+            {"applied still anchored",  185, 165, 185, 185, 0},
+            {"live te fell back",       185, 185, 185, 120, 0},
+            {"no vendor floor",         185, 185,  -1, 185, 0},
+            {"live te above target",    185, 185, 185, 195, 0},
+            {"zero target",               0,   0, 185, 185, 0},
+        };
+        size_t i;
+
+        for (i = 0; i < sizeof(skip_cases) / sizeof(skip_cases[0]); i++) {
+            int actual = screen_on_reapply_rule(skip_cases[i].target,
+                                                skip_cases[i].applied,
+                                                skip_cases[i].floor,
+                                                skip_cases[i].live);
+
+            if (actual != skip_cases[i].expected) {
+                fprintf(stderr, "FAIL: screen-on skip %s expected=%d actual=%d\n",
+                        skip_cases[i].name, skip_cases[i].expected, actual);
+                return 1;
+            }
+        }
+    }
+
     puts("PASS: dynamic model-aware refresh ladders stay strictly below ten percent");
     return 0;
 }
