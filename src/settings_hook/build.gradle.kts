@@ -13,7 +13,7 @@ plugins {
 import java.io.File
 import java.util.Properties
 
-val hookVersionCode = 82
+val hookVersionCode = 83
 
 android {
     namespace = "com.murongchaopin.displayhook"
@@ -36,14 +36,14 @@ android {
         create("free") {
             dimension = "tier"
             versionCode = hookVersionCode
-            versionName = "82.0-api102-free-stability"
+            versionName = "83.0-api102-free-stability"
             buildConfigField("boolean", "IS_PREMIUM_BUILD", "false")
         }
         create("premium") {
             dimension = "tier"
             applicationIdSuffix = ".premium"
             versionCode = hookVersionCode
-            versionName = "82.0-api102-paid-display-ui"
+            versionName = "83.0-api102-paid-display-ui"
             buildConfigField("boolean", "IS_PREMIUM_BUILD", "true")
         }
     }

@@ -74,6 +74,7 @@ let dtsBackendBusy = false;
 let adfrPolicyBusy = false;
 let displayPolicyProfile = 'rmx5200';
 let videoMotionEntries = [];
+let videoMotionSupportedRates = [];
 let videoMotionLoadGeneration = 0;
 let gameAssistantEntries = [];
 let gameAssistantFeatureConfig = {};
@@ -152,7 +153,9 @@ function reportGlobalError(kind, detail) {
     globalErrorReportBusy = true;
     const safe = String(text).replace(/[`$\\"]/g, '');
     try {
-        ksuExec(`sh "${MOD_DIR}/scripts/web_handler.sh" log_event webui_error ${shellQuote(new Date().toISOString() + ' ' + safe.slice(0, 400))}`, true)
+        // 保留完整堆栈（旧上限 400 字符常被截断，只剩 "UnhandledRejection ..."，
+        // 用户上报时看不到真正的 ReferenceError 行号）。
+        ksuExec(`sh "${MOD_DIR}/scripts/web_handler.sh" log_event webui_error ${shellQuote(new Date().toISOString() + ' ' + safe.slice(0, 2000))}`, true)
             .catch(() => {})
             .finally(() => { globalErrorReportBusy = false; });
     } catch (error) {
@@ -2723,35 +2726,96 @@ function setVideoListMessage(id, text, className = 'empty-state') {
     list.appendChild(message);
 }
 
-function applyVideoMotionConfig(result) {
+function normalizeVideoMotionRates(list) {
+    return [...new Set((Array.isArray(list) ? list : String(list || '').split(','))
+        .map(item => Number(String(item).trim()))
+        .filter(rate => Number.isInteger(rate) && rate >= 60 && rate <= 1000))]
+        .sort((left, right) => left - right);
+}
+
+// WebUI 侧的兜底档位来源：SurfaceFlinger 当前模式表里与全局默认模式同宽度的档位。
+// 正常路径优先用 web_handler.sh get_video_motion_config 返回的 supported_rates，
+// 它与 daemon 的 mode_for_width_fps 校验同源。
+function videoMotionRatesFromDisplayModes() {
+    if (!displayModes.length) return [];
+    const widths = [...new Set(displayModes.map(mode => Number(mode.width)))];
+    const panelWidth = widths.includes(currentResolutionWidth)
+        ? currentResolutionWidth
+        : (widths.length ? Math.max(...widths) : 0);
+    if (!panelWidth) return [];
+    return normalizeVideoMotionRates(displayModes
+        .filter(mode => Number(mode.width) === panelWidth)
+        .map(mode => Number(mode.fps)));
+}
+
+function currentVideoMotionSupportedRates() {
+    const rates = normalizeVideoMotionRates(videoMotionSupportedRates);
+    return rates.length ? rates : videoMotionRatesFromDisplayModes();
+}
+
+// daemon 只接受当前显示模式表里存在的档位。优先取不超过目标值的最近档，
+// 避免自动把面板推到从未验证过的更高档（例如 165 不在表内时选 155 而不是 170）。
+function nearestVideoMotionRate(target, rates) {
+    const numericTarget = Number(target);
+    const candidates = normalizeVideoMotionRates(rates);
+    if (!Number.isFinite(numericTarget) || numericTarget <= 0 || !candidates.length) return null;
+    let lower = null;
+    let upper = null;
+    candidates.forEach(rate => {
+        if (rate <= numericTarget && (lower === null || rate > lower)) lower = rate;
+        if (rate > numericTarget && (upper === null || rate < upper)) upper = rate;
+    });
+    return lower !== null ? lower : upper;
+}
+
+async function applyVideoMotionConfig(result) {
     const values = parseKeyValueOutput(result);
     const target = Number(values.target || 0);
-    const rates = Array.from(new Set(displayModes
-        .filter(mode => mode.width === currentResolutionWidth)
-        .map(mode => mode.fps)))
-        .filter(rate => Number.isInteger(rate) && rate >= 60)
-        .sort((left, right) => left - right);
+    let supported = normalizeVideoMotionRates(values.supported_rates);
+    if (!supported.length) {
+        // 旧版 web_handler 不返回 supported_rates 时退回本地模式表；视频页
+        // 可能还没加载过 displayModes，这里补一次快照（失败不阻塞页面）。
+        if (!displayModes.length) {
+            try {
+                await ensureDisplayModesLoaded();
+            } catch (error) {
+                debugLog(`Video motion display modes load failed: ${error.message}`);
+            }
+        }
+        supported = videoMotionRatesFromDisplayModes();
+    }
+    videoMotionSupportedRates = supported;
+    const targetSupported = target === 0 || !supported.length || supported.includes(target);
     const select = document.getElementById('video-motion-target');
     if (select) {
         select.innerHTML = '';
-        [0, ...rates].forEach(rate => {
+        if (!targetSupported) {
+            // 已保存但当前不存在的档位（例如删掉 KO 档位后遗留的 165）只作为
+            // 不可选的提示项展示，不再提供为可选目标，避免用户再次保存它。
+            const stale = document.createElement('option');
+            stale.value = String(target);
+            stale.disabled = true;
+            stale.selected = true;
+            stale.innerText = `${videoMotionTargetLabel(target)}（当前不受支持）`;
+            select.appendChild(stale);
+        }
+        [0, ...supported].forEach(rate => {
             const option = document.createElement('option');
             option.value = String(rate);
             option.innerText = videoMotionTargetLabel(rate);
             select.appendChild(option);
         });
-        if (![0, ...rates].includes(target)) {
-            const option = document.createElement('option');
-            option.value = String(target);
-            option.innerText = videoMotionTargetLabel(target);
-            select.appendChild(option);
-        }
-        select.value = String(target);
+        if (targetSupported) select.value = String(target);
+        else select.selectedIndex = 0; // 保留“当前不受支持”的提示项作为初始显示
     }
-    const status = values.status || 'unknown';
-    if (status.startsWith('error:')) setVideoMotionStatus('配置错误', 'error');
-    else if (status.startsWith('applied:')) setVideoMotionStatus('已挂载', 'success');
-    else setVideoMotionStatus('已启用', 'success');
+    if (!targetSupported) {
+        setVideoMotionStatus('目标不受支持', 'error');
+    } else {
+        const status = values.status || 'unknown';
+        if (status.startsWith('error:')) setVideoMotionStatus('配置错误', 'error');
+        else if (status.startsWith('applied:')) setVideoMotionStatus('已挂载', 'success');
+        else setVideoMotionStatus('已启用', 'success');
+    }
     refreshVideoMotionTargetDetail();
 }
 
@@ -2778,7 +2842,7 @@ async function loadVideoMotionConfig() {
             );
             if (!videoMotionLoadCurrent(generation)) return;
             if (!result || result.startsWith('Error:')) throw new Error(result || '配置无响应');
-            applyVideoMotionConfig(result);
+            await applyVideoMotionConfig(result);
         } catch (error) {
             if (!videoMotionLoadCurrent(generation)) return;
             setVideoMotionStatus('读取失败', 'error');
@@ -3018,13 +3082,37 @@ function refreshVideoMotionTargetDetail() {
     const detail = document.getElementById('video-motion-target-detail');
     if (!select || !detail) return;
     const target = Number(select.value);
-    if (target === 0) {
-        detail.innerText = '播放时读取 mode.txt 第一行，退出后安全恢复同一用户模式。';
-    } else if (nativeMemcRates.has(target)) {
-        detail.innerText = `${target}Hz 使用 Pixelworks/R1 对应输出路径。`;
-    } else {
-        detail.innerText = `${target}Hz 使用 R1 扩展输出路径；以真机帧率记录为准。`;
+    const supported = currentVideoMotionSupportedRates();
+    detail.innerHTML = '';
+    if (target !== 0 && supported.length && !supported.includes(target)) {
+        const nearest = nearestVideoMotionRate(target, supported);
+        const notice = document.createElement('div');
+        notice.className = 'notice notice-warning';
+        notice.innerText = `当前保存的目标 ${target}Hz 不在本机可用显示档位（${supported.join(' / ')}Hz）内，`
+            + '视频插帧临时模式会被守护进程拒绝。';
+        detail.appendChild(notice);
+        if (nearest !== null) {
+            const fix = document.createElement('button');
+            fix.type = 'button';
+            fix.className = 'btn btn-sm btn-warning';
+            fix.style.marginTop = '8px';
+            fix.innerText = `一键改到最近支持档 ${nearest}Hz 并保存`;
+            fix.onclick = () => { void saveVideoMotionTarget(nearest); };
+            detail.appendChild(fix);
+        }
+        return;
     }
+    const text = document.createElement('div');
+    text.className = 'text-hint';
+    if (target === 0) {
+        text.innerText = '播放时读取 mode.txt 第一行，退出后安全恢复同一用户模式。';
+    } else if (nativeMemcRates.has(target)) {
+        text.innerText = `${target}Hz 使用 Pixelworks/R1 对应输出路径。`;
+    } else {
+        text.innerText = `${target}Hz 使用 R1 扩展输出路径；以真机帧率记录为准。`;
+    }
+    if (supported.length) text.innerText += ` 当前可用档位：${supported.join(' / ')}Hz。`;
+    detail.appendChild(text);
 }
 
 async function loadVideoMotionApps() {
@@ -3173,11 +3261,31 @@ async function saveVideoMotionApp() {
     showToast('应用已保存，重启后加载');
 }
 
-async function saveVideoMotionTarget() {
+async function saveVideoMotionTarget(targetOverride) {
     if (!isPremium()) { openAuthPanel(); return; }
     const select = document.getElementById('video-motion-target');
-    if (!select) return;
-    const target = Number(select.value);
+    // onclick 绑定会传入 MouseEvent：只有 number/数字字符串才算显式覆盖值，
+    // 其余（事件对象、undefined）一律读取当前下拉选择。
+    const explicit = (typeof targetOverride === 'number')
+        || (typeof targetOverride === 'string' && targetOverride.trim() !== '');
+    const override = explicit ? Number(targetOverride) : NaN;
+    let target = Number.isFinite(override) ? override : Number(select ? select.value : 0);
+    if (!Number.isFinite(target) || target < 0) {
+        showToast('请选择有效的目标档位');
+        return;
+    }
+    const supported = currentVideoMotionSupportedRates();
+    if (target !== 0 && supported.length && !supported.includes(target)) {
+        const nearest = nearestVideoMotionRate(target, supported);
+        if (nearest === null) {
+            showToast('当前没有可用的视频插帧目标档位');
+            return;
+        }
+        showToast(`目标 ${target}Hz 当前不受支持，已自动改为 ${nearest}Hz`);
+        target = nearest;
+        if (select) select.value = String(nearest);
+        refreshVideoMotionTargetDetail();
+    }
     const scriptPath = `${MOD_DIR}/scripts/web_handler.sh`;
     const result = await ksuExec(`sh "${scriptPath}" set_video_motion_target ${target}`);
     if (result.includes('Success:')) {
@@ -3954,21 +4062,47 @@ function renderNodeRow(listEl, rate) {
 
 // 添加节点：统一弹窗
 async function openAddRateDialog() {
-    if (currentDtsBackend === 'drm') {
-        const baseOptions = [{ value: '0', label: '自动选择基准 timing' }];
-        [...new Set(displayModes
-            .filter(mode => mode.width === effectiveWidth() && [60, 90, 120, 144].includes(Number(mode.fps)))
-            .map(mode => Number(mode.fps)))]
-            .sort((a, b) => a - b)
-            .forEach(rate => baseOptions.push({ value: String(rate), label: `${rate}Hz 原生 timing` }));
-        const values = await showForm('添加 DRM 刷新率', '运行时复制选定的原生 timing，并可覆盖链路时钟和 MDP 传输时间。', [
-            { id: 'base', label: '基准 timing', type: 'select', options: baseOptions, value: '0' },
-            { id: 'fps', label: '目标刷新率 (Hz)', type: 'number', placeholder: '例如: 165', required: true },
-            { id: 'clock', label: '时钟频率 (Hz, 可选)', type: 'number', placeholder: '自动计算' },
-            { id: 'transfer', label: '传输时间 (us, 可选)', type: 'number', placeholder: '自动计算' }
-        ], { okLabel: '添加' });
-        if (!values) return;
-        await addRate(values.base, values.fps, values.clock || '', values.transfer || '');
+    // 任何异常都必须让用户看到反馈：async onclick 里抛错只会变成
+    // unhandledrejection，按钮看起来"完全没有反应"（bug5 的现场表现）。
+    try {
+        if (currentDtsBackend === 'drm') {
+            // displayModes 只在"刷新率"页加载过才有数据，超频页直接点添加时
+            // 它还是空数组。这里按需补一次快照，只影响"基准 timing"的候选，
+            // 加载失败也不阻塞弹窗（仍可用自动基准）。
+            if (!displayModes.length) {
+                showToast('正在读取显示模式…');
+                try {
+                    await ensureDisplayModesLoaded();
+                } catch (error) {
+                    debugLog(`[AddRate] display modes unavailable: ${error && error.message ? error.message : error}`);
+                }
+            }
+            // 面板当前宽度以 currentResolutionWidth 为准（openAppConfigDialog 里
+            // 的同名局部函数 effectiveWidth 不在此作用域，旧代码因此抛
+            // ReferenceError: effectiveWidth is not defined）。
+            const baseWidth = displayModes.some(mode => mode.width === currentResolutionWidth)
+                ? currentResolutionWidth
+                : (availableResolutionWidths()[0] || currentResolutionWidth);
+            const baseOptions = [{ value: '0', label: '自动选择基准 timing' }];
+            [...new Set(displayModes
+                .filter(mode => mode.width === baseWidth && [60, 90, 120, 144].includes(Number(mode.fps)))
+                .map(mode => Number(mode.fps)))]
+                .sort((a, b) => a - b)
+                .forEach(rate => baseOptions.push({ value: String(rate), label: `${rate}Hz 原生 timing` }));
+            const values = await showForm('添加 DRM 刷新率', '运行时复制选定的原生 timing，并可覆盖链路时钟和 MDP 传输时间。', [
+                { id: 'base', label: '基准 timing', type: 'select', options: baseOptions, value: '0' },
+                { id: 'fps', label: '目标刷新率 (Hz)', type: 'number', placeholder: '例如: 165', required: true },
+                { id: 'clock', label: '时钟频率 (Hz, 可选)', type: 'number', placeholder: '自动计算' },
+                { id: 'transfer', label: '传输时间 (us, 可选)', type: 'number', placeholder: '自动计算' }
+            ], { okLabel: '添加' });
+            if (!values) return;
+            await addRate(values.base, values.fps, values.clock || '', values.transfer || '');
+            return;
+        }
+    } catch (error) {
+        debugLog(`[AddRate] open dialog failed: ${error && error.stack ? error.stack : error}`);
+        await showConfirm('打开添加弹窗失败', String(error && error.message ? error.message : error),
+            { okLabel: '知道了', single: true }).catch(() => {});
         return;
     }
 

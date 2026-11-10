@@ -10,6 +10,7 @@ PREMIUM_SERVICE="$MODDIR/premium/scripts/premium_service.sh"
 LTPS_VOTE_HELPER="$MODDIR/scripts/surfaceflinger_ltps_vote_patch.sh"
 RAPID_RATE_HELPER="$MODDIR/scripts/display_rapid_rate.sh"
 SCENE_RATE_HELPER="$MODDIR/scripts/scene_rate_config.sh"
+AUTH_RENEW_HELPER="$MODDIR/scripts/display_auth_renew.sh"
 DISPLAY_HOOK_PACKAGE="com.murongchaopin.displayhook"
 
 # The free and premium daemons share OTI pause ownership through this private
@@ -31,16 +32,38 @@ if [ -f "$RAPID_RATE_HELPER" ]; then
     sh "$RAPID_RATE_HELPER" apply >/dev/null 2>&1 || true
 fi
 
-# Scene keeps its own refresh-rate switch; it defaults to off, which leaves
-# the panel empty even though the modes are published by the display backend.
-if [ -f "$SCENE_RATE_HELPER" ]; then
-    sh "$SCENE_RATE_HELPER" apply >/dev/null 2>&1 || true
-fi
-
 # 等待系统启动完成
 until [ "$(getprop sys.boot_completed)" = "1" ]; do
     sleep 1
 done
+
+# Scene keeps its own refresh-rate switch; it defaults to off, which leaves
+# the panel empty even though the modes are published by the display backend.
+# The service stage runs before the user unlocks /data, so the old direct call
+# recorded "skipped:scene_not_installed" forever. Retry in the background until
+# Scene's private files directory exists (first unlock) or give up after 10 min.
+if [ -f "$SCENE_RATE_HELPER" ]; then
+    (
+        scene_wait=0
+        while [ "$scene_wait" -lt 120 ]; do
+            sh "$SCENE_RATE_HELPER" apply >/dev/null 2>&1 || true
+            case "$(sed -n '1p' "$MODDIR/runtime/scene_rate_config/status.txt" 2>/dev/null)" in
+                applied:*|kept:*) exit 0 ;;
+            esac
+            scene_wait=$((scene_wait + 1))
+            sleep 5
+        done
+    ) &
+fi
+
+# Headless renewal of the login token and the paid display lease. The WebUI
+# used to be the only place that renewed them, so a user who never opened it
+# silently lost the 7-day token and the 3-day lease, then had to log in again.
+# The helper is single-instance and waits for the network on its own, so a
+# duplicate start from premium_service.sh is a no-op.
+if [ -f "$AUTH_RENEW_HELPER" ]; then
+    setsid sh "$AUTH_RENEW_HELPER" --loop >/dev/null 2>&1 &
+fi
 
 # 开机自保护：系统启动完成、再观察一段时间确认没有在服务阶段崩掉之后，才把
 # 本次 boot_id 记为"已走完"。post-fs-data 下次会拿它和上次的 boot_id 比对，

@@ -3,6 +3,7 @@ package com.murongchaopin.displayhook;
 import android.util.SparseArray;
 import android.view.Display;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
 /** Keeps Framework's selected resolution group aligned without forcing a rate. */
@@ -120,14 +121,76 @@ final class FrameworkPhysicalEnvelopeHooks {
         }
     }
 
-    private static Display.Mode[] appSupportedModes(Object director, int displayId)
-            throws ReflectiveOperationException {
-        Object value = Reflect.getField(director, "mAppSupportedModesByDisplay");
+    /**
+     * Resolve the per-display mode table across Android releases.
+     *
+     * <p>Android 17 (ColorOS 17) removed {@code mAppSupportedModesByDisplay}
+     * from DisplayModeDirector and keeps only {@code mSupportedModesByDisplay}.
+     * Reading the old field unconditionally threw NoSuchFieldException on every
+     * desired-mode-specs change (field log: 203 errors), and the envelope
+     * alignment never ran. Try the legacy name, then the current one, then
+     * locate the table by shape so a further rename cannot disable the feature.
+     */
+    private static Display.Mode[] appSupportedModes(Object director, int displayId) {
+        Display.Mode[] legacy = modesFromMap(
+                fieldValue(director, "mAppSupportedModesByDisplay"), displayId, false);
+        if (legacy != null) {
+            return legacy;
+        }
+        Display.Mode[] current = modesFromMap(
+                fieldValue(director, "mSupportedModesByDisplay"), displayId, false);
+        if (current != null) {
+            return current;
+        }
+        // Locate the table by shape instead of by name: the SparseArray field
+        // whose entry for this display holds a non-empty Display.Mode[].
+        for (Class<?> type = director.getClass(); type != null; type = type.getSuperclass()) {
+            for (Field field : type.getDeclaredFields()) {
+                if (!SparseArray.class.isAssignableFrom(field.getType())) {
+                    continue;
+                }
+                Display.Mode[] modes = modesFromMap(readField(field, director),
+                        displayId, true);
+                if (modes != null) {
+                    return modes;
+                }
+            }
+        }
+        return null;
+    }
+
+    /* A miss must not raise on the display-mode-specs hot path. */
+    private static Object fieldValue(Object owner, String name) {
+        try {
+            return Reflect.getField(owner, name);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static Object readField(Field field, Object owner) {
+        try {
+            field.setAccessible(true);
+            return field.get(owner);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static Display.Mode[] modesFromMap(Object value, int displayId,
+                                               boolean requireNonEmpty) {
         if (!(value instanceof SparseArray<?>)) {
             return null;
         }
         Object modes = ((SparseArray<?>) value).get(displayId);
-        return modes instanceof Display.Mode[] ? (Display.Mode[]) modes : null;
+        if (!(modes instanceof Display.Mode[])) {
+            return null;
+        }
+        Display.Mode[] array = (Display.Mode[]) modes;
+        if (requireNonEmpty && array.length == 0) {
+            return null;
+        }
+        return array;
     }
 
     private static Geometry preferredGeometry(Object director, int displayId,
@@ -217,12 +280,30 @@ final class FrameworkPhysicalEnvelopeHooks {
     private static boolean isScreenOn() {
         try {
             Method reader = screenStateReader;
-            Object value = reader == null ? null : reader.invoke(null,
-                    "debug.tracing.screen_state", 0);
-            return value instanceof Number && ((Number) value).intValue() == 2;
+            if (reader != null) {
+                Object value = reader.invoke(null, "debug.tracing.screen_state", -1);
+                if (value instanceof Number) {
+                    int state = ((Number) value).intValue();
+                    if (state == 2) {
+                        return true;
+                    }
+                    if (state == 0 || state == 1) {
+                        return false;
+                    }
+                }
+            }
         } catch (Throwable ignored) {
-            return false;
+            /* fall through */
         }
+        /*
+         * ColorOS 17 does not publish debug.tracing.screen_state at all (the
+         * property reads empty), so the probe above cannot decide. Returning
+         * false here used to disable the whole envelope alignment silently and
+         * permanently. The adjustment itself is a cheap idempotent comparison
+         * that is re-evaluated whenever the specs change, so allow it instead
+         * of disabling the feature.
+         */
+        return true;
     }
 
     private static String systemProperty(String key, String fallback) {

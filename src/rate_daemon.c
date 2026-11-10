@@ -26,7 +26,7 @@
 #define MAX_APPS 200
 #define MAX_PKG_LEN 128
 #define MAX_EXTENSION_RATES 256
-#define RATE_DAEMON_VERSION "2.9.48"
+#define RATE_DAEMON_VERSION "2.9.49"
 #define BOOT_RESOLUTION_SETTLE_TIMEOUT_MS 8000
 #define BOOT_RESOLUTION_SETTLE_SAMPLE_MS 150
 #define BOOT_RESOLUTION_SETTLE_SAMPLES 4
@@ -206,6 +206,15 @@ static long long video_exit_defer_until_ms = -1;
  * as soon as the surface disappears). The deadline is only a failsafe so a
  * stuck probe can never lock the display at the video rate forever. */
 #define VIDEO_EXIT_DEFER_GRACE_MS 120000
+/* A user-visible rate change must not wait for the 120s failsafe. When any
+ * user mode change (daemon bridge write or a mode.txt reload) lands while the
+ * defer is active and a video surface still keeps it alive, shorten the
+ * remaining wait to this bound; the surface protection is kept, only the
+ * failsafe is trimmed. */
+#define VIDEO_EXIT_DEFER_USER_GRACE_MS 10000
+#define VIDEO_EXIT_DEFER_USER_CHANGE_WINDOW_MS 60000
+static long long user_mode_change_ms = 0;
+static int video_exit_defer_user_override_logged = 0;
 static int video_iris_esd_saved_ctrl = -1;
 static int video_iris_esd_restore_pending = 0;
 static long long video_iris_esd_restore_requested_ms = 0;
@@ -1911,6 +1920,7 @@ static int clear_video_override(const char *base_path) {
     video_override_vendor_owned = 0;
     video_exit_defer_active = 0;
     video_exit_defer_until_ms = -1;
+    video_exit_defer_user_override_logged = 0;
     if (!video_exit_pending) video_override_mode_id = -1;
     return 1;
 }
@@ -1963,6 +1973,50 @@ static int start_video_vendor_hold(const char *base_path) {
     return 1;
 }
 
+/* A video MEMC output rate can come from a persisted WebUI setting or a
+ * vendor table that no longer matches this daemon's mode list (for example
+ * 165Hz on a table that only exposes 120/123/144/155/170). Rejecting the whole
+ * video session leaves MEMC silently inert, so resolve the request to the
+ * nearest rate inside the target geometry instead: prefer the closest rate at
+ * or above the request, then the closest below. Exact requests keep the
+ * existing mode_for_resolution_fps behaviour. */
+static int mode_for_video_near_fps(int width, int height, int fps,
+                                   int *fallback_used) {
+    int exact;
+    int above_id = -1;
+    int above_fps = 0;
+    int below_id = -1;
+    int below_fps = 0;
+
+    if (fallback_used) *fallback_used = 0;
+    if (width <= 0 || height <= 0 || fps < 30) return -1;
+    exact = mode_for_resolution_fps(width, height, fps);
+    if (exact >= 0) return exact;
+    for (int i = 0; i < mode_count; i++) {
+        if (modes[i].width != width || modes[i].height != height) continue;
+        if (modes[i].fps > fps) {
+            if (above_id < 0 || modes[i].fps < above_fps) {
+                above_id = modes[i].id;
+                above_fps = modes[i].fps;
+            }
+        } else if (modes[i].fps < fps) {
+            if (below_id < 0 || modes[i].fps > below_fps) {
+                below_id = modes[i].id;
+                below_fps = modes[i].fps;
+            }
+        }
+    }
+    if (above_id >= 0) {
+        if (fallback_used) *fallback_used = 1;
+        return above_id;
+    }
+    if (below_id >= 0) {
+        if (fallback_used) *fallback_used = 1;
+        return below_id;
+    }
+    return -1;
+}
+
 static int start_video_override(const char *base_path, int follow, int fps) {
     int previous_active = video_override_active;
     int previous_follow = video_override_follow;
@@ -1971,6 +2025,7 @@ static int start_video_override(const char *base_path, int follow, int fps) {
     int previous_vendor_owned = video_override_vendor_owned;
     int target_id;
     int width;
+    int height;
     int screen_state;
 
     if (!premium_video_memc_enabled()) {
@@ -1981,7 +2036,28 @@ static int start_video_override(const char *base_path, int follow, int fps) {
      * resolution used by a fixed output rate. This read never rewrites it. */
     load_config(base_path);
     width = get_mode_width(default_mode_id);
+    height = mode_height(default_mode_id);
     target_id = follow ? default_mode_id : mode_for_width_fps(width, fps);
+    if (!follow && !is_valid_mode(target_id) && width > 0 && height > 0) {
+        /* A stale WebUI target or a vendor table change must not turn the
+         * video session into a silent rejection: nearest supported rate. */
+        int fallback_used = 0;
+        int nearest = mode_for_video_near_fps(width, height, fps,
+                                              &fallback_used);
+        if (fallback_used && is_valid_mode(nearest)) {
+            log_msg("Video temporary mode target %dHz is not in the mode "
+                    "table; falling back to nearest %dHz mode=%d geometry=%dx%d",
+                    fps, mode_fps(nearest), nearest, width, height);
+            target_id = nearest;
+            /* Keep the resolved rate in video_override_fps: the main loop
+             * re-resolves the session through resolve_video_override_mode()
+             * every tick, and storing the unsupported request there would make
+             * it invalidate/restart the whole session each cycle (observed as
+             * "Video temporary mode became invalid; restoring mode.txt"
+             * alternating with "started" while a video plays). */
+            fps = mode_fps(nearest);
+        }
+    }
     if (!is_valid_mode(target_id) || width <= 0) {
         log_msg("Video temporary mode rejected: follow=%d fps=%d default=%d",
                 follow, fps, default_mode_id);
@@ -2086,6 +2162,7 @@ static int stop_video_override(const char *base_path, const char *reason) {
         get_foreground_app(defer_pkg, sizeof(defer_pkg));
         if (rmx5200_video_surface_probe(defer_pkg)) {
             video_exit_defer_active = 1;
+            video_exit_defer_user_override_logged = 0;
             video_exit_defer_until_ms = monotonic_ms()
                     + VIDEO_EXIT_DEFER_GRACE_MS;
             log_msg("Video temporary mode exit deferred: surface active "
@@ -4753,6 +4830,8 @@ static int mode_for_current_resolution_fps(int fps) {
 static int write_app_config(const char *base_path, const char *package_name,
                             int mode_id) {
     char config_path[512];
+
+    user_mode_change_ms = monotonic_ms();
     char temporary_path[560];
     FILE *fp;
     int failed = 0;
@@ -4790,6 +4869,8 @@ static int write_app_config(const char *base_path, const char *package_name,
 
 static int write_global_config(const char *base_path, int mode_id) {
     char config_path[512];
+
+    user_mode_change_ms = monotonic_ms();
     char temporary_path[560];
     FILE *fp;
     int failed = 0;
@@ -4823,6 +4904,8 @@ static int write_global_config(const char *base_path, int mode_id) {
 static int write_resolution_config(const char *base_path, int mode_id,
                                    int target_width) {
     char config_path[512];
+
+    user_mode_change_ms = monotonic_ms();
     char temporary_path[560];
     FILE *fp;
     int failed = 0;
@@ -5437,6 +5520,18 @@ static void handle_display_hook_client(int server_fd, const char *base_path) {
         } else {
             dprintf(client_fd, "ERR frontapp\n");
         }
+    } else if (strcmp(trim(request), "GETFRONT") == 0) {
+        /* The Scene popup asks which package is in front so its 基础/性能 pages
+         * can target the current app. Answer from the system_server hook's
+         * FRONTAPP push only: running a window dump here would hold
+         * WindowManagerGlobalLock and stall this loop on every popup open. */
+        if (pushed_foreground_pkg[0] != '\0' &&
+                monotonic_ms() - pushed_foreground_ms < FOREGROUND_PUSH_FRESH_MS &&
+                valid_package_name(pushed_foreground_pkg)) {
+            dprintf(client_fd, "FRONT %s\n", pushed_foreground_pkg);
+        } else {
+            dprintf(client_fd, "ERR nofront\n");
+        }
     } else if (strcmp(trim(request), "VIDEOSTART VENDOR") == 0) {
 #ifndef MURONG_FREE_BUILD
         if (start_video_vendor_hold(base_path)) {
@@ -5914,6 +6009,10 @@ int main(int argc, char *argv[]) {
             log_msg("Config change settled / 配置写入完成，重新加载");
             load_extension_rates(base_path);
             load_config(base_path);
+            /* A user/WebUI write that the daemon did not originate: remember
+             * when it happened so an active video-exit defer can be bounded
+             * instead of holding the new rate for up to two minutes. */
+            user_mode_change_ms = monotonic_ms();
             config_dirty = 0;
         }
 
@@ -6027,11 +6126,36 @@ int main(int argc, char *argv[]) {
 
                 if (video_exit_defer_active) {
                     char defer_pkg[MAX_PKG_LEN] = "";
+                    int surface_active;
                     get_foreground_app(defer_pkg, sizeof(defer_pkg));
-                    if (!rmx5200_video_surface_probe(defer_pkg) ||
+                    surface_active = rmx5200_video_surface_probe(defer_pkg);
+                    /* A user's explicit rate change must not wait for the
+                     * 120s failsafe. If a video SurfaceView still keeps the
+                     * defer alive but the user changed the mode recently,
+                     * trim the remaining wait to a bounded window. The probe
+                     * branch below still restores immediately when the
+                     * surface has really gone. */
+                    if (surface_active &&
+                            !video_exit_defer_user_override_logged &&
+                            user_mode_change_ms > 0 &&
+                            monotonic_ms() - user_mode_change_ms <=
+                                VIDEO_EXIT_DEFER_USER_CHANGE_WINDOW_MS &&
+                            video_exit_defer_until_ms >
+                                monotonic_ms() +
+                                    VIDEO_EXIT_DEFER_USER_GRACE_MS) {
+                        video_exit_defer_until_ms = monotonic_ms()
+                                + VIDEO_EXIT_DEFER_USER_GRACE_MS;
+                        video_exit_defer_user_override_logged = 1;
+                        log_msg("User mode change overrides video exit defer: "
+                                "deadline shortened to %dms "
+                                "(surface still active)",
+                                VIDEO_EXIT_DEFER_USER_GRACE_MS);
+                    }
+                    if (!surface_active ||
                             monotonic_ms() >= video_exit_defer_until_ms) {
                         video_exit_defer_active = 0;
                         video_exit_defer_until_ms = -1;
+                        video_exit_defer_user_override_logged = 0;
                         log_msg("Video temporary mode defer expired; "
                                 "restoring mode.txt");
                         clear_video_override(base_path);

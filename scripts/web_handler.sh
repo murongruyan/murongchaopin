@@ -451,6 +451,36 @@ canonical_global_spec() {
     mode_semantic_for_resolution "$1" "$2"
 }
 
+# 当前 daemon 能接受的视频插帧目标档位：与 daemon 的
+# resolve_video_override_mode() 保持一致 —— 目标必须是「全局默认模式宽度」下
+# 真实存在的 HWC 档位（rate_daemon.c 用 mode_for_width_fps(width_of_default_mode,
+# fps) 校验，不存在就 "Video temporary mode rejected"）。0=跟随用户选择，不在列表里。
+video_supported_rates() {
+    VIDEO_GLOBAL_SPEC=$(canonical_global_spec 2>/dev/null) || return 0
+    VIDEO_GLOBAL_WIDTH=${VIDEO_GLOBAL_SPEC%%x*}
+    case "$VIDEO_GLOBAL_WIDTH" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    dumpsys SurfaceFlinger 2>/dev/null | awk -v width="$VIDEO_GLOBAL_WIDTH" '
+        /vsyncRate=/ {
+            if (match($0, /resolution=[0-9][0-9]*x/)) {
+                line_width = substr($0, RSTART + 11, RLENGTH - 12) + 0
+            } else if (match($0, /width=[0-9][0-9]*/)) {
+                line_width = substr($0, RSTART + 6, RLENGTH - 6) + 0
+            } else {
+                next
+            }
+            if (line_width != width) next
+            if (!match($0, /vsyncRate=[0-9][0-9]*(\.[0-9]+)?/)) next
+            fps = substr($0, RSTART + 10, RLENGTH - 10) + 0
+            fps = int(fps + 0.5)
+            if (fps >= 60 && !(fps in seen)) {
+                seen[fps] = 1
+                print fps
+            }
+        }' | sort -n | tr '\n' ',' | sed 's/,$//'
+}
+
 canonical_app_line() {
     APP_LINE=$(printf '%s\n' "$1" | tr -d '\r')
     APP_LINE=$(printf '%s\n' "$APP_LINE" | sed 's/=/ /')
@@ -1796,7 +1826,20 @@ case "$1" in
         require_premium video_memc
         VIDEO_TARGET=$(settings get secure "$VIDEO_MOTION_TARGET_KEY" 2>/dev/null)
         case "$VIDEO_TARGET" in ''|null|*[!0-9]*) VIDEO_TARGET=0 ;; esac
+        # 目标档位必须是当前显示模式表里真实存在的档位（daemon 会按
+        # mode_for_width_fps 校验，不存在就拒绝视频临时模式）。supported_rates
+        # 为空表示模式表暂时读不到，调用方应保留原值、不做强制收敛。
+        VIDEO_SUPPORTED=$(video_supported_rates)
         echo "target=$VIDEO_TARGET"
+        [ -n "$VIDEO_SUPPORTED" ] && echo "supported_rates=$VIDEO_SUPPORTED"
+        if [ -n "$VIDEO_SUPPORTED" ] && [ "$VIDEO_TARGET" != 0 ]; then
+            case ",$VIDEO_SUPPORTED," in
+                *",$VIDEO_TARGET,"*) echo "target_supported=1" ;;
+                *) echo "target_supported=0" ;;
+            esac
+        else
+            echo "target_supported=1"
+        fi
         case "$VIDEO_TARGET" in
             60|90|120|144) echo "native_memc=1" ;;
             *) echo "native_memc=0" ;;
@@ -1820,6 +1863,20 @@ case "$1" in
                     echo "Error: video target must be 30-1000Hz"
                     exit 1
                 }
+                # 与 daemon 的 resolve_video_override_mode() 对齐：目标档位必须
+                # 在全局默认模式宽度下真实存在，否则守护进程会拒绝视频临时模式
+                # （"Video temporary mode rejected"）。前端已按同一规则收敛选项，
+                # 这里作为旧页面/直接调用的兜底校验。
+                VIDEO_SUPPORTED=$(video_supported_rates)
+                if [ -n "$VIDEO_SUPPORTED" ]; then
+                    case ",$VIDEO_SUPPORTED," in
+                        *",$VIDEO_TARGET,"*) ;;
+                        *)
+                            echo "Error: video target ${VIDEO_TARGET}Hz is not in the current display rate list (${VIDEO_SUPPORTED}Hz)"
+                            exit 1
+                            ;;
+                    esac
+                fi
                 ;;
         esac
         settings put secure "$VIDEO_MOTION_TARGET_KEY" "$VIDEO_TARGET" || exit 1
@@ -2547,14 +2604,30 @@ case "$1" in
         ;;
 
     "log_event")
-        # WebUI å¨å±éè¯¯ä¸æ¥ï¼æé¡µé¢ JS ççå®æ¥éåè¿
-        # daemon.logï¼ç¨æ·éè¿æ¥å¿é¡µå°±è½çå°å·ä½åå ã
-        EVENT_TEXT="$2"
+        # WebUI 全局错误上报：把页面 JS 的真实报错写进 daemon.log，用户通过
+        # 日志页就能看到具体原因。历史调用格式是
+        #   log_event <kind> <detail>
+        # 旧实现只把 $2（kind）写进日志，真正的错误/堆栈在 $3 之后，等于把
+        # 现场吞掉；这里记录 $2 及其后的全部参数，同时保留旧调用格式。
+        EVENT_KIND="${2:-}"
+        EVENT_TEXT=""
+        if [ $# -gt 2 ]; then
+            shift 2
+            EVENT_TEXT="$*"
+        fi
+        case "$EVENT_KIND" in
+            *[\`$]*) EVENT_KIND="$(printf '%s' "$EVENT_KIND" | tr -d '`$')" ;;
+        esac
         case "$EVENT_TEXT" in
             *[\`$]*) EVENT_TEXT="$(printf '%s' "$EVENT_TEXT" | tr -d '`$')" ;;
         esac
-        printf '[%s] [WebUI] %s
-' "$(date '+%m-%d %H:%M:%S')" "$EVENT_TEXT" >> "$MOD_PATH/daemon.log" 2>/dev/null
+        EVENT_TEXT="$(printf '%s' "$EVENT_TEXT" | cut -c1-4000)"
+        if [ -n "$EVENT_TEXT" ]; then
+            EVENT_LINE="$EVENT_KIND $EVENT_TEXT"
+        else
+            EVENT_LINE="$EVENT_KIND"
+        fi
+        printf '[%s] [WebUI] %s\n' "$(date '+%m-%d %H:%M:%S')" "$EVENT_LINE" >> "$MOD_PATH/daemon.log" 2>/dev/null
         echo "Success: event logged"
         ;;
 

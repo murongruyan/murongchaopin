@@ -197,6 +197,7 @@ for USER_STATE_PATH in \
   config/mode.txt \
   config/custom_refresh_rates.txt \
   config/game_assistant_apps.txt \
+  config/game_assistant_features.txt \
   config/video_memc_apps.txt \
   config/drm_phy_profile.txt \
   config/rmx5200_adfr_mode.txt \
