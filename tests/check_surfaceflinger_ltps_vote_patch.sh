@@ -298,21 +298,83 @@ if [ -f "$TMPDIR_TEST/dynamic-site-entry.bak" ]; then
     cp "$TMPDIR_TEST/dynamic-site-entry.bak" "$STALE_STATE/dynamic-site-entry"
 fi
 
+# Same rule for a recorded *table* verdict.  This is the state that produced
+# rejected:source_contract_12 on the first boot after the 2026-11 OTA: the
+# cache still pointed at the previous build's site offsets, the helper trusted
+# it, and the new SurfaceFlinger stayed unpatched (resolution-group flips) until
+# a second reboot.  The recorded sites must be re-verified against the current
+# bytes, then relocated by signature when they belong to the old build.
+mkdir -p "$ROOT/bin" "$STALE_STATE"
+cp "$STALE_STATE/contract" "$TMPDIR_TEST/contract.bak" 2>/dev/null || true
+cp "$STALE_STATE/contract-source" "$TMPDIR_TEST/contract-source.bak" 2>/dev/null || true
+cp "$STALE_STATE/dynamic-site-entry" "$TMPDIR_TEST/dynamic-site-entry.bak" 2>/dev/null || true
+dd if=/dev/zero of="$STALE_SOURCE" bs=1 count=0 seek="$SITES_SIZE" >/dev/null 2>&1
+write_bytes "$STALE_SOURCE" 1000 '\0327\0016\0105\0370\0010\0001\0100\0371\0351\0315\0215\0122'
+write_bytes "$STALE_SOURCE" 1012 '\0021\0042\0063\0224'
+write_bytes "$STALE_SOURCE" 1016 '\0006\0360\0014\0224'
+write_bytes "$STALE_SOURCE" 2000 '\0150\0042\0100\0371\0010\0321\0126\0371\0010\0211\0105\0071\0037\0005\0000\0161'
+write_bytes "$STALE_SOURCE" 2016 '\0101\0002\0000\0124'
+printf 'table\n' > "$STALE_STATE/contract"
+printf 'c3b8273f211536783ba48229e4ea70314b0c979e3774ea3a2f5fc80b3836e2a9\n' > "$STALE_STATE/contract-source"
+STALE_TABLE_OUTPUT="$TMPDIR_TEST/stale-table.bin"
+sh "$HELPER" test-patch "$MODEL" "$POLICY" "$STALE_SOURCE" "$STALE_TABLE_OUTPUT"
+[ "$(od -An -tx1 -j 1016 -N 4 "$STALE_TABLE_OUTPUT" | tr -d '[:space:]')" = 1f2003d5 ] || {
+    echo 'FAIL: stale table record blocked the animation site' >&2
+    exit 1
+}
+[ "$(od -An -tx1 -j 2016 -N 4 "$STALE_TABLE_OUTPUT" | tr -d '[:space:]')" = 12000014 ] || {
+    echo 'FAIL: stale table record blocked the AP-scale site' >&2
+    exit 1
+}
+[ "$(sed -n '1p' "$STALE_STATE/contract")" = table ] || {
+    echo 'FAIL: stale table relocation did not record the table contract' >&2
+    exit 1
+}
+[ "$(sed -n '1p' "$STALE_STATE/contract-source")" = \
+    "$(sha256sum "$STALE_SOURCE" | awk '{ print $1 }')" ] || {
+    echo 'FAIL: stale table relocation did not record the current source hash' >&2
+    exit 1
+}
+rm -f "$STALE_SOURCE" "$STALE_STATE/dynamic-site-entry"
+if [ -f "$TMPDIR_TEST/contract.bak" ]; then
+    cp "$TMPDIR_TEST/contract.bak" "$STALE_STATE/contract"
+fi
+if [ -f "$TMPDIR_TEST/contract-source.bak" ]; then
+    cp "$TMPDIR_TEST/contract-source.bak" "$STALE_STATE/contract-source"
+fi
+if [ -f "$TMPDIR_TEST/dynamic-site-entry.bak" ]; then
+    cp "$TMPDIR_TEST/dynamic-site-entry.bak" "$STALE_STATE/dynamic-site-entry"
+fi
+
 # Optional: feed a real installed SurfaceFlinger through the selector when one
 # is supplied.  The current ColorOS 17 OTA has moved both sites again, and its
 # hash is deliberately treated as a cache hint rather than a gate.  The second
 # invocation mutates an unrelated byte, so the unknown-hash path must locate
 # the same two instructions from their surrounding code.
 if [ -n "${MURONG_RMX5200_SF:-}" ] && [ -r "$MURONG_RMX5200_SF" ]; then
+    cp "$STALE_STATE/contract" "$TMPDIR_TEST/contract-real.bak" 2>/dev/null || true
+    cp "$STALE_STATE/contract-source" "$TMPDIR_TEST/contract-source-real.bak" 2>/dev/null || true
+    cp "$STALE_STATE/dynamic-site-entry" "$TMPDIR_TEST/dynamic-site-entry-real.bak" 2>/dev/null || true
     # Defaults describe the OTA whose sites are already in BUILD_SITE_TABLE.
     # Other builds pass theirs, e.g. the RMX5200 ColorOS 17 2026-10-05 OTA
     # (sha256 c3b8273f...) with 3153312 / 3652644.
     CURRENT_ANIMATION_OFFSET=${MURONG_RMX5200_SF_ANIMATION_OFFSET:-3152940}
     CURRENT_AP_SCALE_OFFSET=${MURONG_RMX5200_SF_AP_SCALE_OFFSET:-3652276}
+    # The forced-branch encoding keeps the original b.cond target: OTA builds
+    # legitimately move the guarded block, so derive the expected word from the
+    # branch we are replacing instead of hard-coding one OTA's distance.
+    CURRENT_AP_WORD=$(od -An -tu4 -j "$CURRENT_AP_SCALE_OFFSET" -N 4 "$MURONG_RMX5200_SF" | tr -d '[:space:]')
+    CURRENT_AP_IMM=$(( (CURRENT_AP_WORD >> 5) & 0x7ffff ))
+    CURRENT_AP_PATCHED=$(( 0x14000000 | CURRENT_AP_IMM ))
+    CURRENT_AP_PATCHED_HEX=$(printf '%02x%02x%02x%02x' \
+        $(( CURRENT_AP_PATCHED & 0xff )) \
+        $(( (CURRENT_AP_PATCHED >> 8) & 0xff )) \
+        $(( (CURRENT_AP_PATCHED >> 16) & 0xff )) \
+        $(( (CURRENT_AP_PATCHED >> 24) & 0xff )))
     sh "$HELPER" test-patch "$MODEL" "$POLICY" "$MURONG_RMX5200_SF" \
         "$TMPDIR_TEST/real-sf.bin"
     [ "$(od -An -tx1 -j "$CURRENT_ANIMATION_OFFSET" -N 4 "$TMPDIR_TEST/real-sf.bin" | tr -d '[:space:]')" = 1f2003d5 ]
-    [ "$(od -An -tx1 -j "$CURRENT_AP_SCALE_OFFSET" -N 4 "$TMPDIR_TEST/real-sf.bin" | tr -d '[:space:]')" = 12000014 ]
+    [ "$(od -An -tx1 -j "$CURRENT_AP_SCALE_OFFSET" -N 4 "$TMPDIR_TEST/real-sf.bin" | tr -d '[:space:]')" = "$CURRENT_AP_PATCHED_HEX" ]
     [ "$(wc -c < "$TMPDIR_TEST/real-sf.bin" | tr -d '[:space:]')" = \
         "$(wc -c < "$MURONG_RMX5200_SF" | tr -d '[:space:]')" ]
 
@@ -322,9 +384,19 @@ if [ -n "${MURONG_RMX5200_SF:-}" ] && [ -r "$MURONG_RMX5200_SF" ]; then
     sh "$HELPER" test-patch "$MODEL" "$POLICY" "$UNKNOWN_SF" \
         "$TMPDIR_TEST/real-sf-unknown.out"
     [ "$(od -An -tx1 -j "$CURRENT_ANIMATION_OFFSET" -N 4 "$TMPDIR_TEST/real-sf-unknown.out" | tr -d '[:space:]')" = 1f2003d5 ]
-    [ "$(od -An -tx1 -j "$CURRENT_AP_SCALE_OFFSET" -N 4 "$TMPDIR_TEST/real-sf-unknown.out" | tr -d '[:space:]')" = 12000014 ]
+    [ "$(od -An -tx1 -j "$CURRENT_AP_SCALE_OFFSET" -N 4 "$TMPDIR_TEST/real-sf-unknown.out" | tr -d '[:space:]')" = "$CURRENT_AP_PATCHED_HEX" ]
     [ "$(wc -c < "$TMPDIR_TEST/real-sf-unknown.out" | tr -d '[:space:]')" = \
         "$(wc -c < "$MURONG_RMX5200_SF" | tr -d '[:space:]')" ]
+    rm -f "$STALE_STATE/dynamic-site-entry"
+    if [ -f "$TMPDIR_TEST/contract-real.bak" ]; then
+        cp "$TMPDIR_TEST/contract-real.bak" "$STALE_STATE/contract"
+    fi
+    if [ -f "$TMPDIR_TEST/contract-source-real.bak" ]; then
+        cp "$TMPDIR_TEST/contract-source-real.bak" "$STALE_STATE/contract-source"
+    fi
+    if [ -f "$TMPDIR_TEST/dynamic-site-entry-real.bak" ]; then
+        cp "$TMPDIR_TEST/dynamic-site-entry-real.bak" "$STALE_STATE/dynamic-site-entry"
+    fi
 fi
 
 sh -n "$HELPER"

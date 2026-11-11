@@ -375,8 +375,27 @@ select_build_sites()
         case "$recorded" in
             table)
                 if load_site_entry "$recorded_sha" || load_dynamic_entry "$recorded_sha"; then
-                    BUILD_CONTRACT=table
-                    return 0
+                    # The recorded table only describes the build it was
+                    # generated from.  An OTA that replaces SurfaceFlinger
+                    # leaves contract=table pointing at the previous build's
+                    # offsets; returning those stale sites made the first boot
+                    # after the update fail as rejected:source_contract_12 and
+                    # kept the unpatched, resolution-group-flipping
+                    # SurfaceFlinger mounted until a second reboot.  Verify the
+                    # sites against the current bytes first and fall through to
+                    # the signature lookup when they belong to the old build.
+                    if verify_table_original "$file" 2>/dev/null ||
+                            verify_table_patched "$file" 2>/dev/null; then
+                        BUILD_CONTRACT=table
+                        return 0
+                    fi
+                    SITE_ANIMATION_OFFSET=
+                    SITE_ANIMATION_ORIGINAL_HEX=
+                    SITE_AP_SCALE_OFFSET=
+                    SITE_AP_SCALE_ORIGINAL_HEX=
+                    SITE_AP_SCALE_PATCHED_HEX=
+                    SITE_TYPE_GUARD_OFFSET=
+                    SITE_TYPE_GUARD_ORIGINAL_HEX=
                 fi
                 ;;
             legacy)
