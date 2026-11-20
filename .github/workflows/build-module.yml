@@ -281,6 +281,7 @@ jobs:
             tests/check_ko_abi_guard.sh \
             tests/check_binary_fingerprint.sh \
             tests/check_ko_abi_guard_roundtrip.sh \
+            tests/check_premium_boot_staging_cleanup.sh \
             tests/check_module_update_preservation.sh; do
             sh -n "$script"
           done
@@ -309,6 +310,7 @@ jobs:
           sh tests/check_install_tool_permissions.sh
           sh tests/check_volume_key_parser.sh
           sh tests/check_module_update_preservation.sh
+          sh tests/check_premium_boot_staging_cleanup.sh
           sh tests/check_surfaceflinger_ltps_vote_patch.sh
           sh tests/check_premium_script_line_endings.sh
           sh tests/check_package_kernel_compat.sh

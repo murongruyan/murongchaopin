@@ -7,6 +7,12 @@ GATE_HELPER="$MODDIR/scripts/display_license_gate.sh"
 PREMIUM_POST_FS="$MODDIR/premium/scripts/premium_post_fs_data.sh"
 LTPS_VOTE_HELPER="$MODDIR/scripts/surfaceflinger_ltps_vote_patch.sh"
 
+# Mountify collects the base module's system tree after this stage. If private
+# dispatch is skipped, remove only the SO staged there by the paid MEMC helper.
+cleanup_staged_premium_memc() {
+    rm -f "$MODDIR/system/odm/lib64/libpwirisservicei7p.so" 2>/dev/null || true
+}
+
 # ── 开机自保护（防砖）─────────────────────────────────────────────────
 # 内核模块注入发生在 post-fs-data；Ace6 这类内核是 PANIC_ON_OOPS + 无自动重启
 # 超时，KO 一旦崩就是永久 panic（表现为"刷入后不开机"）。机制：本阶段记下本次
@@ -105,7 +111,10 @@ fi
 # The retired live-OF sidecar path is intentionally disabled because it can
 # block boot before the vendor consumer has initialized.
 
-[ -f "$DISPLAY_HELPER" ] || exit 0
+[ -f "$DISPLAY_HELPER" ] || {
+    cleanup_staged_premium_memc
+    exit 0
+}
 
 
 # Pure-test switch.  When this marker exists the boot still runs the whole
@@ -143,13 +152,18 @@ if [ -f "$RAPID_RATE_HELPER" ]; then
     sh "$RAPID_RATE_HELPER" apply >/dev/null 2>&1 || true
 fi
 
-if [ -f "$PREMIUM_POST_FS" ]; then
-    . "$GATE_HELPER" 2>/dev/null
+if [ "$SKIP_KERNEL_MODULES" != "1" ] && [ -f "$PREMIUM_POST_FS" ] && \
+        [ -f "$GATE_HELPER" ] && . "$GATE_HELPER" 2>/dev/null && \
+        command -v gate_json_field >/dev/null 2>&1; then
     gate_normalize_premium_scripts >/dev/null 2>&1 || true
     REMOVE_PREMIUM=$(gate_json_field "$GATE_STATE_FILE" remove_premium)
-    if [ "$REMOVE_PREMIUM" != "1" ] && [ "$SKIP_KERNEL_MODULES" != "1" ]; then
+    if [ "$REMOVE_PREMIUM" != "1" ]; then
         sh "$PREMIUM_POST_FS" >/dev/null 2>&1 || true
+    else
+        cleanup_staged_premium_memc
     fi
+else
+    cleanup_staged_premium_memc
 fi
 
 # ColourOS 17 gates its QSync/idle refresh-rate path behind these vendor
