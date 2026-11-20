@@ -445,6 +445,7 @@ jobs:
             "libsdmclient.rmx5200.ltpo-timeline.so"
             "ltpo.ko"
             "hmbird.ko"
+            "rate_daemon.*"
             "*_probe.ko"
             "*qhd144*"
             "*_test"
@@ -456,6 +457,7 @@ jobs:
           premium_script_names=(
             "adfr_lock.sh"
             "generic_adfr_policy.sh"
+            "geometry_density.sh"
             "surfaceflinger_vote_patch.sh"
             "surfaceflinger_ltpo_rise_patch.sh"
             "libsdmclient_timeline_patch.sh"
@@ -493,7 +495,8 @@ jobs:
             rmx5200_ltpo_modes.ko rmx5200_adfr_lock.ko ltpo.ko \
             'libpwirisservice*.so' '*_adfr_lock.ko' surfaceflinger.rmx5200.ltpo-rise \
             libpwiris_memc_gate_patch.sh rmx5200_ltpo_experiment.sh adfr_lock.sh \
-            surfaceflinger_vote_patch.sh iris_page_i7p.json multimedia_pixelworks_apps.xml; do
+            surfaceflinger_vote_patch.sh geometry_density.sh 'rate_daemon.*' \
+            iris_page_i7p.json multimedia_pixelworks_apps.xml; do
             if find "$STAGE_DIR" -name "$probe" -print -quit 2>/dev/null | grep -q .; then
               echo "Private runtime component leaked into public module: $probe" >&2
               leak_failures=$((leak_failures + 1))
@@ -581,6 +584,10 @@ jobs:
 
           echo "zip_path=$ZIP_PATH" >> "$GITHUB_OUTPUT"
           echo "checksum_path=$CHECKSUM_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Audit assembled public module ZIP
+        shell: pwsh
+        run: ./tests/audit_free_zip.ps1 -ZipPath '${{ steps.package.outputs.zip_path }}'
 
       - name: Upload build artifact
         if: steps.release_meta.outputs.is_release != 'true'
