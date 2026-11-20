@@ -203,6 +203,13 @@ jobs:
               -o "$OUT_DIR/$source" \
               "src/$source.c"
           done
+          test -s "$OUT_DIR/process_dts"
+          PROCESS_DTS_SOURCE_SHA="$(sed 's/\r$//' src/process_dts.c | sha256sum | cut -d' ' -f1)"
+          printf '%s  process_dts.c\n' "$PROCESS_DTS_SOURCE_SHA" > "$OUT_DIR/process_dts.src.sha256"
+          # Fingerprint checks must inspect this run's tool rather than the
+          # convenience copy committed by a previous local build.
+          install -m 0755 "$OUT_DIR/process_dts" bin/process_dts
+          install -m 0644 "$OUT_DIR/process_dts.src.sha256" bin/process_dts.src.sha256
 
           # The free daemon is built here instead of being taken from the
           # committed bin/rate_daemon copy: that copy silently shipped a stale
@@ -297,6 +304,8 @@ jobs:
           sh tests/check_backend_dispatch.sh
           sh tests/check_dtbo_apply_lock.sh
           sh tests/check_mode_index_integrity.sh
+          sh tests/check_process_dts_device_models.sh
+          pwsh -NoProfile -File tests/check_process_dts_package_guard.ps1
           sh tests/check_install_tool_permissions.sh
           sh tests/check_volume_key_parser.sh
           sh tests/check_module_update_preservation.sh
@@ -431,7 +440,8 @@ jobs:
             "surfaceflinger.rmx5200.ltpo-rise"
             "rmx5200_adfr_lock.ko"
             "pjd110_adfr_lock.ko"
-            "libpwirisservicei7p.rmx5200.memc-gate.so"
+            "libpwirisservice*.so"
+            "*_adfr_lock.ko"
             "libsdmclient.rmx5200.ltpo-timeline.so"
             "ltpo.ko"
             "hmbird.ko"
@@ -481,7 +491,7 @@ jobs:
           leak_failures=0
           for probe in \
             rmx5200_ltpo_modes.ko rmx5200_adfr_lock.ko ltpo.ko \
-            libpwirisservicei7p.rmx5200.memc-gate.so surfaceflinger.rmx5200.ltpo-rise \
+            'libpwirisservice*.so' '*_adfr_lock.ko' surfaceflinger.rmx5200.ltpo-rise \
             libpwiris_memc_gate_patch.sh rmx5200_ltpo_experiment.sh adfr_lock.sh \
             surfaceflinger_vote_patch.sh iris_page_i7p.json multimedia_pixelworks_apps.xml; do
             if find "$STAGE_DIR" -name "$probe" -print -quit 2>/dev/null | grep -q .; then
@@ -513,6 +523,7 @@ jobs:
           fi
 
           install -m 0755 build/bin/process_dts "$STAGE_DIR/bin/process_dts"
+          install -m 0644 build/bin/process_dts.src.sha256 "$STAGE_DIR/bin/process_dts.src.sha256"
           install -m 0755 build/bin/dts_tool "$STAGE_DIR/bin/dts_tool"
           install -m 0755 build/bin/pack_dtbo "$STAGE_DIR/bin/pack_dtbo"
           install -m 0755 build/bin/unpack_dtbo "$STAGE_DIR/bin/unpack_dtbo"

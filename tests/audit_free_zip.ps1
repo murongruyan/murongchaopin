@@ -8,25 +8,67 @@ Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 if (-not $ZipPath) {
-    $latest = Get-ChildItem (Join-Path $Repo "work\murongchaopin-free-*.zip") |
+    $latest = Get-ChildItem -LiteralPath (Join-Path $Repo "work") -File `
+        -Filter "Murong.Display.Enhancement-v*.zip" |
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
     if (-not $latest) {
-        throw "No free package found below work/."
+        throw "No public module ZIP found below work/."
     }
     $ZipPath = $latest.FullName
 }
 
-$ZipPath = (Resolve-Path $ZipPath).Path
-$manifestPath = Join-Path $Repo "packaging\feature-components.json"
-$manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
-$allowedPublicPolicyFiles = @("config/rmx5200_adfr_mode.txt")
+$ZipPath = (Resolve-Path -LiteralPath $ZipPath).Path
+# Keep the public archive audit independent of the private component manifest.
+# These are runtime paths excluded by packaging/build_module_zip.ps1, including
+# native library variants added by later firmware adaptations.
 $privatePaths = @(
-    $manifest.categories |
-        Where-Object { -not $_.public_package -and $_.id -ne "split_required" } |
-        ForEach-Object { $_.components.path } |
-        Where-Object { $_ -notin $allowedPublicPolicyFiles }
+    "bin/rmx5200_ltpo_modes.ko",
+    "bin/rmx5200_ltpo_activity.ko",
+    "bin/surfaceflinger.rmx5200.ltpo-oti",
+    "bin/surfaceflinger.rmx5200.ltpo-rise",
+    "scripts/rmx5200_ltpo_experiment.sh",
+    "scripts/rmx5200_ltpo_activity.sh",
+    "scripts/surfaceflinger_vote_patch.sh",
+    "scripts/surfaceflinger_ltpo_rise_patch.sh",
+    "config/rmx5200_ltpo_modes.sha256",
+    "config/rmx5200_ltpo_activity.sha256",
+    "scripts/adfr_lock.sh",
+    "scripts/generic_adfr_policy.sh",
+    "scripts/geometry_density.sh",
+    "config/rmx5200_adfr_profile.txt",
+    "config/rmx5200_adfr_commands.dtsi",
+    "scripts/libpwiris_memc_gate_patch.sh",
+    "config/coloros/multimedia_pixelworks_apps.xml",
+    "config/iris_page_i7p.stock.sha256",
+    "system/odm/etc/iris_page_i7p.json",
+    "bin/ltpo.ko",
+    "bin/hmbird.ko",
+    "bin/libsdmclient.rmx5200.ltpo-timeline.so",
+    "scripts/rmx5200_native_adfr.sh",
+    "scripts/libsdmclient_timeline_patch.sh",
+    "config/ltpo.ko.sha256"
 )
+$privatePatterns = @(
+    "premium/*",
+    "packaging/*",
+    "src/*",
+    "hooks/*",
+    "bin/libpwirisservice*.so",
+    "system/*/libpwirisservice*.so",
+    "bin/*_adfr_lock.ko",
+    "bin/rate_daemon_premium*",
+    "bin/display_premium_hook.apk*",
+    "bin/*.device"
+)
+
+function Test-PrivatePath([string]$Path) {
+    if ($Path -in $privatePaths) { return $true }
+    foreach ($pattern in $privatePatterns) {
+        if ($Path -like $pattern) { return $true }
+    }
+    return $false
+}
 
 function Get-EntryBytes([System.IO.Compression.ZipArchiveEntry]$Entry) {
     $stream = $Entry.Open()
@@ -50,6 +92,8 @@ try {
     $entries = @($archive.Entries | ForEach-Object { $_.FullName })
     $requiredFreePaths = @(
         "post-fs-data.sh",
+        "bin/process_dts",
+        "bin/process_dts.src.sha256",
         "bin/rmx5200_drm_modes.ko",
         "bin/plk110_drm_modes.ko",
         "bin/pjd110_drm_modes.ko",
@@ -67,17 +111,14 @@ try {
     }
     $pathLeaks = @(
         $entries | Where-Object {
-            $_ -in $privatePaths -or
-            $_ -like "premium/*" -or
-            $_ -like "packaging/*" -or
-            $_ -like "src/*"
+            Test-PrivatePath $_
         }
     )
     $researchLeaks = @(
         $entries | Where-Object {
             $_ -like "bin/*probe*.ko" -or
             $_ -like "bin/*qhd144*.ko" -or
-            $_ -like "bin/process_dts.*" -or
+            ($_ -like "bin/process_dts.*" -and $_ -ne "bin/process_dts.src.sha256") -or
             $_ -like "bin/rate_daemon.*"
         }
     )

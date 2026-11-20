@@ -1,5 +1,6 @@
 @echo off
 setlocal EnableExtensions
+cd /d "%~dp0" || exit /b 1
 set "USER_NDK_ROOT=%NDK_ROOT%"
 set "FOUND_NDK_ROOT="
 if defined ANDROID_NDK_ROOT (
@@ -42,43 +43,74 @@ set "FLAGS=--target=aarch64-linux-android29 --sysroot=%SYSROOT% -Wall -O3 -fPIE 
 echo.
 echo Building process_dts...
 "%CLANG%" %FLAGS% -o ..\bin\process_dts process_dts.c
+if not "%errorlevel%"=="0" (
+    echo process_dts Build FAILED!
+    exit /b 1
+)
 if exist ..\bin\process_dts (
     echo process_dts Built Successfully!
 ) else (
     echo process_dts Build FAILED!
+    exit /b 1
+)
+powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $hash = & '..\fingerprint_daemon_src.ps1' -Path 'process_dts.c'; if ($hash -notmatch '^[a-f0-9]{64}$') { throw 'Invalid source fingerprint' }; Set-Content -LiteralPath '..\bin\process_dts.src.sha256' -Value ($hash + '  process_dts.c') -Encoding Ascii"
+if not "%errorlevel%"=="0" (
+    echo process_dts source fingerprint FAILED!
+    exit /b 1
 )
 
 echo Building dts_tool...
 "%CLANG%" %FLAGS% -o ..\bin\dts_tool dts_tool.c
+if not "%errorlevel%"=="0" (
+    echo dts_tool Build FAILED!
+    exit /b 1
+)
 if exist ..\bin\dts_tool (
     echo dts_tool Built Successfully!
 ) else (
     echo dts_tool Build FAILED!
+    exit /b 1
 )
 
 echo.
 echo Building pack_dtbo...
 "%CLANG%" %FLAGS% -o ..\bin\pack_dtbo pack_dtbo.c
+if not "%errorlevel%"=="0" (
+    echo pack_dtbo Build FAILED!
+    exit /b 1
+)
 if exist ..\bin\pack_dtbo (
     echo pack_dtbo Built Successfully!
 ) else (
     echo pack_dtbo Build FAILED!
+    exit /b 1
 )
 
 echo.
 echo Building unpack_dtbo...
 "%CLANG%" %FLAGS% -o ..\bin\unpack_dtbo unpack_dtbo.c
+if not "%errorlevel%"=="0" (
+    echo unpack_dtbo Build FAILED!
+    exit /b 1
+)
 if exist ..\bin\unpack_dtbo (
     echo unpack_dtbo Built Successfully!
 ) else (
     echo unpack_dtbo Build FAILED!
+    exit /b 1
 )
 
 echo.
 echo Building rate_daemon...
 "%CLANG%" %FLAGS% -o ..\bin\rate_daemon rate_daemon.c
+if not "%errorlevel%"=="0" (
+    echo rate_daemon Build FAILED!
+    exit /b 1
+)
 if exist ..\bin\rate_daemon (
     echo rate_daemon Built Successfully!
 ) else (
     echo rate_daemon Build FAILED!
+    exit /b 1
 )
+exit /b 0

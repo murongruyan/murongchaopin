@@ -60,6 +60,7 @@ bin/libsdmclient.rmx5200.ltpo-timeline.so
 bin/*probe*.ko
 bin/*qhd144*.ko
 bin/process_dts.*
+!bin/process_dts.src.sha256
 bin/rate_daemon.*
 # ...except the source fingerprint that build_daemon.bat writes; it is the
 # only thing that proves the checked-in daemon matches src/rate_daemon.c.

@@ -10,6 +10,34 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
+# Refuse stale local build products before touching staging. The installer can
+# accept a model that an older process_dts binary does not understand.
+$processDts = Join-Path $Repo "bin/process_dts"
+$processDtsFingerprint = "$processDts.src.sha256"
+$processDtsSource = Join-Path $Repo "src/process_dts.c"
+foreach ($requiredProcessDtsFile in @($processDts, $processDtsFingerprint, $processDtsSource)) {
+    if (-not (Test-Path -LiteralPath $requiredProcessDtsFile -PathType Leaf) -or
+        (Get-Item -LiteralPath $requiredProcessDtsFile).Length -le 0) {
+        throw "PUBLIC MODULE ASSERTION FAILED - missing non-empty process_dts build input: $requiredProcessDtsFile; rebuild with src/build.bat"
+    }
+}
+$recordedProcessDtsHash = ((Get-Content -LiteralPath $processDtsFingerprint -Raw).Trim() -split '\s+')[0]
+if ($recordedProcessDtsHash -notmatch '^[0-9a-fA-F]{64}$') {
+    throw "PUBLIC MODULE ASSERTION FAILED - malformed process_dts source fingerprint; rebuild with src/build.bat"
+}
+# Match fingerprint_daemon_src.ps1 and Linux CI despite Windows CRLF checkout.
+$processDtsSourceText = [System.IO.File]::ReadAllText($processDtsSource).Replace("`r`n", "`n")
+$sha = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $digest = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($processDtsSourceText))
+} finally {
+    $sha.Dispose()
+}
+$actualProcessDtsHash = ($digest | ForEach-Object { $_.ToString('x2') }) -join ''
+if ($recordedProcessDtsHash -ne $actualProcessDtsHash) {
+    throw "PUBLIC MODULE ASSERTION FAILED - process_dts was built from an older src/process_dts.c; rebuild with src/build.bat"
+}
+
 $work = Join-Path $Repo "work"
 $staging = Join-Path $work "module-staging"
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -58,6 +86,8 @@ $exactExcludes = @(
 )
 
 $globExcludes = @(
+    "bin/libpwirisservice*.so",             # all firmware-specific paid MEMC payloads
+    "bin/*_adfr_lock.ko",                   # all paid ADFR model variants
     "bin/*probe*.ko",                       # research probes
     "bin/*qhd144*.ko",                      # rejected QHD144 experiments
     "bin/*.device",
@@ -66,6 +96,7 @@ $globExcludes = @(
 )
 
 function Test-Excluded([string]$rel) {
+    if ($rel -eq "bin/process_dts.src.sha256") { return $false }
     foreach ($e in $exactExcludes) { if ($rel -eq $e) { return $true } }
     foreach ($g in $globExcludes) { if ($rel -like $g) { return $true } }
     return $false
