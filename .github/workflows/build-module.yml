@@ -542,12 +542,10 @@ jobs:
           install -m 0755 build/bin/ko_abi_guard "$STAGE_DIR/bin/ko_abi_guard"
           test -x "$STAGE_DIR/bin/ko_abi_guard"
           strings "$STAGE_DIR/bin/ko_abi_guard" | grep -Fq 'KO_ABI_CHECK'
-          if [ "${{ steps.release_meta.outputs.is_release }}" = 'true' ]; then
-            MODULE_VERSION="$(sed -n 's/^version=//p' "$STAGE_DIR/module.prop")"
-            if [ "$PACKAGED_DAEMON_VERSION" != "$MODULE_VERSION" ]; then
-              echo "Packaged daemon $PACKAGED_DAEMON_VERSION does not match module.prop $MODULE_VERSION" >&2
-              exit 1
-            fi
+          MODULE_VERSION="$(sed -n 's/^version=//p' "$STAGE_DIR/module.prop")"
+          if [ "$PACKAGED_DAEMON_VERSION" != "$MODULE_VERSION" ]; then
+            echo "Packaged daemon $PACKAGED_DAEMON_VERSION does not match module.prop $MODULE_VERSION" >&2
+            exit 1
           fi
 
           chmod 0755 \
